@@ -1,0 +1,1 @@
+{ "name": "VPN", "description": "VPN panel", "specialType": "vpn", "simulate": { "module": "vpn-panel.js", "function": "initVpnPanel", "sandbox": "<div class=\"dash-vpn\"></div>" } }

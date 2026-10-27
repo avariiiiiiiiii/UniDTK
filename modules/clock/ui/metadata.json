@@ -1,0 +1,1 @@
+{ "name": "Clock", "description": "Nothing Dot Clock", "type": "special", "specialType": "clock", "simulate": { "module": "widget.js", "function": "renderClock", "sandbox": "<div class=\"widget-header\"></div><div class=\"widget-body\"></div>" } }

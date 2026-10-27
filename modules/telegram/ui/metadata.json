@@ -1,0 +1,10 @@
+{
+  "name": "Telegram",
+  "description": "Docked chat widget",
+  "specialType": "telegram",
+  "simulate": {
+    "module": "widget.js",
+    "function": "renderTelegramWidget",
+    "sandbox": "<div class=\"widget-header\"></div><div class=\"widget-body\"></div>"
+  }
+}

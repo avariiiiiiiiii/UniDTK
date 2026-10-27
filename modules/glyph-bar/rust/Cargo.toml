@@ -1,0 +1,28 @@
+[package]
+name = "unidtk-mod-glyph-bar"
+version = "0.1.0"
+edition = "2021"
+description = "Glyph Bar vertical slice (system endpoint volume via WASAPI)"
+
+# Vertical slice for the `glyph-bar` module: the Rust half drives the Windows
+# master volume and publishes it, the `ui/` half renders the LED strip. Talks to
+# the kernel strictly through `unidtk-api`: no dependency on the kernel crate,
+# none on other modules.
+
+[lib]
+name = "unidtk_mod_glyph_bar"
+path = "glyph_bar.rs"
+
+[dependencies]
+unidtk-api = { path = "../../../core/api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_Media_Audio_Endpoints",
+  "Win32_System_Com"
+]

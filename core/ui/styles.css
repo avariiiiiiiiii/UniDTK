@@ -1,0 +1,1102 @@
+@font-face {
+  font-family: 'Geist';
+  src: local('Geist'),
+       url('assets/fonts/Geist/Geist[wght].woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Ndot';
+  src: url('assets/fonts/Ndot 55/Ndot 55.ttf') format('truetype');
+}
+
+:root {
+  /* Typography Tokens */
+  --font-base: 'Geist', sans-serif;
+  --font-accent: 'Ndot', monospace;
+  --font-mono: 'Consolas', monospace;
+  /* Canon Easings (architecture.md §7, unicoremodmotion.md §2) */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-expo: cubic-bezier(0.30, 0.95, 0.35, 1.00);
+  --ease-expo-out: cubic-bezier(0.30, 0.95, 0.35, 1.00);
+  --ease-expo-out-rev: cubic-bezier(0.38, 0.05, 0.45, 1.00);
+  --ease-snap: cubic-bezier(0.18, 1.04, 0.22, 1);
+  --ease-content: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-smooth: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-surface-exit: cubic-bezier(0.38, 0.05, 0.45, 1.00);
+  --ease-item-in: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Canon Elevation & Surface Tokens */
+  --z-surface-base: 100;
+  --z-surface-panel: 250;
+  --z-surface-overlay: 2000;
+  --z-surface-modal: 3000;
+  --z-surface-menu: 4000;
+  --z-surface-toast: 5000;
+
+  /* Canon Durations */
+  --dur-scale: 1.0;
+  --dur-hover: 120ms;
+  --dur-transient: 220ms;
+  --dur-motion: 300ms;
+  --dur-layout: 340ms;
+
+  /* Theme System Tokens (theme.js) — primitives.
+     The static values below MUST equal the Nothing Classic preset in
+     theme.js: they are the first-paint fallbacks before JS applies the
+     persisted theme (FOUC invariant). Derived values live in the
+     "Derived Theme Tokens" block below. */
+  --theme-accent: #d71921;
+  --theme-accent-rgb: 215, 25, 33;
+  --theme-bg-base: 15, 18, 30;
+  --theme-glass-opacity: 0.78;
+  --fg-rgb: 255, 255, 255;
+  --bg-elev-rgb: 255, 255, 255;
+  --scrim-rgb: 0, 0, 0;
+  --bg-surface-rgb: 18, 18, 24;
+  --bg-surface-deep-rgb: 12, 12, 16;
+  --status-ok: #34c759;
+  --status-ok-rgb: 52, 199, 89;
+  --status-warn: #ffd60a;
+  --status-warn-rgb: 255, 214, 10;
+  --status-error: #ff3b30;
+  --status-error-rgb: 255, 59, 48;
+  --status-info: #0a84ff;
+  --status-info-rgb: 10, 132, 255;
+  --theme-blur-strength: 16px;
+  --theme-radius-card: 16px;
+  --theme-radius-surface: 24px;
+  --theme-glass-rim: 0;
+  --theme-glass-sheen: 0;
+  --theme-glass-shadow: 0;
+  --theme-card-shadow: none;
+  --theme-card-sheen-image: none;
+  --theme-surface-shadow: 0 28px 90px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(var(--bg-elev-rgb, 255, 255, 255), 0.08);
+  --theme-backdrop: blur(16px);
+
+  /* Schema v4 material primitives (theme.js). Inert under
+     data-material="flat": only the jelly block below reads them. */
+  --theme-glass-grain: 0;
+  --theme-glass-depth: 0;
+  --theme-shadow-offset: 0px;
+  --theme-radius-strip: 24px;
+  --theme-grain-image: url("assets/textures/grain.png");
+  --theme-surface-tint: 0.35;
+  /* Jelly highlight channel (sheen, rims, convex sub-pills) and the channel
+     panel wells paint with. Wells default to the scrim (Classic dark wells);
+     jelly panels point them at the highlight. Shadows keep --scrim-rgb. */
+  --jelly-hi-rgb: 255, 255, 255;
+  --well-rgb: var(--scrim-rgb);
+  --palette-neutral: #f2f4f7;
+  --palette-blue: #a9c2f5;
+  --palette-aqua: #9ee3e0;
+  --palette-mint: #b5e8b0;
+  --palette-lilac: #c9b8f2;
+  --palette-peach: #ffd49a;
+  --palette-magenta: #f2a6d8;
+  --palette-coral: #f7a38c;
+  --tint-panel: var(--palette-neutral);
+  --tint-folder: var(--palette-mint);
+  --tint-clock: var(--palette-lilac);
+  --tint-telegram: var(--palette-peach);
+  --tint-mp3-player: var(--palette-magenta);
+  --tint-glyph-bar: var(--palette-neutral);
+
+  /* Subsurface light diffusion gradient across the thickness of the glass */
+  --theme-glass-computed-gradient: linear-gradient(
+    145deg,
+    rgba(var(--bg-elev-rgb), calc(var(--theme-glass-sheen) * 0.35)) 0%,
+    rgba(var(--theme-bg-base), calc(var(--theme-glass-opacity) * 0.82)) 40%,
+    rgba(var(--theme-bg-base), var(--theme-glass-opacity)) 100%
+  );
+
+  /* Multi-tiered physical caustic and rim highlight:
+     1. Top Brewster grazing highlight (bevel rim)
+     2. Soft inner diffuse feather
+     3. Bottom ground bounce reflex
+     4. Soft contact AO shadow (elevation)
+     5. Pure chromatic caustic bloom (clear glass body tint on desktop)
+     6. Deep atmospheric spread */
+  --theme-glass-computed-shadow:
+    inset 0 1px 1px 0 rgba(var(--bg-elev-rgb), calc(var(--theme-glass-rim) * 0.75)),
+    inset 0 2px 6px -1px rgba(var(--bg-elev-rgb), calc(var(--theme-glass-rim) * 0.35)),
+    inset 0 -1px 1px 0 rgba(var(--bg-elev-rgb), calc(var(--theme-glass-rim) * 0.20)),
+    0 4px 12px -2px rgba(var(--scrim-rgb), calc(var(--theme-glass-shadow) * 0.12)),
+    0 16px 36px -4px rgba(var(--theme-bg-base), calc(var(--theme-glass-shadow) * 0.40)),
+    0 28px 60px -10px rgba(var(--scrim-rgb), calc(var(--theme-glass-shadow) * 0.15));
+
+  --theme-glass-computed-surface-shadow:
+    inset 0 1px 0 0 rgba(var(--bg-elev-rgb), calc(var(--theme-glass-rim) * 0.40)),
+    0 24px 70px -6px rgba(var(--scrim-rgb), calc(var(--theme-glass-shadow) * 0.65)),
+    0 12px 30px -4px rgba(var(--theme-bg-base), calc(var(--theme-glass-shadow) * 0.35));
+
+  /* Derived Theme Tokens — computed aliases over the primitives above.
+     Single derivation point: a primitive change (live or committed) updates
+     every dependent surface automatically via var() resolution. */
+  --theme-accent-glow: rgba(var(--theme-accent-rgb, 215, 25, 33), 0.35);
+  --theme-bg-glass-panel: rgba(var(--theme-bg-base, 15, 18, 30), var(--theme-glass-opacity, 0.78));
+  --theme-bg-glass-card: rgba(var(--bg-elev-rgb, 255, 255, 255), 0.08);
+  --theme-border-glass: rgba(var(--bg-elev-rgb, 255, 255, 255), 0.12);
+  --theme-border-strong: rgba(var(--theme-accent-rgb, 215, 25, 33), 0.35);
+
+  /* Radii */
+  --r-sm: 6px;
+  --r-md: var(--theme-radius-card, 16px);
+  --r-lg: var(--theme-radius-surface, 24px);
+  --r-xl: 24px;
+  --r-full: 9999px;
+
+  /* Blurs */
+  --blur-sm: 8px;
+  --blur-md: var(--theme-blur-strength, 16px);
+  --blur-lg: 24px;
+  --blur-xl: 32px;
+
+  /* Glass Surface Tokens (derived) */
+  --bg-glass-subtle: rgba(var(--bg-elev-rgb, 255, 255, 255), 0.04);
+  --bg-glass-panel: var(--theme-bg-glass-panel, rgba(20, 20, 24, 0.72));
+  --bg-glass-card: var(--theme-bg-glass-card, rgba(255, 255, 255, 0.08));
+  --border-glass: var(--theme-border-glass, rgba(255, 255, 255, 0.12));
+  --border-glass-strong: var(--theme-border-strong, rgba(255, 255, 255, 0.2));
+}
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  user-select: none;
+}
+
+body {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: transparent;
+  color: rgb(var(--fg-rgb));
+  font-family: var(--font-base);
+}
+
+button,
+input,
+optgroup,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+}
+
+html {
+  background: transparent;
+}
+
+/* На вторичных wallpaper-окнах — только фоновая картинка, никаких UI элементов */
+body.no-widgets .topbar-actions,
+body.no-widgets .widgets-canvas,
+body.no-widgets .debug-message {
+  display: none !important;
+}
+
+/* ─── Overlay ─── */
+
+.overlay {
+  display: none;
+}
+
+/* ─── Shell ─── */
+
+.app-shell {
+  position: relative;
+  z-index: 1;
+  width: 100vw;
+  height: 100vh;
+  padding: 28px;
+}
+
+/* ─── Top-right actions ─── */
+
+.topbar-actions {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  display: flex;
+  gap: 6px;
+  z-index: 50;
+}
+
+.action-btn {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.08);
+  border-radius: 11px;
+  background: rgba(var(--theme-bg-base), 0.78);
+  color: rgba(var(--fg-rgb), 0.45);
+  cursor: pointer;
+  transition: background var(--dur-transient) ease, color var(--dur-transient) ease, transform var(--dur-transient) ease, border-color var(--dur-transient) ease;
+}
+
+.action-btn:hover {
+  background: rgba(var(--bg-elev-rgb), 0.1);
+  color: rgba(var(--fg-rgb), 0.85);
+  border-color: rgba(var(--bg-elev-rgb), 0.18);
+  transform: translateY(-1px);
+}
+
+.action-btn:active {
+  transform: scale(0.92);
+}
+
+.action-btn.active {
+  background: rgba(var(--bg-elev-rgb), 0.14);
+  color: rgb(var(--fg-rgb));
+  border-color: rgba(var(--bg-elev-rgb), 0.28);
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.06);
+}
+
+
+
+.widgets-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.widget-card {
+  position: absolute;
+  /* An explicit base layer, not `auto`. The micrographics panel sits below every
+     card and reaches into a 0-elevation slot; a positioned sibling left at
+     `auto` would still paint *above* it, because `0` outranks `auto` in the
+     stacking order. Cards that need to rise say so (.dragging 1000, .expanded
+     100, mp3 library 250). */
+  z-index: 1;
+  width: 340px;
+  min-width: 64px;
+  border-radius: var(--theme-radius-card);
+  background-color: var(--theme-bg-glass-panel, rgba(20, 20, 25, 0.72));
+  background-image: var(--theme-card-sheen-image, none);
+  backdrop-filter: var(--theme-backdrop);
+  -webkit-backdrop-filter: var(--theme-backdrop);
+  border: 1px solid var(--theme-border-glass, rgba(var(--bg-elev-rgb), 0.08));
+  box-shadow: var(--theme-card-shadow, none);
+  overflow: hidden;
+  contain: paint layout;
+  transition: border-color var(--dur-transient) var(--ease-standard),
+              box-shadow var(--dur-layout) var(--ease-standard),
+              background-color var(--dur-transient) var(--ease-standard),
+              transform var(--dur-motion) var(--ease-standard);
+}
+
+/* Transparent and expanded widgets opt out of general card shadows/sheen */
+.widget-card.micrographics-card,
+.widget-card.music-widget,
+.widget-card.glyph-bar-widget,
+.widget-card.expanded {
+  box-shadow: none !important;
+  background-image: none !important;
+}
+
+/* ─── Jelly material (data-material="jelly", schema v4) ─────────────────────
+   Sea-glass pebble: opaque pastel body (--card-tint), white highlight top-left,
+   tinted bevel bottom-right, soft drop shadow down-right, static grain.
+   Text and icons take the tint's deep ink through --fg-rgb, so every widget
+   that paints with rgb(var(--fg-rgb)) follows without per-widget rules.
+   Classic (flat) never matches anything here. */
+:root[data-material="jelly"] .widget-card { --card-tint: var(--tint-folder); --fg-rgb: var(--ink-tint-folder); }
+:root[data-material="jelly"] .widget-card.clock-widget { --card-tint: var(--tint-clock); --fg-rgb: var(--ink-tint-clock); }
+:root[data-material="jelly"] .widget-card.telegram-widget { --card-tint: var(--tint-telegram); --fg-rgb: var(--ink-tint-telegram); }
+:root[data-material="jelly"] .widget-card.music-widget { --card-tint: var(--tint-mp3-player); --fg-rgb: var(--ink-tint-mp3-player); }
+:root[data-material="jelly"] .widget-card.glyph-bar-widget { --card-tint: var(--tint-glyph-bar); --fg-rgb: var(--ink-tint-glyph-bar); }
+
+:root[data-material="jelly"] .widget-card,
+:root[data-material="jelly"] .jelly,
+:root[data-material="jelly"] .menu-container,
+:root[data-material="jelly"] .explorer-widget {
+  /* One recipe, reused by cards, panels, micrographics pills and chips. Declared on
+     the element itself: --card-tint must resolve per element, not on :root. */
+  --jelly-body: rgb(from var(--card-tint) r g b / var(--theme-glass-opacity));
+  --jelly-sheen: radial-gradient(120% 95% at 18% 8%, rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-sheen) * 0.7)) 0%, rgba(var(--jelly-hi-rgb), 0) 58%);
+  --jelly-depth: linear-gradient(155deg, rgba(var(--jelly-hi-rgb), 0) 42%, oklch(from var(--card-tint) calc(l - 0.07) calc(c * 1.5 + 0.02) h / calc(var(--theme-glass-depth) * 0.75)) 100%);
+  --jelly-shadow:
+    inset 0 1.5px 0 rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-rim) * 0.9)),
+    inset 1.5px 0 0 rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-rim) * 0.35)),
+    inset -2px -3px 6px oklch(from var(--card-tint) calc(l - 0.2) calc(c * 1.4) h / calc(var(--theme-glass-depth) * 0.45)),
+    calc(var(--theme-shadow-offset) * 0.6) var(--theme-shadow-offset) calc(var(--theme-shadow-offset) * 1.6) calc(var(--theme-shadow-offset) * -0.2) oklch(from var(--card-tint) calc(l * 0.5) calc(c * 0.5) h / calc(var(--theme-glass-shadow) * 0.6)),
+    1px 2px 3px rgba(var(--scrim-rgb), calc(var(--theme-glass-shadow) * 0.2));
+}
+
+:root[data-material="jelly"] .widget-card:not(.micrographics-card):not(.expanded),
+:root[data-material="jelly"] .jelly {
+  color: rgb(var(--fg-rgb));
+  background-color: var(--jelly-body);
+  background-image: var(--jelly-sheen), var(--jelly-depth);
+  border: none;
+  box-shadow: var(--jelly-shadow);
+  /* Static shadow: never animated, never promoted on hover (re-raster). */
+  transition: background-color var(--dur-transient) var(--ease-standard),
+              transform var(--dur-motion) var(--ease-standard);
+}
+
+/* Grain sits between body and content (card is its own stacking context). */
+:root[data-material="jelly"] .widget-card:not(.micrographics-card)::before,
+:root[data-material="jelly"] .jelly::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background-image: var(--theme-grain-image);
+  background-size: 64px 64px;
+  opacity: var(--theme-glass-grain);
+  pointer-events: none;
+}
+
+:root[data-material="jelly"] .widget-card:not(.expanded):hover {
+  will-change: auto;
+}
+
+/* Transparent-by-design widgets get a real body in jelly. */
+:root[data-material="jelly"] .widget-card.glyph-bar-widget,
+:root[data-material="jelly"] .widget-card.music-widget {
+  background-color: var(--jelly-body) !important;
+  background-image: var(--jelly-sheen), var(--jelly-depth) !important;
+  box-shadow: var(--jelly-shadow) !important;
+}
+
+/* Strips (tall/wide bars) are full pills; squares keep the card radius. */
+:root[data-material="jelly"] .widget-card.telegram-widget:not(.expanded),
+:root[data-material="jelly"] .widget-card.glyph-bar-widget {
+  border-radius: var(--theme-radius-strip);
+}
+
+/* Jelly panels (menu, explorer): the frosted "table" of the references — a
+   light wash of the panel tint (surfaceTint) with grain. Wells paint with
+   --well-rgb, which points at the highlight here, so every well becomes a
+   frosted white sub-pill; shadows keep --scrim-rgb. */
+:root[data-material="jelly"] :is(.menu-container, .explorer-widget) {
+  --card-tint: var(--tint-panel);
+  --fg-rgb: var(--ink-tint-panel);
+  isolation: isolate;
+  /* The panel's own wash; file-area stand-ins (explorer morphs) paint the same colour. */
+  --panel-wash: color-mix(in oklch, var(--card-tint) calc(var(--theme-surface-tint) * 100%), rgb(var(--jelly-hi-rgb)));
+  background-color: var(--panel-wash);
+  background-image: var(--jelly-sheen);
+  border-color: rgba(var(--jelly-hi-rgb), 0.75);
+  box-shadow: inset 0 1.5px 0 rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-rim) * 0.9)),
+    0 calc(var(--theme-shadow-offset) * 2) calc(var(--theme-shadow-offset) * 5) oklch(from var(--card-tint) calc(l * 0.4) calc(c + 0.02) h / calc(var(--theme-glass-shadow) * 0.4));
+}
+:root[data-material="jelly"] :is(.menu-container, .explorer-widget) { --well-rgb: var(--jelly-hi-rgb); }
+:root[data-material="jelly"] :is(.menu-container, .explorer-widget)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background-image: var(--theme-grain-image);
+  background-size: 64px 64px;
+  opacity: var(--theme-glass-grain);
+  pointer-events: none;
+}
+
+/* Jelly surfaces that open from a widget (expanded cards, popups, menus):
+   a light wash of the owner's tint (surfaceTint), opaque, ink text. The rim
+   lives in background-image, not box-shadow: the surface manager lifts the
+   whole box-shadow onto a separate layer during the open/close morph, and a
+   colour transition here would re-raster the layer on every morph frame.
+   Popups portaled out of their card carry data-surface-tint=<owner>. */
+:root[data-material="jelly"] { --card-tint: var(--tint-panel); }
+:root[data-material="jelly"] [data-surface-tint="telegram"] { --card-tint: var(--tint-telegram); --fg-rgb: var(--ink-tint-telegram); }
+:root[data-material="jelly"] [data-surface-tint="mp3-player"] { --card-tint: var(--tint-mp3-player); --fg-rgb: var(--ink-tint-mp3-player); }
+:root[data-material="jelly"] :is(.widget-card.expanded, .music-popup, .music-context-menu,
+  .tg-context-menu, .tg-forward-modal, .tg-mention-pop, .tg-account-dropdown, .vpn-server-menu,
+  .widget-add-popover, .explorer-widget .context-menu, .explorer-widget .search-results) {
+  --surface-wash: color-mix(in oklch, var(--card-tint) calc(var(--theme-surface-tint) * 100%), rgb(var(--jelly-hi-rgb)));
+  color: rgb(var(--fg-rgb));
+  background-color: var(--surface-wash) !important;
+  background-image:
+    linear-gradient(to bottom, rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-rim) * 0.9)) 0 1.5px, rgba(var(--jelly-hi-rgb), 0) 1.5px),
+    radial-gradient(120% 70% at 15% 0%, rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-sheen) * 0.55)) 0%, rgba(var(--jelly-hi-rgb), 0) 60%) !important;
+  border-color: rgba(var(--jelly-hi-rgb), 0.8);
+  box-shadow: 0 calc(var(--theme-shadow-offset) * 1.4) calc(var(--theme-shadow-offset) * 4) oklch(from var(--card-tint) calc(l * 0.4) calc(c + 0.02) h / calc(var(--theme-glass-shadow) * 0.4));
+  backdrop-filter: none;
+  transition: transform var(--dur-motion) var(--ease-standard);
+}
+/* Clock and Telegram cards: the wash is a layer of its own, faded by the morph.
+   The card body keeps its dock colour (--jelly-body) while expanded and during the
+   morph; ::after (z -2, under the grain) carries the expanded wash and fades in on
+   syncSurfaceWash() with the morph's duration and easing. No colour transition on
+   the card itself, so the morph never re-rasters the body. */
+:root[data-material="jelly"] .widget-card.expanded:is(.clock-widget, .telegram-widget) {
+  background-color: var(--jelly-body) !important;
+  background-image: var(--jelly-sheen), var(--jelly-depth) !important;
+}
+:root[data-material="jelly"] .widget-card:is(.clock-widget, .telegram-widget)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  border-radius: inherit;
+  pointer-events: none;
+  background-color: var(--surface-wash);
+  background-image:
+    linear-gradient(to bottom, rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-rim) * 0.9)) 0 1.5px, rgba(var(--jelly-hi-rgb), 0) 1.5px),
+    radial-gradient(120% 70% at 15% 0%, rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-sheen) * 0.55)) 0%, rgba(var(--jelly-hi-rgb), 0) 60%);
+  opacity: 0;
+  transition: opacity var(--wash-dur, var(--dur-motion)) var(--wash-ease, var(--ease-standard));
+}
+:root[data-material="jelly"] .widget-card.surface-washed:is(.clock-widget, .telegram-widget)::after {
+  opacity: 1;
+}
+
+/* Tint comes from the nearest owner: widget card, tagged portal, or the
+   panel default on :root. Expanded cards keep their widget's tint. */
+/* One radius scale: big surfaces (panels, expanded cards) take the surface
+   radius, popups and menus the card radius. Morphs read these computed radii
+   (surface-manager), so the animation lands exactly on the resting shape. */
+:root[data-material="jelly"] :is(.menu-container, .explorer-container, .explorer-widget, .widget-card.expanded) {
+  border-radius: var(--theme-radius-surface);
+}
+:root[data-material="jelly"] :is(.music-popup, .music-context-menu, .tg-context-menu, .tg-forward-modal, .tg-mention-pop,
+  .tg-account-dropdown, .vpn-server-menu, .widget-add-popover, .explorer-widget .context-menu, .explorer-widget .search-results) {
+  border-radius: var(--theme-radius-card);
+}
+:root[data-material="jelly"] .widget-card.expanded .shortcut-name { color: rgba(var(--fg-rgb), 0.85); }
+:root[data-material="jelly"] .explorer-container { background: transparent; border-color: transparent; box-shadow: none; }
+:root[data-material="jelly"] .explorer-overlay.visible .explorer-container { box-shadow: none; }
+
+.widget-card:hover {
+  border-color: transparent;
+}
+
+.widget-card:not(.expanded):hover {
+  will-change: clip-path, opacity;
+}
+
+.widget-card.expanded {
+  z-index: 100;
+  box-shadow: none;
+  border-color: transparent;
+  background-color: rgba(var(--bg-surface-rgb), 0.95);
+  overflow: visible;
+}
+
+.telegram-widget.expanded {
+  overflow: hidden !important;
+}
+
+
+
+/* ─── Widget Header ─── */
+
+.widget-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--dur-hover) ease;
+}
+
+.widget-header:hover {
+  background: rgba(var(--bg-elev-rgb), 0.03);
+}
+
+.widget-card.no-header .widget-header {
+  display: none;
+}
+
+.widget-card.no-header {
+  padding-top: 10px;
+}
+
+.widget-header:active {
+  background: rgba(var(--bg-elev-rgb), 0.06);
+}
+
+.widget-icon {
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: rgba(var(--bg-elev-rgb), 0.06);
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.06);
+}
+
+.widget-icon svg {
+  width: 20px;
+  height: 20px;
+  color: rgba(var(--fg-rgb), 0.7);
+}
+
+.widget-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  transition: opacity var(--dur-transient) ease;
+}
+
+.widget-card:not(.expanded) {
+  container-type: inline-size;
+}
+
+/* Hide text and chevron in small width (Nothing OS 1x1 style) */
+@container (max-width: 150px) {
+  .widget-info, .widget-chevron {
+    display: none;
+  }
+  .widget-header {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+}
+
+.widget-title {
+  font-size: 0.86rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.widget-desc {
+  font-size: 0.66rem;
+  color: rgba(var(--fg-rgb), 0.38);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.widget-chevron {
+  color: rgba(var(--fg-rgb), 0.22);
+  transition: transform var(--dur-layout) var(--ease-spring),
+              color var(--dur-transient) ease;
+}
+
+.widget-card.expanded .widget-chevron {
+  transform: rotate(90deg);
+  color: rgba(var(--fg-rgb), 0.5);
+}
+
+/* ─── Widget Body (expandable) ─── */
+
+.widget-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transition: grid-template-rows var(--dur-layout) var(--ease-standard),
+              opacity var(--dur-motion) ease,
+              padding var(--dur-motion) ease,
+              visibility var(--dur-layout);
+  padding: 0 16px;
+}
+
+.widget-body > * {
+  overflow: hidden;
+}
+
+.widget-body > .dash-vpn {
+  overflow: visible;
+}
+
+.widget-card.expanded .widget-body {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
+  padding: 2px 16px 16px;
+}
+
+.widget-card.expanded {
+  background: rgba(var(--bg-surface-rgb), 0.96);
+  border-color: rgba(var(--bg-elev-rgb), 0.15);
+  box-shadow: 0 12px 60px rgba(0, 0, 0, 0.6);
+}
+
+/* ─── Shortcuts Grid ─── */
+
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 3px;
+}
+
+.shortcut-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 4px 8px;
+  border-radius: 13px;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  color: #f0f0f0;
+  font-family: inherit;
+  transition: background var(--dur-hover) ease, border-color var(--dur-hover) ease, transform var(--dur-hover) ease;
+}
+
+.shortcut-item:hover {
+  background: rgba(var(--bg-elev-rgb), 0.06);
+  border-color: rgba(var(--bg-elev-rgb), 0.08);
+  transform: translateY(-1px);
+}
+
+.shortcut-item:active {
+  transform: scale(0.93);
+}
+
+.shortcut-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: rgba(var(--bg-elev-rgb), 0.05);
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.06);
+  color: rgba(var(--fg-rgb), 0.6);
+}
+
+.shortcut-folder {
+  background: rgba(255, 200, 60, 0.08);
+  border-color: rgba(255, 200, 60, 0.12);
+  color: rgba(255, 210, 90, 0.7);
+}
+
+.shortcut-name {
+  font-size: 0.58rem;
+  color: rgba(var(--fg-rgb), 0.45);
+  text-align: center;
+  line-height: 1.2;
+  max-width: 68px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.widget-empty {
+  text-align: center;
+  color: rgba(var(--fg-rgb), 0.3);
+  font-size: 0.74rem;
+  line-height: 1.6;
+  padding: 10px 0;
+}
+
+.widget-empty code {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(var(--bg-elev-rgb), 0.05);
+  font-family: var(--font-mono,"Cascadia Code","Fira Code",monospace);
+  font-size: 0.68rem;
+  color: rgba(var(--fg-rgb), 0.5);
+}
+
+/* ─── Edit mode ─── */
+
+body.edit-mode .widget-card {
+  cursor: grab;
+  border-color: rgba(var(--bg-elev-rgb), 0.14);
+}
+
+body.edit-mode .widget-header {
+  pointer-events: auto;
+}
+
+.widget-add {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1200;
+  display: none;
+}
+
+body.edit-mode .widget-add {
+  display: block;
+}
+
+.widget-add-btn {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.16);
+  border-radius: 11px;
+  background: rgba(15, 18, 30, 0.82);
+  color: rgba(var(--fg-rgb), 0.82);
+  cursor: pointer;
+  backdrop-filter: none;
+  transition: background var(--dur-transient) ease, transform var(--dur-transient) ease, border-color var(--dur-transient) ease;
+}
+
+.widget-add-btn:hover {
+  background: rgba(var(--bg-elev-rgb), 0.12);
+  border-color: rgba(var(--bg-elev-rgb), 0.28);
+  transform: translateY(-1px);
+}
+
+.widget-add-popover {
+  position: absolute;
+  top: 44px;
+  right: 0;
+  width: 250px;
+  max-height: min(420px, calc(100vh - 96px));
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.12);
+  background: rgba(var(--bg-surface-rgb), 0.94);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+  backdrop-filter: none;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity var(--dur-hover) ease, transform var(--dur-hover) ease;
+}
+
+.widget-add-popover.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.widget-add-list {
+  display: grid;
+  gap: 4px;
+}
+
+.widget-add-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: rgb(var(--fg-rgb));
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-hover) ease, border-color var(--dur-hover) ease;
+}
+
+.widget-add-option:hover {
+  background: rgba(var(--bg-elev-rgb), 0.07);
+  border-color: rgba(var(--bg-elev-rgb), 0.08);
+}
+
+.widget-add-option-icon {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(var(--bg-elev-rgb), 0.06);
+  color: rgba(var(--fg-rgb), 0.76);
+}
+
+.widget-add-option-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.widget-add-option-text {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.widget-add-option-name,
+.widget-add-option-desc {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.widget-add-option-name {
+  font-size: 0.72rem;
+  color: rgba(var(--fg-rgb), 0.88);
+}
+
+.widget-add-option-desc {
+  font-size: 0.58rem;
+  color: rgba(var(--fg-rgb), 0.42);
+}
+
+.widget-instance-remove {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 60;
+  width: 22px;
+  height: 22px;
+  display: none;
+  place-items: center;
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.18);
+  border-radius: 50%;
+  background: rgba(var(--scrim-rgb), 0.48);
+  color: rgba(var(--fg-rgb), 0.82);
+  cursor: pointer;
+}
+
+body.edit-mode .widget-instance-remove {
+  display: grid;
+}
+
+.widget-instance-remove:hover {
+  background: rgba(var(--status-error-rgb), 0.72);
+  border-color: rgba(var(--bg-elev-rgb), 0.32);
+}
+
+.resize-handle {
+  position: absolute;
+  z-index: 30;
+  opacity: 0;
+  transition: opacity var(--dur-transient) ease, background var(--dur-transient) ease;
+  background: rgba(var(--bg-elev-rgb), 0.05);
+}
+
+body.edit-mode .resize-handle {
+  opacity: 1;
+}
+
+.resize-handle:hover {
+  background: rgba(var(--bg-elev-rgb), 0.2);
+}
+
+.resize-handle.left, .resize-handle.right {
+  top: 10px;
+  bottom: 10px;
+  width: 4px;
+  cursor: ew-resize;
+}
+
+.resize-handle.left { left: 2px; }
+.resize-handle.right { right: 2px; }
+
+.resize-handle.top, .resize-handle.bottom {
+  left: 10px;
+  right: 10px;
+  height: 4px;
+  cursor: ns-resize;
+}
+
+.resize-handle.top { top: 2px; }
+.resize-handle.bottom { bottom: 2px; }
+
+.resize-handle.corner {
+  right: 2px;
+  bottom: 2px;
+  width: 12px;
+  height: 12px;
+  background: rgba(var(--bg-elev-rgb), 0.3);
+  border-radius: 2px;
+  cursor: nwse-resize;
+}
+
+.resize-handle::after { display: none; } /* Remove the old bulky markers */
+
+body.edit-mode .resize-handle:hover::after {
+  background: rgba(var(--bg-elev-rgb), 0.8);
+}
+
+
+
+.widget-card.dragging {
+  z-index: 1000;
+  opacity: 0.88;
+  cursor: grabbing;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  animation: none !important;
+  transition: none !important;
+}
+
+.widget-placeholder {
+  border-radius: 20px;
+  border: 2px dashed rgba(var(--bg-elev-rgb), 0.15);
+  background: rgba(var(--bg-elev-rgb), 0.03);
+  transition: height var(--dur-transient) ease;
+}
+
+.debug-message {
+  position: fixed;
+  left: 50%;
+  bottom: 70px;
+  transform: translateX(-50%);
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(248, 113, 113, 0.95);
+  color: #111;
+  font-weight: 600;
+  font-size: 0.78rem;
+  z-index: 200;
+  max-width: min(90vw, 380px);
+  text-align: center;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.3);
+}
+
+.debug-message.hidden {
+  display: none;
+}
+
+/* --- Unified Surfaces & Portals (unicoremodmotion.md §2, §3) --- */
+#shell-portals {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: var(--z-surface-modal, 3000);
+  overflow: hidden;
+}
+
+#shell-portals > * {
+  pointer-events: auto;
+}
+
+/* Surface Manager Base States */
+.surface-active {
+  pointer-events: auto;
+}
+
+.surface-closing {
+  pointer-events: none !important;
+}
+
+/* Explorer overlay — managed via SurfaceManager */
+.explorer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(var(--scrim-rgb), 0.55);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: var(--z-surface-overlay, 2000);
+  opacity: 0;
+  pointer-events: none;
+  display: none;
+  will-change: opacity;
+}
+
+.explorer-overlay.visible,
+.explorer-overlay.surface-active,
+.explorer-overlay.surface-open {
+  display: block;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.explorer-container {
+  position: absolute;
+  top: 36px;
+  left: 48px;
+  right: 48px;
+  bottom: 36px;
+  max-width: 1480px;
+  margin: 0 auto;
+  background: rgba(var(--bg-surface-rgb), 0.96);
+  border-radius: 20px;
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.12);
+  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.65);
+  overflow: hidden;
+  opacity: 0;
+  transform: translateZ(0);
+  will-change: clip-path, opacity;
+}
+
+.explorer-overlay.visible .explorer-container,
+.explorer-container.surface-open,
+.explorer-container.surface-active {
+  opacity: 1;
+  transform: translateZ(0);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.65);
+  border-color: rgba(var(--bg-elev-rgb), 0.15);
+}
+
+.explorer-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: rgba(var(--fg-rgb), 0.38);
+  font-family: var(--font-base);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  background: rgba(var(--bg-surface-rgb), 0.96);
+  border-radius: 20px;
+}
+
+
+.file-area-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--panel-wash, rgb(var(--bg-surface-rgb)));
+  display: flex;
+  flex-direction: column;
+}
+
+.file-area-surface .file-grid,
+.file-area-surface .file-list {
+  flex: 1;
+  overflow: hidden;
+}
+
+.file-area-surface .file-list-body {
+  flex: 1;
+  overflow: hidden;
+}
+
+.file-area-transition-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--panel-wash, rgb(var(--bg-surface-rgb)));
+  display: flex;
+  flex-direction: column;
+}
+
+.file-area-surface .file-item,
+.file-area-surface .file-row,
+.file-area-transition-layer .file-item,
+.file-area-transition-layer .file-row {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+:root.zero-motion *,
+:root.zero-motion *::before,
+:root.zero-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}

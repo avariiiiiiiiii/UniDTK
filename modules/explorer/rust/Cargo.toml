@@ -1,0 +1,42 @@
+[package]
+name = "unidtk-mod-explorer"
+version = "0.1.0"
+edition = "2021"
+description = "Explorer vertical slice (file manager backend: fs, archives, hashing, registry)"
+
+# Vertical slice for the `explorer` module (was `modules/explorer/src/*`).
+# Real crate (`unidtk-mod-explorer`), pulled in by the kernel as a Cargo path
+# dependency. It talks to the kernel only through `unidtk-api`; `tauri` remains a
+# dependency solely for `async_runtime::spawn_blocking` in `get_drives`. The
+# `#[tauri::command]` wrappers live in the kernel, not here.
+
+[lib]
+name = "unidtk_mod_explorer"
+path = "mod.rs"
+
+[dependencies]
+unidtk-api = { path = "../../../core/api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dirs = "5"
+md-5 = "0.10"
+sha2 = "0.10"
+crc32fast = "1.4"
+zip = "0.6"
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
+tauri = { version = "2" }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_DataExchange",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Registry",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging"
+]

@@ -1,0 +1,1 @@
+{ "name": "MP3 Player", "description": "Circular Player", "specialType": "mp3-player", "simulate": { "module": "widget.js", "function": "renderMusicPlayer", "sandbox": "<div class=\"widget-header\"></div><div class=\"widget-body\"></div>" } }

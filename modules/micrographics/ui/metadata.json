@@ -1,0 +1,12 @@
+{
+  "name": "Micrographics",
+  "description": "Ambient glyph panel: date, time, weather, network",
+  "type": "special",
+  "specialType": "micrographics",
+  "singleton": true,
+  "simulate": {
+    "module": "widget.js",
+    "function": "renderMicrographics",
+    "sandbox": "<div class=\"widget-body\"></div>"
+  }
+}

@@ -1,0 +1,16 @@
+﻿# Linker override: rust-lld instead of MSVC link.exe (not guaranteed on PATH).
+# target-dir is automatic here (workspace root = this directory's parent).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "linker=rust-lld.exe"]
+
+
+# Release builds on this 15.7 GB machine: default cargo jobs (8) OOMs thin-LTO
+# (docs/cliudtk.md: measured commit exhaustion -> rustc "LLVM out of memory").
+# 2 is the safe default; `udtk build -j N` overrides via CARGO_BUILD_JOBS.
+# RUST_MIN_STACK: the `windows` crate overflows the default 2 MB thread stack
+# without it (same doc, "факторы по памяти").
+[build]
+jobs = 2
+
+[env]
+RUST_MIN_STACK = "134217728"

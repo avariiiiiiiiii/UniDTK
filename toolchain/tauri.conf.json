@@ -1,0 +1,169 @@
+{
+  "productName": "UniDTK",
+  "version": "0.1.0",
+  "identifier": "com.unidtk.app",
+  "build": {
+    "frontendDist": "dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "wallpaper",
+        "title": "UniDTK",
+        "url": "index.html",
+        "devtools": true,
+        "decorations": false,
+        "transparent": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "resizable": false,
+        "width": 1920,
+        "height": 1080
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https: http: asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost; font-src 'self' data:; connect-src 'self' http://127.0.0.1:26540 ws://127.0.0.1:26540 ws://127.0.0.1:* ipc: http://ipc.localhost",
+      "capabilities": [
+        {
+          "identifier": "default",
+          "description": "Default permissions",
+          "windows": [
+            "wallpaper"
+          ],
+          "permissions": [
+            "core:default",
+            "core:window:default",
+            "core:window:allow-show",
+            "core:window:allow-hide",
+            "core:window:allow-set-position",
+            "core:window:allow-set-size",
+            "core:window:allow-set-focus",
+            "core:window:allow-available-monitors",
+            "core:window:allow-primary-monitor",
+            "core:event:default",
+            "fs:allow-exists",
+            "fs:allow-mkdir",
+            "fs:allow-read-dir",
+            "fs:allow-read-text-file",
+            "fs:allow-write-text-file",
+            "fs:allow-resource-read-recursive",
+            "fs:allow-appdata-read-recursive",
+            "fs:allow-appdata-write-recursive",
+            "fs:create-app-specific-dirs",
+            {
+              "identifier": "fs:scope",
+              "allow": [
+                {
+                  "path": "$APPDATA"
+                },
+                {
+                  "path": "$APPDATA/**/*"
+                },
+                {
+                  "path": "$LOCALDATA"
+                },
+                {
+                  "path": "$LOCALDATA/**/*"
+                },
+                {
+                  "path": "$RESOURCE"
+                },
+                {
+                  "path": "$RESOURCE/**/*"
+                }
+              ]
+            },
+            {
+              "identifier": "opener:allow-open-path",
+              "allow": [
+                {
+                  "path": "**"
+                },
+                {
+                  "path": "$RESOURCE/**/*"
+                },
+                {
+                  "path": "$LOCALDATA/UniDTK/tdlib/files/**"
+                },
+                {
+                  "path": "$LOCALDATA/UniDTK/tdlib/db/profile_photos/**"
+                },
+                {
+                  "path": "$LOCALDATA/Shell/tdlib/files/**"
+                },
+                {
+                  "path": "$LOCALDATA/Shell/tdlib/db/profile_photos/**"
+                }
+              ]
+            },
+            {
+              "identifier": "opener:allow-open-url",
+              "allow": [
+                {
+                  "url": "https://**"
+                },
+                {
+                  "url": "http://**"
+                }
+              ]
+            },
+            "dialog:default"
+          ]
+        }
+      ],
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**",
+          "$HOME/**",
+          "$LOCALDATA/**",
+          "$HOME/Music/qbc-music/**",
+          "$LOCALDATA/UniDTK/tdlib/files/**",
+          "$LOCALDATA/UniDTK/tdlib/db/profile_photos/**",
+          "$LOCALDATA/Shell/tdlib/files/**",
+          "$LOCALDATA/Shell/tdlib/db/profile_photos/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "../assets/app-icons/32x32.png",
+      "../assets/app-icons/128x128.png",
+      "../assets/app-icons/128x128@2x.png",
+      "../assets/app-icons/icon.icns",
+      "../assets/app-icons/icon.ico"
+    ],
+    "resources": {
+      "dist/modules/": "modules",
+      "dist/assets/fonts/": "fonts",
+      "../opt/tdlib-native/win32-x64/tdjson.dll": "tdjson.dll",
+      "../opt/tdlib-native/win32-x64/libcrypto-3-x64.dll": "libcrypto-3-x64.dll",
+      "../opt/tdlib-native/win32-x64/libssl-3-x64.dll": "libssl-3-x64.dll",
+      "../opt/tdlib-native/win32-x64/z.dll": "z.dll",
+      "../opt/libmpv/libmpv-2.dll": "libmpv-2.dll",
+      "../opt/singbox/sing-box.exe": "sing-box.exe",
+      "../opt/byedpi/ciadpi.exe": "ciadpi.exe",
+      "../scheduler-tasks/": "scheduler-tasks",
+      "../target/release/udtk.exe": "udtk.exe",
+      "../target/release/vpn-helper.exe": "vpn-helper.exe",
+      "../opt/directml/DirectML.dll": "DirectML.dll"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "./windows/hooks.nsh",
+        "compression": "zlib"
+      }
+    }
+  },
+  "plugins": {
+    "fs": {
+      "requireLiteralLeadingDot": false
+    }
+  }
+}

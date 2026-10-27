@@ -1,0 +1,1 @@
+{ "name": "Glyph Bar", "description": "Vertical volume LED strip", "specialType": "glyph-bar", "simulate": { "module": "widget.js", "function": "renderGlyphBar", "sandbox": "<div class=\"widget-header\"></div><div class=\"widget-body\"></div>" } }

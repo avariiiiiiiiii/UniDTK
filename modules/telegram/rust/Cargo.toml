@@ -1,0 +1,26 @@
+[package]
+name = "unidtk-mod-telegram"
+version = "0.1.0"
+edition = "2021"
+description = "Telegram vertical slice (TDLib bridge, managed proxy, multi-account)"
+
+# Vertical slice for the `telegram` module (was `modules/telegram/telegram.rs`).
+# Lib-only crate, pulled in by the kernel as a real path dependency.
+
+[lib]
+name = "unidtk_mod_telegram"
+path = "telegram.rs"
+
+[dependencies]
+unidtk-api = { path = "../../../core/api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+tauri = { version = "2" }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_System_LibraryLoader"
+]

@@ -1,0 +1,29 @@
+[package]
+name = "unidtk-mod-micrographics"
+version = "0.1.0"
+edition = "2021"
+description = "Micrographics vertical slice (ambient weather feed for the desktop panel)"
+
+# Vertical slice for the `micrographics` module: the Rust half fetches and
+# caches the current weather, the `ui/` half composes it into the ambient
+# desktop panel. Talks to the kernel strictly through `unidtk-api`: no
+# dependency on the kernel crate, none on other modules.
+
+[lib]
+name = "unidtk_mod_micrographics"
+path = "micrographics.rs"
+
+[dependencies]
+unidtk-api = { path = "../../../core/api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["socks-proxy"] }
+# The host-handle types only: a command handler reaches this module's state by
+# downcasting the handle the kernel hands it, exactly as `vpn` does. No
+# `#[tauri::command]` here — those belong to the kernel, next to
+# `generate_handler!`.
+tauri = { version = "2" }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = ["Devices_Geolocation", "Foundation", "Win32_System_WinRT"]

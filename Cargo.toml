@@ -1,0 +1,36 @@
+# Single Cargo workspace: one `Cargo.lock`, one `target/`.
+#
+# The application package is the only one with binaries, and every module —
+# `glyph-bar`, `vpn`, `telegram`, `explorer` and `mp3-player` — is a real crate
+# wired as a path dependency of the application package, so they are workspace
+# members automatically. No module is received by the kernel through `#[path]`
+# includes anymore (see core/kernel/main.rs).
+
+[workspace]
+resolver = "2"
+default-members = ["toolchain"]
+members = [
+  "toolchain",
+  "core/api",
+  "hosts/gpui",
+]
+
+# Every module lives behind the `unidtk-api` contract and is an ordinary path
+# dependency of the application package (which makes it a workspace member
+# automatically). The previous `#[path]`-included `mp3-player` slices (`audio`,
+# `music`) are now the crate `unidtk-mod-mp3-player`.
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = true
+panic = "unwind"
+incremental = false
+
+[profile.dev]
+opt-level = 0
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 3

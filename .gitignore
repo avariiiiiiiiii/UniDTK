@@ -1,0 +1,46 @@
+# Local Telegram credentials
+.env
+
+# Rust / Tauri build output
+target/
+toolchain/gen/
+# Staged single frontend tree (produced by toolchain/build.rs from core/ui, modules/*/ui, assets)
+toolchain/dist/
+
+# Logs / stray files
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Large binaries (download via scripts)
+opt/libmpv/*.dll
+opt/libmpv/*.7z
+opt/libmpv/extracted/
+opt/singbox/*.exe
+opt/byedpi/*.exe
+*.7z
+
+# Built utility binaries mirrored next to their sources in opt/
+opt/cli/*.exe
+opt/vpn-helper/*.exe
+
+# Screenshots & root image artifacts
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp
+shot_*.png
+verification_*.png
+unidtk_*.png
+.obsidian/
+.commandcode/
+scratch/
+
+# AI DJ model: fetched at install time into AppData (model_fetch), never in git
+opt/models/discogs-maest-129e/model.onnx.data
+opt/models/discogs-maest-129e/model.onnx
