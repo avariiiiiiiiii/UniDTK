@@ -3,7 +3,7 @@ title: UniDTK Sessions Journal (Бортовой журнал сессий)
 type: journal
 project: unidtk
 version: "0.1.0"
-updated_at: "2026-10-27"
+updated_at: "2026-10-28"
 status: active
 format: "Chronological MOC / GitHub Markdown"
 ---
@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Сессия | Дата | Git Commit | Ключевая задача / Подсистема | Основные затронутые файлы |
 | :---: | :---: | :---: | :--- | :--- |
+| **129** | 2026-10-28 | `f16cedd` | Скролл тачпадом над шеллом через сырой HID (DirectManipulation не даёт колеса над WebView2) | [`core/kernel/touchpad.rs`](../core/kernel/touchpad.rs), [`core/kernel/input.rs`](../core/kernel/input.rs), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js) |
 | **128** | 2026-10-27 | `0c0e264` | Скролл тачпадом (`WH_MOUSE_LL` вместо raw-input колеса), раскладка переживает сон (чистая `telegramDisplayPosition`), открытие папок в проводнике без длинных задач | [`core/kernel/input.rs`](../core/kernel/input.rs), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`modules/explorer/ui/explorer.js`](../modules/explorer/ui/explorer.js) |
 | **127** | 2026-10-27 | `7c98a29` | AI DJ (мёртвая ссылка), морфы без моргания (часы, чат телеграма, проводник), FLIP-полёт аватаров, glyph-bar с перетаскиванием, проводник ×6 быстрее, панели Sea Glass в оттенке, шкала радиусов, единый `escapeHtml` | [`modules/explorer/ui/explorer.js`](../modules/explorer/ui/explorer.js), [`modules/telegram/ui/widget.js`](../modules/telegram/ui/widget.js), [`modules/glyph-bar/ui/widget.js`](../modules/glyph-bar/ui/widget.js), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js) |
 | **126** | 2026-10-27 | `16faa86` | Sea Glass v4.1: попапы в цвет виджета, glyph-bar желейным ползунком, личная случайная расцветка (`rollColors`, `userColors`, «Перемешать/Вернуть»), токены `--jelly-hi-rgb`/`--well-rgb` вместо хардкода | [`core/ui/theme.js`](../core/ui/theme.js), [`core/ui/styles.css`](../core/ui/styles.css), [`modules/glyph-bar/ui/glyph-bar.css`](../modules/glyph-bar/ui/glyph-bar.css), [`core/ui/menu.js`](../core/ui/menu.js) |
@@ -4742,6 +4743,37 @@ DOM после reload: часы 541,25 207×187 rings, глиф 1198,58 7×97 (1
 
 ### 122.5 Верификация и метрики
 `udtk build` 14м34с, деплой, ping 1 мс, ERROR пуст. Превью морского варианта — инлайн-стили до сборки; из билда: хук `theme=sea-glass`, полоса изморозь + белые значения + красные чипы с белым текстом (кроп). Меню светлое из билда, рельса аква замером, попап библиотеки белый матовый, глиф белый+красный. Раскладка не тронута (только цвета).
+
+## 129. Сессия 2026-10-28 — скролл тачпадом над шеллом через сырой HID
+
+### 129.1 Контекст и симптомы
+Скролл двумя пальцами на тачпаде (Precision Touchpad, ASUS ScreenPad) над шеллом не работает, в других окнах работает. Фикс сессии 128 (`WH_MOUSE_LL`) живым тачпадом не проверялся.
+
+### 129.2 Корневая причина
+Над окном WebView2 Windows не синтезирует `WM_MOUSEWHEEL` из жеста тачпада: жест уходит в DirectManipulation окна `Chrome_RenderWidgetHostHWND`. Наш WebView под WorkerW никогда не активируется, поэтому этот путь его не прокручивает, а колеса, которое ловил хук сессии 128, просто нет. Доказано отдельным логгером (`WH_MOUSE_LL` + raw input мыши + raw HID 0x0D/0x05) при живом скролле пользователя: над терминалом — 104 события колеса (дельты 3–82) и raw mouse wheel; над шеллом (19:40:43–47) — ~100 HID-пакетов тачпада в секунду, **0** событий колеса в хуке и в raw input. Почему именно DirectManipulation не скроллит прибитое окно — не доказано и для фикса не важно.
+
+### 129.3 Архитектурное решение
+- Ядро читает контакты тачпада само: raw input HID `0x0D/0x05` (`RIDEV_INPUTSINK | RIDEV_DEVNOTIFY`) на том же raw-input окне. Препарсинг (`RIDI_PREPARSEDDATA`, HidP) один раз на устройство, сброс по `WM_INPUT_DEVICE_CHANGE`.
+- Сборка кадра под hybrid-режим (Contact Count только в первом пакете), жест — ровно два пальца с tip, один и тот же Contact ID, движение в одну сторону. Пинч, смена пальцев и пауза >120 мс (в т.ч. залипшие после сна касания) сбрасывают базу.
+- Масштаб — ~10 единиц колеса на мм хода (физический размер из HID-описателя, fallback 60 мм), откалиброван по собственной конверсии Windows на этой машине (свайп = 240–480 единиц). Направление — `HKCU\…\PrecisionTouchPad\ScrollDirection` (0 = контент за пальцами), перечитывается по `WM_SETTINGCHANGE`.
+- Прокрутка от тачпада эмитится только над собственным окном шелла (`own_only`): над desktop-классами Windows сама синтезирует колесо, хук его уже пересылает — задвоения нет.
+- Канал колеса склеивает события за 16 мс; `emit` вынесен из-под мьютекса `WINDOWS`. `WM_INPUT` читается в буфер нужного размера (раньше — `size_of::<RAWINPUT>()`, HID-пакет туда не влезал).
+- Фронтенд: зум графа AI DJ — один шаг на целый щелчок (`wheelNotches`), иначе поток мелких дельт выкручивал зум до упора.
+- План раскритикован 5 субагентами (Haiku 5.5): буфер HID, сборка кадра, сброс по Contact ID, сон, коалесценция, emit вне лока — учтено.
+
+### 129.4 Изменённые файлы
+- [`core/kernel/touchpad.rs`](../core/kernel/touchpad.rs) — новый: разбор HID тачпада, `Gesture`, 5 unit-тестов.
+- [`core/kernel/input.rs`](../core/kernel/input.rs) — регистрация тачпада, буфер `WM_INPUT`, канал `Wheel` с коалесценцией, `send_touchpad_wheel`.
+- [`core/kernel/main.rs`](../core/kernel/main.rs) — `mod touchpad`.
+- [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js) — зум AI DJ по щелчкам.
+
+### 129.5 Верификация и метрики
+- `cargo test --release -p unidtk --bin unidtk touchpad`: 5/5. Полный `--workspace` не гонялся (параллельная тяжёлая сборка другой сессии).
+- `udtk build -j 3`: build → install → start → verify OK, SHA-256 OK; `doctor -ping` — ALL CHECKS PASSED; `logs --level ERROR` — пусто; Working Set unidtk 33–44 МБ, CPU в простое 0,2%.
+- Колесо мыши (регрессия): 7 инжектированных событий над шеллом → 7 `wallpaper-wheel` в интерфейсе с верными дельтами.
+- Задержка клика: инжект → `mousedown` в DOM 2–4 мс (первый 55 мс).
+- Тачпад: **пользователь подтвердил, что скролл работает.** Жалобу на лаг кликов воспроизвести не удалось; на машине в тот момент шли параллельная сборка другой сессии и забытый фоновый `find /` агента (убит).
+- Инцидент: кэш сборки ссылался на старый путь репозитория (`GitHub\shell`) — `cargo clean --release -p tauri` лечит.
 
 ## 128. Сессия 2026-10-27 — скролл тачпадом (WH_MOUSE_LL), раскладка переживает сон, плавное открытие папок в проводнике
 
