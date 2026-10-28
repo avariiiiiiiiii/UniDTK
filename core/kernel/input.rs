@@ -7,7 +7,8 @@ use windows::{
     core::s,
     Win32::{
         Devices::HumanInterfaceDevice::{
-            HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC,
+            HID_USAGE_DIGITIZER_TOUCH_PAD, HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_DIGITIZER,
+            HID_USAGE_PAGE_GENERIC,
         },
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::Gdi::ScreenToClient,
@@ -212,23 +213,22 @@ pub fn is_key_target(target: HWND) -> bool {
     })
 }
 
-/// Forward a vertical mouse-wheel notch to the webview. A posted
-/// `WM_MOUSEWHEEL` is ignored by Chromium (unlike the posted button/move
-/// messages, wheel input is consumed via a different path that checks real
-/// input state), so instead the notch is delivered as a Tauri event —
-/// `renderer.js` listens for `wallpaper-wheel` and scrolls the DOM element
-/// under the cursor. Coordinates are converted to client space here; the
-/// frontend divides by devicePixelRatio.
-fn send_mouse_wheel(point: POINT, wheel_delta: i16) {
+/// Forward vertical wheel travel to the webview. A posted `WM_MOUSEWHEEL`
+/// is ignored by Chromium (unlike the posted button/move messages, wheel
+/// input is consumed via a different path that checks real input state), so
+/// instead the travel is delivered as a Tauri event — `unidtk-core.js`
+/// listens for `wallpaper-wheel` and scrolls the DOM element under the
+/// cursor. Coordinates are converted to client space here; the frontend
+/// divides by devicePixelRatio. `own_only` (touchpad) skips desktop-class
+/// windows: there Windows already synthesizes a wheel that the hook forwards.
+fn send_mouse_wheel(point: POINT, wheel_delta: i32, own_only: bool) {
+    let mut targets = Vec::new();
     unsafe {
         let hwnd_under_cursor = WindowsAndMessaging::WindowFromPoint(point);
         let is_desktop = is_desktop_class(hwnd_under_cursor);
 
         let Some(windows) = WINDOWS.get() else { return; };
-        let windows_lock = match windows.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
+        let Ok(windows_lock) = windows.lock() else { return; };
 
         for window in windows_lock.iter() {
             if window.forward_mouse_input {
@@ -236,25 +236,28 @@ fn send_mouse_wheel(point: POINT, wheel_delta: i16) {
                 let is_own_window = hwnd_under_cursor == win_hwnd
                     || WindowsAndMessaging::IsChild(win_hwnd, hwnd_under_cursor)
                         .as_bool();
-                if !is_desktop && !is_own_window {
+                if !is_own_window && (own_only || !is_desktop) {
                     continue;
                 }
 
                 let mut client_point = point;
-                if !ScreenToClient(win_hwnd, &mut client_point).as_bool() {
-                    continue;
+                if ScreenToClient(win_hwnd, &mut client_point).as_bool() {
+                    targets.push(client_point);
                 }
-
-                unidtk_api::emit(
-                    "wallpaper-wheel",
-                    serde_json::json!({
-                        "x": client_point.x,
-                        "y": client_point.y,
-                        "delta": wheel_delta,
-                    }),
-                );
             }
         }
+    }
+
+    // Emit outside the WINDOWS lock: the IPC must not hold up mouse forwarding.
+    for client_point in targets {
+        unidtk_api::emit(
+            "wallpaper-wheel",
+            serde_json::json!({
+                "x": client_point.x,
+                "y": client_point.y,
+                "delta": wheel_delta,
+            }),
+        );
     }
 }
 
@@ -330,10 +333,9 @@ fn handle_mouse_input(raw_data: &RAWINPUT) {
         return;
     }
 
-    // Vertical wheel is not taken from raw input: a precision touchpad's
-    // two-finger scroll never shows up here (the touchpad is a HID digitizer,
-    // not a mouse). Every wheel — mouse notch or touchpad — comes from the
-    // low-level hook instead (start_wheel_hook), so there is one path only.
+    // Vertical wheel is not taken from raw mouse input: every physical or
+    // synthesized wheel comes from the low-level hook (start_wheel_hook), and
+    // the touchpad over our own window from its raw HID contacts (touchpad.rs).
     if mouse_button_flags & WindowsAndMessaging::RI_MOUSE_WHEEL != 0 {
         return;
     }
@@ -429,31 +431,43 @@ fn handle_mouse_input(raw_data: &RAWINPUT) {
 
 
 fn read_input(l_param: LPARAM) {
-    let mut raw_data = RAWINPUT {
-        ..Default::default()
-    };
-    let mut raw_data_size = size_of::<RAWINPUT>() as u32;
-    let raw_data_header_size = size_of::<Input::RAWINPUTHEADER>() as u32;
-
-    let raw_input_data = unsafe {
-        Input::GetRawInputData(
-            Input::HRAWINPUT(l_param.0 as _),
-            Input::RID_INPUT,
-            Some(&mut raw_data as *mut _ as *mut _),
-            &mut raw_data_size,
-            raw_data_header_size,
-        )
-    };
-
-    if raw_input_data == u32::MAX {
+    let header_size = size_of::<Input::RAWINPUTHEADER>() as u32;
+    let handle = Input::HRAWINPUT(l_param.0 as _);
+    let mut size = 0u32;
+    unsafe { Input::GetRawInputData(handle, Input::RID_INPUT, None, &mut size, header_size) };
+    if size == 0 {
         return;
     }
-
-    let device_type = Input::RID_DEVICE_INFO_TYPE(raw_data.header.dwType);
-
-    if device_type == Input::RIM_TYPEMOUSE {
-        handle_mouse_input(&raw_data);
+    // A HID packet is larger than RAWINPUT; u64 storage keeps it aligned.
+    let words = (size as usize).max(size_of::<RAWINPUT>()).div_ceil(8);
+    let mut buffer = vec![0u64; words];
+    let read = unsafe {
+        Input::GetRawInputData(handle, Input::RID_INPUT, Some(buffer.as_mut_ptr().cast()), &mut size, header_size)
+    };
+    if read == u32::MAX {
         return;
+    }
+    let raw_data = unsafe { &*(buffer.as_ptr() as *const RAWINPUT) };
+
+    match Input::RID_DEVICE_INFO_TYPE(raw_data.header.dwType) {
+        Input::RIM_TYPEMOUSE => handle_mouse_input(raw_data),
+        Input::RIM_TYPEHID => {
+            let hid = unsafe { raw_data.data.hid };
+            let report_size = hid.dwSizeHid as usize;
+            let total = report_size * hid.dwCount as usize;
+            let offset = std::mem::offset_of!(RAWINPUT, data) + std::mem::offset_of!(Input::RAWHID, bRawData);
+            if total == 0 || offset + total > read as usize {
+                return;
+            }
+            let device = raw_data.header.hDevice.0 as isize;
+            let reports = unsafe {
+                std::slice::from_raw_parts_mut((buffer.as_mut_ptr() as *mut u8).add(offset), total)
+            };
+            if let Some(delta) = crate::touchpad::handle_reports(device, report_size, reports) {
+                send_touchpad_wheel(delta);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -466,6 +480,14 @@ unsafe extern "system" fn handle_window_message(
     // Handle raw input messages
     if msg == WindowsAndMessaging::WM_INPUT {
         read_input(l_param);
+    }
+
+    if msg == WindowsAndMessaging::WM_INPUT_DEVICE_CHANGE {
+        crate::touchpad::device_changed(l_param.0);
+    }
+
+    if msg == WindowsAndMessaging::WM_SETTINGCHANGE {
+        crate::touchpad::settings_changed();
     }
 
     if msg == WindowsAndMessaging::WM_DISPLAYCHANGE
@@ -497,31 +519,64 @@ unsafe extern "system" fn handle_window_message(
 
 // ── Wheel via WH_MOUSE_LL ─────────────────────────────────────────────────────
 // The low-level hook sees every WM_MOUSEWHEEL the system produces, including
-// the ones Windows synthesizes from touchpad scroll gestures (fine-grained
-// deltas, not only multiples of 120). The hook never swallows input and only
-// hands the event to a worker thread, so it cannot stall the input queue.
+// the ones Windows synthesizes from touchpad pans over ordinary windows. Over
+// our WebView it synthesizes none (the pan goes to DirectManipulation), so the
+// touchpad also feeds this channel from raw HID (touchpad.rs). The hook never
+// swallows input and only hands the event to a worker thread, so it cannot
+// stall the input queue.
 
-static WHEEL_TX: OnceLock<std::sync::mpsc::Sender<(POINT, i16)>> = OnceLock::new();
+struct Wheel {
+    point: POINT,
+    delta: i32,
+    own_only: bool,
+}
+
+static WHEEL_TX: OnceLock<std::sync::mpsc::Sender<Wheel>> = OnceLock::new();
 static WHEEL_HOOK: std::sync::Once = std::sync::Once::new();
+/// Touchpad reports arrive ~100–140/s; one event per frame is enough.
+const WHEEL_COALESCE: std::time::Duration = std::time::Duration::from_millis(16);
 
 unsafe extern "system" fn wheel_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && wparam.0 as u32 == WindowsAndMessaging::WM_MOUSEWHEEL {
         let info = &*(lparam.0 as *const WindowsAndMessaging::MSLLHOOKSTRUCT);
         let delta = (info.mouseData >> 16) as u16 as i16;
         if let Some(tx) = WHEEL_TX.get() {
-            let _ = tx.send((info.pt, delta));
+            let _ = tx.send(Wheel { point: info.pt, delta: delta as i32, own_only: false });
         }
     }
     WindowsAndMessaging::CallNextHookEx(None, code, wparam, lparam)
 }
 
+fn send_touchpad_wheel(delta: i32) {
+    let mut point = POINT::default();
+    if unsafe { WindowsAndMessaging::GetCursorPos(&mut point) }.is_err() {
+        return;
+    }
+    if let Some(tx) = WHEEL_TX.get() {
+        let _ = tx.send(Wheel { point, delta, own_only: true });
+    }
+}
+
 fn start_wheel_hook() {
     WHEEL_HOOK.call_once(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<(POINT, i16)>();
+        let (tx, rx) = std::sync::mpsc::channel::<Wheel>();
         let _ = WHEEL_TX.set(tx);
         std::thread::spawn(move || {
-            for (point, delta) in rx {
-                send_mouse_wheel(point, delta);
+            while let Ok(mut batch) = rx.recv() {
+                let deadline = std::time::Instant::now() + WHEEL_COALESCE;
+                let wait = || deadline.saturating_duration_since(std::time::Instant::now());
+                while let Ok(next) = rx.recv_timeout(wait()) {
+                    if next.own_only == batch.own_only {
+                        batch.delta += next.delta;
+                        batch.point = next.point;
+                    } else {
+                        send_mouse_wheel(batch.point, batch.delta, batch.own_only);
+                        batch = next;
+                    }
+                }
+                if batch.delta != 0 {
+                    send_mouse_wheel(batch.point, batch.delta, batch.own_only);
+                }
             }
         });
         std::thread::spawn(|| unsafe {
@@ -612,13 +667,20 @@ pub fn start_input_forwarding(hwnd: HWND, forward_mouse_input: bool, forward_key
 
         RAW_INPUT_WINDOW.store(raw_input_window.0 as isize, Ordering::SeqCst);
 
-        // Input devices to forward: mouse only (keyboard & hotkeys handled by hotkeys.rs)
-        let inputs: [Input::RAWINPUTDEVICE; 1] = [
+        // Input devices to forward: mouse, plus the Precision Touchpad's raw
+        // contacts for two-finger scroll (keyboard & hotkeys handled by hotkeys.rs)
+        let inputs: [Input::RAWINPUTDEVICE; 2] = [
             Input::RAWINPUTDEVICE {
                 hwndTarget: raw_input_window,
                 usUsagePage: HID_USAGE_PAGE_GENERIC,
                 usUsage: HID_USAGE_GENERIC_MOUSE,
                 dwFlags: Input::RIDEV_INPUTSINK,
+            },
+            Input::RAWINPUTDEVICE {
+                hwndTarget: raw_input_window,
+                usUsagePage: HID_USAGE_PAGE_DIGITIZER,
+                usUsage: HID_USAGE_DIGITIZER_TOUCH_PAD,
+                dwFlags: Input::RIDEV_INPUTSINK | Input::RIDEV_DEVNOTIFY,
             },
         ];
 

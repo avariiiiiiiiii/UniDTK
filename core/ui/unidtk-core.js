@@ -1560,8 +1560,12 @@ listen("wallpaper-wheel", (event) => {
         ? graphContainer
         : graphContainer.querySelector(".ai-dj-graph-canvas");
       if (canvas && typeof canvas._handleWheelZoom === "function") {
-        // Delta > 0 is zoom in; clientX/Y in CSS viewport pixels
-        canvas._handleWheelZoom(delta, clientX, clientY);
+        // One zoom step per whole notch: touchpad travel arrives as many
+        // small deltas. Delta > 0 is zoom in; clientX/Y in CSS viewport pixels
+        const notches = wheelNotches("ai-dj-zoom", delta);
+        for (let i = 0; i < Math.abs(notches); i++) {
+          canvas._handleWheelZoom(Math.sign(notches), clientX, clientY);
+        }
       }
       return; // Fully consume inside graph
     }

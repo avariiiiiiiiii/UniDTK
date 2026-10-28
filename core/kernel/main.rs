@@ -16,6 +16,7 @@ use unidtk_mod_vpn as vpn;
 
 mod hotkeys;
 mod input;
+mod touchpad;
 mod ipc;
 mod library_migration;
 mod log_store;
