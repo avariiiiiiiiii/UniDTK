@@ -2166,6 +2166,7 @@ export {
   openMusicSatellite,
   startMusicMetadataLoop,
   resetMusicIntervals,
+  stopMusicCardLoops,
   musicTrackCache,
   musicTrackCachePromise,
   musicTrackCacheMissRetried,

@@ -125,7 +125,9 @@ async function saveConfig() {
   // writes can never serialize a stale theme payload (single redb writer
   // object for both theme.js and core saves).
   syncThemeIntoConfig();
-  await saveWidgetConfig(config).catch(() => {});
+  const ok = await saveWidgetConfig(config);
+  if (!ok) showDebugMessage("Настройки не сохранены — база недоступна, изменения пропадут после перезапуска");
+  return ok;
 }
 
 
@@ -276,7 +278,7 @@ async function createWidgetInstance(widgetType) {
   if (config.hidden.includes(widgetType)) {
     config.hidden = config.hidden.filter((id) => id !== widgetType);
     await saveConfig();
-    await loadWidgets();
+    await syncWidgets();
     return;
   }
 
@@ -289,7 +291,7 @@ async function createWidgetInstance(widgetType) {
   config.instances = [{ instanceId, widgetType }, ...config.instances];
   config.positions[instanceId] = defaultWidgetPosition(widgetType);
   await saveConfig();
-  await loadWidgets();
+  await syncWidgets();
 }
 
 async function removeWidgetInstance(instanceId) {
@@ -301,7 +303,7 @@ async function removeWidgetInstance(instanceId) {
     delete config.positions[`${instanceId}-menu`];
   }
   await saveConfig();
-  await loadWidgets();
+  await syncWidgets();
 }
 
 async function hideBaseWidget(widgetId) {
@@ -309,27 +311,14 @@ async function hideBaseWidget(widgetId) {
   if (!Array.isArray(config.hidden)) config.hidden = [];
   if (!config.hidden.includes(widgetId)) config.hidden.push(widgetId);
   await saveConfig();
-  await loadWidgets();
+  await syncWidgets();
 }
 
 // в”Ђв”Ђв”Ђ Load widgets в”Ђв”Ђв”Ђ
 
-let _isLoadingWidgets = false;
-async function loadWidgets() {
-  if (_isLoadingWidgets) {
-    rlog("[renderer] loadWidgets already running, skipping concurrent call");
-    return;
-  }
-  _isLoadingWidgets = true;
-  try {
-    rlog("[renderer] loadWidgets called");
-    await loadConfig();
-    rlog("[renderer] loadConfig done");
-
-  // Clean up intervals before DOM rebuild to prevent leaks
-  const musicModule = await import("../modules/mp3-player/widget.js").catch(() => null);
-  if (musicModule?.resetMusicIntervals) musicModule.resetMusicIntervals();
-
+// Widget list the desktop should show: modules + folders from the backend,
+// with special types pinned for the built-ins. Null when nothing came back.
+async function fetchRenderableWidgets() {
   let widgets = await getWidgets().catch((err) => {
     const msg = `getWidgets error: ${err?.message || err}`;
     showDebugMessage(msg);
@@ -342,7 +331,7 @@ async function loadWidgets() {
 
   if (!widgets || !widgets.length) {
     rlog("[renderer] no widgets, returning early");
-    return;
+    return null;
   }
 
   // Special widgets must never degrade into the generic shortcuts view if an
@@ -357,19 +346,13 @@ async function loadWidgets() {
     ...widget,
     specialType: widget.specialType || builtinSpecialTypes[widget.id] || "",
   }));
+  return widgets;
+}
 
-  // в”Ђв”Ђв”Ђ Arrange widgets в”Ђв”Ђв”Ђ
-  disposeClockMorphs();
-  widgetsCanvas.querySelectorAll('.micrographics-card').forEach((card) => card._geometryController?.dispose());
-  _dockResizeObserver?.disconnect();
-  _dockGeometry.clear();
-  widgetsCanvas.innerHTML = "";
-  if (!config.positions) config.positions = {};
-  if (!config.instances) config.instances = [];
+// Base widgets minus hidden types, plus the configured instances.
+function desiredWidgets(widgets) {
   if (!Array.isArray(config.hidden)) config.hidden = [];
-
-  ensureWidgetAddControls(widgets);
-
+  if (!config.instances) config.instances = [];
   const widgetByType = new Map(widgets.map((w) => [w.id, w]));
   const hiddenSet = new Set(config.hidden);
   const renderWidgets = [
@@ -390,10 +373,12 @@ async function loadWidgets() {
       })
       .filter(Boolean),
   ];
+  return renderWidgets;
+}
 
-  let offsetY = 28;
-  renderWidgets.forEach((w, i) => {
-    try {
+// One desktop card, fully wired; `layout.offsetY` stacks cards that have no
+// stored position yet.
+function buildWidgetCard(w, layout) {
     const card = document.createElement("div");
     card.className = "widget-card";
     card.dataset.id = w.id;
@@ -403,8 +388,8 @@ async function loadWidgets() {
     if (isMicrographics) card.classList.add("micrographics-card");
     if (!config.positions[w.id]) {
       config.positions[w.id] = w.isInstance
-        ? defaultWidgetPosition(w.widgetType || w.id, offsetY)
-        : { x: 28, y: offsetY };
+        ? defaultWidgetPosition(w.widgetType || w.id, layout.offsetY)
+        : { x: 28, y: layout.offsetY };
       // Preset geometry defaults win over the hardcoded fallback sizes
       // (user data never exists yet at this point, so nothing to preserve).
       const presetSize = resolvePresetSize(w.widgetType || w.id, Boolean(w.isFolder));
@@ -412,7 +397,7 @@ async function loadWidgets() {
         config.positions[w.id].w = presetSize.w;
         config.positions[w.id].h = presetSize.h;
       }
-      offsetY += 88;
+      layout.offsetY += 88;
     }
 
     const pos = config.positions[w.id] || { x: 0, y: 0 };
@@ -545,8 +530,133 @@ async function loadWidgets() {
         toggleWidget(card, body, w.id, w.specialType, w.widgetType || w.id);
       });
     }
+  return card;
+}
 
-    widgetsCanvas.appendChild(card);
+// Releases what a card holds outside its own subtree (morph state, geometry
+// controller, player timers) so it can leave the desktop without a rebuild.
+function disposeWidgetCard(card) {
+  disposeClockMorph(card);
+  card._geometryController?.dispose();
+  const players = card.matches(".music-widget") ? [card] : [...card.querySelectorAll(".music-widget")];
+  if (players.length) {
+    import("../modules/mp3-player/widget.js")
+      .then((m) => players.forEach((el) => m.stopMusicCardLoops(el)))
+      .catch(() => {});
+  }
+  _dockGeometry.delete(card.dataset.id);
+}
+
+let _syncInFlight = null;
+let _syncAgain = false;
+// Reconcile the desktop with the in-memory config without resetting the DOM
+// (architecture §4): cards that should go are disposed and removed, missing
+// ones are built, folder cards pick up renamed titles and edited shortcuts in
+// place. Everything else — player, Telegram, clocks — keeps running.
+async function syncWidgets() {
+  if (_isLoadingWidgets) return;
+  if (_syncInFlight) {
+    _syncAgain = true;
+    return _syncInFlight;
+  }
+  _syncInFlight = (async () => {
+    do {
+      _syncAgain = false;
+      await reconcileWidgets();
+    } while (_syncAgain);
+  })().finally(() => { _syncInFlight = null; });
+  return _syncInFlight;
+}
+
+async function reconcileWidgets() {
+  const widgets = await fetchRenderableWidgets();
+  if (!widgets) return;
+  if (!config.positions) config.positions = {};
+  ensureWidgetAddControls(widgets);
+  const desired = desiredWidgets(widgets);
+  const wanted = new Set(desired.map((w) => w.id));
+  const cards = new Map([...widgetsCanvas.querySelectorAll(":scope > .widget-card")].map((c) => [c.dataset.id, c]));
+
+  cards.forEach((card, id) => {
+    if (wanted.has(id)) return;
+    if (card.classList.contains("expanded")) collapseActiveDesktopWidget();
+    disposeWidgetCard(card);
+    card.remove();
+  });
+
+  const layout = { offsetY: 28 };
+  desired.forEach((w) => {
+    const card = cards.get(w.id);
+    if (!card) {
+      try {
+        widgetsCanvas.appendChild(buildWidgetCard(w, layout));
+      } catch (error) {
+        console.error(`widget render failed: ${w.id}`, error);
+        logFrontend(`widget render failed: ${w.id}: ${error?.stack || error?.message || error}`);
+      }
+      return;
+    }
+    if (!Array.isArray(w.items)) return;
+    // A folder: refresh what its expanded body and header are built from.
+    card._shortcutItems = w.items.map((item) => ({
+      name: item.name,
+      filename: item.name,
+      path: item.target,
+      type: item.kind || "file",
+    }));
+    const header = card.querySelector(":scope > .widget-header");
+    const title = header?.querySelector(".widget-title");
+    if (title) title.textContent = w.name;
+    const desc = header?.querySelector(".widget-desc");
+    if (desc) desc.textContent = w.description;
+    const icon = header?.querySelector(".widget-icon");
+    if (icon) icon.innerHTML = w.iconSvg || "";
+    if (card.classList.contains("expanded")) collapseActiveDesktopWidget();
+  });
+
+  relayoutWidgets();
+  observeDockGeometry();
+  refreshDomCaches();
+  requestAnimationFrame(() => notifyGeometryChanged("sync"));
+}
+
+let _isLoadingWidgets = false;
+async function loadWidgets() {
+  if (_isLoadingWidgets) {
+    rlog("[renderer] loadWidgets already running, skipping concurrent call");
+    return;
+  }
+  _isLoadingWidgets = true;
+  try {
+    rlog("[renderer] loadWidgets called");
+    await loadConfig();
+    rlog("[renderer] loadConfig done");
+
+  // Clean up intervals before DOM rebuild to prevent leaks
+  const musicModule = await import("../modules/mp3-player/widget.js").catch(() => null);
+  if (musicModule?.resetMusicIntervals) musicModule.resetMusicIntervals();
+
+  const widgets = await fetchRenderableWidgets();
+  if (!widgets) return;
+
+  // в”Ђв”Ђв”Ђ Arrange widgets в”Ђв”Ђв”Ђ
+  disposeClockMorphs();
+  widgetsCanvas.querySelectorAll('.micrographics-card').forEach((card) => card._geometryController?.dispose());
+  _dockResizeObserver?.disconnect();
+  _dockGeometry.clear();
+  widgetsCanvas.innerHTML = "";
+  if (!config.positions) config.positions = {};
+  if (!config.instances) config.instances = [];
+  if (!Array.isArray(config.hidden)) config.hidden = [];
+
+  ensureWidgetAddControls(widgets);
+
+  const renderWidgets = desiredWidgets(widgets);
+
+  const layout = { offsetY: 28 };
+  renderWidgets.forEach((w) => {
+    try {
+    widgetsCanvas.appendChild(buildWidgetCard(w, layout));
     } catch (error) {
       console.error(`widget render failed: ${w.id}`, error);
       showDebugMessage(`widget ${w.id} failed: ${error?.message || error}`);
@@ -661,14 +771,9 @@ function collapseSingleWidget(card) {
     if (!card.classList.contains("expanded")) {
       const body = card.querySelector(".widget-body");
       if (body) {
+        // Collapsed cards show their header only; the body starts empty, as
+        // when the card was built.
         body.innerHTML = "";
-        const specialType = card.dataset.specialType || (widgetId?.startsWith("folder_") ? "folder" : null);
-        if (specialType === "folder") {
-          const f = config.folders?.find((item) => item.id === widgetId);
-          if (f) body.innerHTML = (window.__renderFolderIcon ? window.__renderFolderIcon(f) : "");
-        } else if (specialType === "dashboard") {
-          body.innerHTML = (window.__renderDashboardIcon ? window.__renderDashboardIcon() : "");
-        }
       }
     }
   }, dur);
@@ -883,23 +988,25 @@ function finishClockMorph(card, closed = false) {
  * the cards, and the stand-in lives on <body> rather than inside the card, so
  * without this it survives the rebuild as a permanent ghost over the desktop.
  */
+function disposeClockMorph(card) {
+  const state = card._clockMorph;
+  if (!state) return;
+  state.generation += 1;
+  if (state.timeline) {
+    state.timeline.cleanup();
+    state.timeline = null;
+  }
+  if (state.target) restoreInlineProperty(state.target, "visibility", state.targetVisibility);
+  if (state.source) {
+    restoreInlineProperty(state.source, "visibility", state.sourceVisibility);
+    restoreInlineProperty(state.source, "opacity", state.sourceOpacity);
+  }
+  state.clone?.remove();
+  card._clockMorph = null;
+}
+
 function disposeClockMorphs() {
-  document.querySelectorAll(".widget-card").forEach((card) => {
-    const state = card._clockMorph;
-    if (!state) return;
-    state.generation += 1;
-    if (state.timeline) {
-      state.timeline.cleanup();
-      state.timeline = null;
-    }
-    if (state.target) restoreInlineProperty(state.target, "visibility", state.targetVisibility);
-    if (state.source) {
-      restoreInlineProperty(state.source, "visibility", state.sourceVisibility);
-      restoreInlineProperty(state.source, "opacity", state.sourceOpacity);
-    }
-    state.clone?.remove();
-    card._clockMorph = null;
-  });
+  document.querySelectorAll(".widget-card").forEach(disposeClockMorph);
   document.querySelectorAll(".clock-morph-clone").forEach((clone) => clone.remove());
 }
 
@@ -1124,13 +1231,6 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
         notifyGeometryChanged("collapse");
         body._dashboardRenderGeneration = (body._dashboardRenderGeneration || 0) + 1;
         body.innerHTML = "";
-        const collapsedType = card.dataset.specialType || (widgetId?.startsWith("folder_") ? "folder" : null);
-        if (collapsedType === "folder") {
-          const folder = config.folders?.find((item) => item.id === widgetId);
-          if (folder) body.innerHTML = (window.__renderFolderIcon ? window.__renderFolderIcon(folder) : "");
-        } else if (collapsedType === "dashboard") {
-          body.innerHTML = (window.__renderDashboardIcon ? window.__renderDashboardIcon() : "");
-        }
         restoreTransitions();
       };
 
@@ -2201,7 +2301,7 @@ function notifyGeometryChanged(reason) {
 function relayoutWidgets() {
   const cards = widgetsCanvas.querySelectorAll(".widget-card");
   if (!cards.length) {
-    loadWidgets();
+    syncWidgets();
     return;
   }
   cards.forEach((card) => {
@@ -2252,7 +2352,7 @@ export {
   notifyGeometryChanged,
   getDockGeometry,
   renderWidgetAddPopover, ensureWidgetAddControls, createWidgetInstance,
-  removeWidgetInstance, hideBaseWidget, loadWidgets, relayoutWidgets, toggleWidget,
+  removeWidgetInstance, hideBaseWidget, loadWidgets, syncWidgets, relayoutWidgets, toggleWidget,
   collapseActiveDesktopWidget,
   setupDragReorder, openExplorer, closeExplorer, collapseAllShellWidgets,
   handleDisplayOrResizeChange, getShortcutIcon, _renderWidget, _startWidgetLoops,

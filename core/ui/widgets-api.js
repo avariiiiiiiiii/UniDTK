@@ -160,19 +160,19 @@ export async function getWidgetShortcuts(widgetId) {
   return [];
 }
 
-function buildDefaultWidgetConfig() {
-  return {
-    order: ["clock", "mp3-player", "telegram", "glyph-bar"],
-    align: "left",
-    positions: {
-      "clock": { x: 28, y: 28, w: 340, h: 64 },
-      "mp3-player": { x: 28, y: 116, w: 340, h: 64 },
-      "telegram": { x: 28, y: 204, w: 340, h: 64 },
-      "glyph-bar": { x: 28, y: 292, w: 340, h: 64 },
-    },
-    hidden: [],
-  };
+// The kernel owns the default layout (the one it seeds on first start), so
+// first run and "reset positions" agree. Unreachable kernel: an empty layout,
+// cards then stack at their fallback positions.
+export async function getDefaultWidgetConfig() {
+  try {
+    const config = await invoke("get_default_widget_config");
+    if (config && typeof config === "object" && config.positions) return config;
+  } catch (e) {
+    console.warn("get_default_widget_config failed:", e);
+  }
+  return { order: [], align: "left", positions: {}, instances: [], hidden: [] };
 }
+
 
 export async function getWidgetConfig() {
   let backendReachable = false;
@@ -190,7 +190,7 @@ export async function getWidgetConfig() {
     // theme state (theme + customPresets + userColors) — an empty layout must never wipe
     // the user's saved appearance from redb.
     if (config && typeof config === "object" && (config.theme || config.customPresets || config.userColors)) {
-      const defaultConfig = buildDefaultWidgetConfig();
+      const defaultConfig = await getDefaultWidgetConfig();
       if (config.theme && typeof config.theme === "object") defaultConfig.theme = config.theme;
       if (Array.isArray(config.customPresets)) defaultConfig.customPresets = config.customPresets;
       if (config.userColors && typeof config.userColors === "object") defaultConfig.userColors = config.userColors;
@@ -202,7 +202,7 @@ export async function getWidgetConfig() {
     console.warn("get_widget_config invoke failed:", e);
   }
 
-  const defaultConfig = buildDefaultWidgetConfig();
+  const defaultConfig = await getDefaultWidgetConfig();
 
   if (backendReachable) {
     window.__shellConfigSource = "redb";
@@ -214,10 +214,38 @@ export async function getWidgetConfig() {
   return defaultConfig;
 }
 
-export async function saveWidgetConfig(config) {
+// Every writer (layout, menu, theme) replaces the same redb blob, so writes go
+// through one queue: the config is snapshotted at call time, commits land in
+// call order, and saves that pile up behind an in-flight write collapse into
+// the newest snapshot. Resolves to whether the write reached redb.
+let saveInFlight = false;
+let pendingSnapshot = null;
+let pendingWaiters = [];
+
+async function drainSaves() {
+  if (saveInFlight) return;
+  saveInFlight = true;
+  while (pendingSnapshot) {
+    const snapshot = pendingSnapshot;
+    const waiters = pendingWaiters;
+    pendingSnapshot = null;
+    pendingWaiters = [];
+    let ok = true;
+    try {
+      await invoke("save_widget_config", { config: snapshot });
+    } catch (e) {
+      ok = false;
+      console.error("save_widget_config invoke failed:", e);
+    }
+    waiters.forEach((resolve) => resolve(ok));
+  }
+  saveInFlight = false;
+}
+
+export function saveWidgetConfig(config) {
   if (window.__shellConfigSource && window.__shellConfigSource !== "redb") {
     console.warn(`save_widget_config skipped (config source: ${window.__shellConfigSource})`);
-    return;
+    return Promise.resolve(false);
   }
   const hasPositions = config && typeof config === "object" && config.positions
     && Object.keys(config.positions).length > 0;
@@ -225,13 +253,13 @@ export async function saveWidgetConfig(config) {
     && Object.keys(config.settings).length > 0;
   const hasTheme = config && typeof config === "object" && Boolean(config.theme || config.customPresets || config.userColors);
   if (!hasPositions && !hasSettings && !hasTheme) {
-    return;
+    return Promise.resolve(true);
   }
-  try {
-    await invoke("save_widget_config", { config });
-  } catch (e) {
-    console.error("save_widget_config invoke failed:", e);
-  }
+  pendingSnapshot = JSON.parse(JSON.stringify(config));
+  return new Promise((resolve) => {
+    pendingWaiters.push(resolve);
+    drainSaves();
+  });
 }
 
 // ─── Disabled modules (backend off) ──────────────────────────────────────────

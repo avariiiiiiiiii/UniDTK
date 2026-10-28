@@ -723,8 +723,6 @@ export function computeThemeAttrs(theme) {
 
 let currentTheme = normalizeTheme(BUILTIN_PRESETS[0]);
 let customPresets = [];
-let saveTimer = null;
-let saveChain = Promise.resolve();
 let rafId = null;
 let pendingFields = new Set();
 let configRef = null;
@@ -847,7 +845,7 @@ export function applyTheme(theme, opts = {}) {
 
   if (opts.persist || healed) {
     if (healed && opts.skipStorage) writeStorage();
-    schedulePersistence();
+    persistTheme();
   }
 }
 
@@ -1020,7 +1018,7 @@ function migrateSizesToPreset(newPreset, oldTheme) {
   }
   if (changed) {
     applySizesLive();
-    schedulePersistence();
+    persistTheme();
   }
 }
 
@@ -1053,7 +1051,7 @@ export function resetSizesToPreset() {
   }
   if (n) {
     applySizesLive();
-    schedulePersistence();
+    persistTheme();
   }
   return n;
 }
@@ -1087,7 +1085,7 @@ export function deleteCustomPreset(presetId) {
   if (currentTheme.id === presetId) {
     applyTheme(BUILTIN_PRESETS[0], { persist: true });
   } else {
-    schedulePersistence();
+    persistTheme();
   }
   return true;
 }
@@ -1104,35 +1102,23 @@ export function syncThemeIntoConfig() {
   configRef.userColors = userColors ? { palette: { ...userColors.palette }, tintMap: { ...userColors.tintMap } } : null;
 }
 
-/** Immediate (non-debounced) persistence for state that must never be lost. */
-function flushPersistence() {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = null;
-  writeStorage();
+/**
+ * Persist the theme into redb now. Commits are discrete (change, not input
+ * events), and widgets-api serializes and coalesces every config write, so
+ * no debounce: a debounce window was lost whenever the app quit inside it.
+ */
+function persistTheme() {
   syncThemeIntoConfig();
   if (!configRef) return;
-  saveChain = saveChain
-    .then(() => saveWidgetConfig(configRef))
-    .catch((err) => {
-      console.error("[theme] failed to persist theme to redb:", err);
-    });
+  saveWidgetConfig(configRef).then((ok) => {
+    if (!ok) console.error("[theme] failed to persist theme to redb");
+  });
 }
 
-/**
- * Debounced, serialized persistence into redb via saveWidgetConfig.
- */
-function schedulePersistence() {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    syncThemeIntoConfig();
-    if (!configRef) return;
-    saveChain = saveChain
-      .then(() => saveWidgetConfig(configRef))
-      .catch((err) => {
-        console.error("[theme] failed to persist theme to redb:", err);
-      });
-  }, 600);
+/** Persistence for state that must never be lost, including the local cache. */
+function flushPersistence() {
+  writeStorage();
+  persistTheme();
 }
 
 /**

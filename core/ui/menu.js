@@ -9,8 +9,8 @@
 
 import { invoke } from "@unidtk/bridge";
 import { surfaceManager } from "./surface-manager.js";
-import { getWidgets, saveWidgetConfig, getDisabledModules, setDisabledModules } from "./widgets-api.js";
-import { config, loadWidgets, relayoutWidgets, escapeHtml } from "./unidtk-core.js";
+import { getWidgets, getDefaultWidgetConfig, getDisabledModules, setDisabledModules } from "./widgets-api.js";
+import { config, saveConfig, syncWidgets, relayoutWidgets, escapeHtml } from "./unidtk-core.js";
 import {
   getActiveTheme,
   getAllPresets,
@@ -27,6 +27,21 @@ import {
   hasPreviousColors,
 } from "./theme.js";
 import { animate, spring } from "./motion.js";
+
+// Backend-module toggles share one stored list; see the handler.
+let moduleToggleChain = Promise.resolve();
+
+// One submission per click: the control stays disabled while its action is
+// in flight, so a double click cannot create a folder or shortcut twice.
+async function runOnce(control, action) {
+  if (!control || control.disabled) return;
+  control.disabled = true;
+  try {
+    await action();
+  } finally {
+    if (control.isConnected) control.disabled = false;
+  }
+}
 
 const FOLDER_ICONS = {
   folder: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>`,
@@ -285,31 +300,40 @@ async function renderWidgetsTab() {
 
   // Visibility toggle
   pane.querySelectorAll(".widget-vis-toggle").forEach((toggle) => {
-    toggle.addEventListener("change", async (e) => {
+    toggle.addEventListener("change", () => runOnce(toggle, async () => {
       const id = toggle.dataset.id;
-      const checked = toggle.checked;
-      if (checked) {
-        config.hidden = (config.hidden || []).filter((h) => h !== id);
-      } else {
-        if (!config.hidden.includes(id)) config.hidden.push(id);
+      const previous = [...(config.hidden || [])];
+      config.hidden = toggle.checked
+        ? previous.filter((h) => h !== id)
+        : [...new Set([...previous, id])];
+      if (!(await saveConfig())) {
+        config.hidden = previous;
+        toggle.checked = !toggle.checked;
+        return;
       }
-      await saveWidgetConfig(config);
-      await loadWidgets();
+      await syncWidgets();
       renderWidgetsTab();
-    });
+    }));
   });
 
   // Module disable toggle (backend off). Persisted; takes effect on the next
   // app start (the module is not initialized / skips its heavy background).
   pane.querySelectorAll(".mod-disable-toggle").forEach((tgl) => {
-    tgl.addEventListener("change", async (e) => {
+    tgl.addEventListener("change", () => {
       const id = tgl.dataset.id;
       const checked = tgl.checked;
-      const current = new Set(await getDisabledModules());
-      if (checked) current.delete(id);
-      else current.add(id);
-      const ok = await setDisabledModules([...current]);
-      if (ok) renderWidgetsTab();
+      // Read-modify-write of one list: chained so a second toggle reads the
+      // first one's result instead of the same stale list.
+      moduleToggleChain = moduleToggleChain.then(async () => {
+        const current = new Set(await getDisabledModules());
+        if (checked) current.delete(id);
+        else current.add(id);
+        const ok = await setDisabledModules([...current]);
+        if (!ok) tgl.checked = !checked;
+      }).catch((err) => {
+        console.error("module toggle failed:", err);
+        tgl.checked = !checked;
+      }).finally(() => renderWidgetsTab());
     });
   });
 
@@ -329,7 +353,7 @@ async function renderWidgetsTab() {
         else card.style.top = val + "px";
       }
 
-      await saveWidgetConfig(config);
+      await saveConfig();
       relayoutWidgets();
     });
   });
@@ -344,23 +368,32 @@ async function renderWidgetsTab() {
   });
 
   // Reset positions button
-  pane.querySelector("#btnResetPositions")?.addEventListener("click", async () => {
-    let y = 28;
-    const defaults = ["clock", "mp3-player", "telegram", "glyph-bar"];
-    defaults.forEach((id) => {
-      config.positions[id] = { x: 28, y, w: 340, h: 64 };
-      y += 88;
+  const resetBtn = pane.querySelector("#btnResetPositions");
+  resetBtn?.addEventListener("click", () => runOnce(resetBtn, async () => {
+    const defaults = (await getDefaultWidgetConfig()).positions || {};
+    const canvas = document.getElementById("widgets");
+    const maxX = Math.max(0, (canvas?.clientWidth || window.innerWidth) - 120);
+    const maxY = Math.max(0, (canvas?.clientHeight || window.innerHeight) - 64);
+    // Geometry only: settings stored next to it (clock face, AI DJ,
+    // micrographics style) are the user's and survive a layout reset.
+    Object.entries(config.positions || {}).forEach(([id, pos]) => {
+      const def = defaults[id];
+      if (def) {
+        pos.x = def.x;
+        pos.y = def.y;
+        if (def.w) pos.w = def.w;
+        if (def.h) pos.h = def.h;
+        return;
+      }
+      // No kernel default (folders, instances, satellites): keep the place,
+      // only pull it back on screen.
+      if (typeof pos.x === "number") pos.x = Math.min(Math.max(0, pos.x), maxX);
+      if (typeof pos.y === "number") pos.y = Math.min(Math.max(0, pos.y), maxY);
     });
-    config.positions.micrographics = { x: 28, y: 28, mgScale: 1, mgStyle: "mechanical", mgLayout: 2 };
-    widgets.filter((w) => w.isFolder).forEach((f) => {
-      config.positions[f.id] = { x: 28, y, w: 340, h: 64 };
-      y += 88;
-    });
-    config.hidden = [];
-    await saveWidgetConfig(config);
-    await loadWidgets();
+    await saveConfig();
+    await syncWidgets();
     renderWidgetsTab();
-  });
+  }));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -515,13 +548,14 @@ async function renderFoldersTab() {
   });
 
   // Create folder confirm
-  pane.querySelector("#btnConfirmCreateFolder")?.addEventListener("click", async () => {
+  const createBtn = pane.querySelector("#btnConfirmCreateFolder");
+  createBtn?.addEventListener("click", () => runOnce(createBtn, async () => {
     const nameInp = pane.querySelector("#newFolderName");
     const name = (nameInp?.value || "").trim();
     if (!name) return;
 
     const newFolder = {
-      id: "folder_" + Date.now(),
+      id: `folder_${crypto.randomUUID()}`,
       name,
       icon_svg: FOLDER_ICONS[selectedFolderIcon] || FOLDER_ICONS.folder,
       items: [],
@@ -530,24 +564,31 @@ async function renderFoldersTab() {
     try {
       await invoke("save_folder", { folder: newFolder });
       isCreatingFolder = false;
-      await loadWidgets();
+      await syncWidgets();
       renderFoldersTab();
     } catch (e) {
       alert(`Ошибка создания папки: ${e}`);
     }
-  });
+  }));
 
   // Rename folder on change
   pane.querySelectorAll(".folder-name-input").forEach((inp) => {
     inp.addEventListener("change", async () => {
       const id = inp.dataset.id;
       const newName = inp.value.trim();
-      if (!newName) return;
       const target = folders.find((f) => f.id === id);
-      if (target) {
+      if (!target) return;
+      if (!newName) {
+        inp.value = target.name;
+        return;
+      }
+      try {
+        await invoke("save_folder", { folder: { ...target, name: newName } });
         target.name = newName;
-        await invoke("save_folder", { folder: target });
-        await loadWidgets();
+        await syncWidgets();
+      } catch (e) {
+        inp.value = target.name;
+        alert(`Ошибка переименования: ${e}`);
       }
     });
   });
@@ -559,7 +600,11 @@ async function renderFoldersTab() {
       if (!confirm("Удалить эту папку и все её ярлыки?")) return;
       try {
         await invoke("delete_folder", { id });
-        await loadWidgets();
+        delete config.positions?.[id];
+        config.hidden = (config.hidden || []).filter((h) => h !== id);
+        config.instances = (config.instances || []).filter((it) => it.widgetType !== id);
+        await saveConfig();
+        await syncWidgets();
         renderFoldersTab();
       } catch (e) {
         alert(`Ошибка удаления: ${e}`);
@@ -569,7 +614,7 @@ async function renderFoldersTab() {
 
   // Add shortcut
   pane.querySelectorAll(".btn-add-shortcut").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", () => runOnce(btn, async () => {
       const folderId = btn.dataset.folderId;
       const card = btn.closest(".folder-mgmt-card");
       if (!card) return;
@@ -590,41 +635,42 @@ async function renderFoldersTab() {
       const targetFolder = folders.find((f) => f.id === folderId);
       if (!targetFolder) return;
 
-      if (!Array.isArray(targetFolder.items)) targetFolder.items = [];
-      targetFolder.items.push({
-        id: "item_" + Date.now(),
+      const items = [...(targetFolder.items || []), {
+        id: `item_${crypto.randomUUID()}`,
         name: scName,
         kind: scKind,
         target: scTarget,
-      });
+      }];
 
       try {
-        await invoke("save_folder", { folder: targetFolder });
-        await loadWidgets();
+        await invoke("save_folder", { folder: { ...targetFolder, items } });
+        targetFolder.items = items;
+        await syncWidgets();
         renderFoldersTab();
       } catch (e) {
         alert(`Ошибка сохранения: ${e}`);
       }
-    });
+    }));
   });
 
   // Delete shortcut
   pane.querySelectorAll(".btn-delete-shortcut").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", () => runOnce(btn, async () => {
       const folderId = btn.dataset.folderId;
       const itemId = btn.dataset.itemId;
       const targetFolder = folders.find((f) => f.id === folderId);
       if (!targetFolder || !targetFolder.items) return;
 
-      targetFolder.items = targetFolder.items.filter((it) => it.id !== itemId);
+      const items = targetFolder.items.filter((it) => it.id !== itemId);
       try {
-        await invoke("save_folder", { folder: targetFolder });
-        await loadWidgets();
+        await invoke("save_folder", { folder: { ...targetFolder, items } });
+        targetFolder.items = items;
+        await syncWidgets();
         renderFoldersTab();
       } catch (e) {
         alert(`Ошибка удаления: ${e}`);
       }
-    });
+    }));
   });
 }
 
@@ -649,7 +695,19 @@ async function renderVpnTab() {
     console.error("vpn status/settings error:", e);
   }
 
-  const home = settings?.home_server || {
+  // Without the stored settings the form would show blanks, and saving it
+  // would overwrite the real subscription and server with them.
+  if (!settings) {
+    pane.innerHTML = `
+      <div class="menu-empty-state">
+        Не удалось загрузить настройки VPN. Форма скрыта, чтобы не затереть сохранённую подписку.
+        <div style="margin-top: 12px;"><button class="menu-btn" id="btnVpnRetry">Повторить</button></div>
+      </div>`;
+    pane.querySelector("#btnVpnRetry")?.addEventListener("click", () => renderVpnTab());
+    return;
+  }
+
+  const home = settings.home_server || {
     enabled: false,
     host: "",
     port: 443,
@@ -661,6 +719,7 @@ async function renderVpnTab() {
   };
 
   const isConnected = !!status?.connected;
+  const statusLabel = !status ? "Статус неизвестен" : isConnected ? "Подключено" : "Отключено";
 
   pane.innerHTML = `
     <!-- VPN Subscription Section -->
@@ -678,7 +737,7 @@ async function renderVpnTab() {
         <div>
           <span class="menu-status-badge ${isConnected ? "active" : ""}">
             <span style="width: 6px; height: 6px; border-radius: 50%; background: ${isConnected ? "var(--status-ok)" : "rgba(var(--fg-rgb), 0.53)"};"></span>
-            ${isConnected ? "Подключено" : "Отключено"}
+            ${statusLabel}
           </span>
         </div>
       </div>
@@ -771,7 +830,8 @@ async function renderVpnTab() {
   `;
 
   // Subscription save
-  pane.querySelector("#btnSaveVpnSub")?.addEventListener("click", async () => {
+  const saveSubBtn = pane.querySelector("#btnSaveVpnSub");
+  saveSubBtn?.addEventListener("click", () => runOnce(saveSubBtn, async () => {
     const url = (pane.querySelector("#vpnSubUrl")?.value || "").trim();
     const toast = pane.querySelector("#vpnSubToast");
     try {
@@ -787,14 +847,21 @@ async function renderVpnTab() {
         toast.textContent = `Ошибка сохранения: ${e}`;
       }
     }
-  });
+  }));
 
   // Auto connect toggle
   pane.querySelector("#vpnAutoConnectToggle")?.addEventListener("change", async (e) => {
+    const toggle = e.target;
     try {
-      await invoke("vpn_set_auto_connect", { enabled: e.target.checked });
+      await invoke("vpn_set_auto_connect", { enabled: toggle.checked });
     } catch (err) {
       console.error("vpn_set_auto_connect failed:", err);
+      toggle.checked = !toggle.checked;
+      const toast = pane.querySelector("#vpnSubToast");
+      if (toast) {
+        toast.className = "menu-toast visible error";
+        toast.textContent = `Автоподключение не сохранено: ${err}`;
+      }
     }
   });
 
@@ -805,7 +872,8 @@ async function renderVpnTab() {
   });
 
   // Home server save
-  pane.querySelector("#btnSaveHomeServer")?.addEventListener("click", async () => {
+  const saveHomeBtn = pane.querySelector("#btnSaveHomeServer");
+  saveHomeBtn?.addEventListener("click", () => runOnce(saveHomeBtn, async () => {
     const isEnabled = pane.querySelector("#homeServerToggle")?.checked ?? false;
     const config = {
       enabled: isEnabled,
@@ -832,7 +900,7 @@ async function renderVpnTab() {
         toast.textContent = `Ошибка сохранения: ${e}`;
       }
     }
-  });
+  }));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1396,7 +1464,9 @@ function setupThemeTabEvents(pane) {
   }
 
   // Motion Profile Pills
-  pane.querySelectorAll(".theme-motion-pill").forEach((pill) => {
+  // `.theme-motion-pill` is only the pill look (font, enum and shuffle buttons
+  // share it); the profile handler must bind to profile pills alone.
+  pane.querySelectorAll("#themeMotionPillsRow [data-profile]").forEach((pill) => {
     pill.addEventListener("click", () => {
       const profile = pill.dataset.profile;
       setLiveToken("motionProfile", profile);
