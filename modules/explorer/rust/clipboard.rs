@@ -80,6 +80,47 @@ pub fn paste_files_from_clipboard() -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
+const CF_UNICODETEXT: u32 = 13;
+
+/// Text on the clipboard: a browser's link (`UniformResourceLocatorW`) first,
+/// otherwise plain Unicode text. `None` when there is neither.
+pub fn paste_text_from_clipboard() -> Result<Option<String>, String> {
+    use windows::core::w;
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+
+    unsafe {
+        let url_format = RegisterClipboardFormatW(w!("UniformResourceLocatorW"));
+        OpenClipboard(HWND(std::ptr::null_mut()))
+            .map_err(|e| format!("OpenClipboard failed: {e}"))?;
+        let mut text = None;
+        for format in [url_format, CF_UNICODETEXT] {
+            if format == 0 {
+                continue;
+            }
+            let Ok(handle) = GetClipboardData(format) else { continue };
+            let global = windows::Win32::Foundation::HGLOBAL(handle.0);
+            let ptr = GlobalLock(global) as *const u16;
+            if ptr.is_null() {
+                continue;
+            }
+            // Another process owns this block: trust its size, not a terminator.
+            let capacity = windows::Win32::System::Memory::GlobalSize(global) / 2;
+            let mut len = 0usize;
+            while len < capacity && *ptr.add(len) != 0 {
+                len += 1;
+            }
+            let value = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            let _ = GlobalUnlock(global);
+            if !value.trim().is_empty() {
+                text = Some(value.trim().to_string());
+                break;
+            }
+        }
+        let _ = CloseClipboard();
+        Ok(text)
+    }
+}
+
 pub fn clear_clipboard() {
     unsafe {
         if OpenClipboard(HWND(std::ptr::null_mut())).is_ok() {

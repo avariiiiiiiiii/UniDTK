@@ -322,6 +322,4 @@ export const UniDtkHarness = {
   },
 };
 
-export const ShellHarness = UniDtkHarness;
 window.__UNIDTK_HARNESS__ = UniDtkHarness;
-window.__SHELL_HARNESS__ = UniDtkHarness;

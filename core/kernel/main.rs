@@ -31,6 +31,7 @@ mod ws;
 mod unidtk_db;
 mod shell_db;
 mod shutdown;
+mod start_menu;
 
 use unidtk_mod_mp3_player::commands;
 use crate::unidtk_db::UniDtkDatabase;
@@ -229,11 +230,6 @@ impl unidtk_api::ModuleDb for NoopModuleDb {
 }
 
 #[tauri::command(async)]
-fn reset_wallpaper(app: tauri::AppHandle) -> Result<(), String> {
-    run_on_main_thread(&app, |_| wallpaper::reset())
-}
-
-#[tauri::command(async)]
 fn attach_wallpaper(app: tauri::AppHandle, hwnd: isize) -> Result<(), String> {
     let host = wallpaper::resolve_desktop_host(true)?;
     run_on_main_thread(&app, move |_| wallpaper::attach_to_host(hwnd, ATTACH_OPTS, host))
@@ -294,6 +290,102 @@ fn detach_main_window(app: tauri::AppHandle) -> Result<(), String> {
         let hwnd = wallpaper_hwnd(&app)?;
         wallpaper::detach(hwnd, ATTACH_OPTS)
     })
+}
+
+// ─── Desktop folder shortcuts (start_menu.rs) ───────────────────────────────
+
+#[tauri::command(async)]
+fn start_menu_list() -> Result<Vec<start_menu::ShortcutDraft>, String> {
+    start_menu::start_menu()
+}
+
+#[tauri::command(async)]
+fn shortcut_icon(target: String, size: Option<u32>) -> Result<Option<start_menu::IconPixels>, String> {
+    start_menu::icon(target, size.unwrap_or(48))
+}
+
+#[tauri::command(async)]
+fn describe_shortcut_target(target: String) -> Result<start_menu::ShortcutDraft, String> {
+    start_menu::describe(target)
+}
+
+#[tauri::command(async)]
+fn missing_targets(targets: Vec<String>) -> Vec<bool> {
+    start_menu::missing(&targets)
+}
+
+#[tauri::command(async)]
+fn launch_shortcut(target: String, args: Option<String>) -> Result<(), String> {
+    start_menu::launch(&target, args.as_deref().unwrap_or(""))
+}
+
+/// The system file/folder dialog. No parent window: ours is a child of the
+/// desktop and would pull the dialog under it.
+#[tauri::command(async)]
+fn pick_shortcut_target(app: tauri::AppHandle, folder: bool) -> Result<Option<start_menu::ShortcutDraft>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let dialog = app.dialog().file();
+    let picked = if folder {
+        dialog.set_title("Выберите папку").blocking_pick_folder()
+    } else {
+        dialog.set_title("Выберите файл или программу").blocking_pick_file()
+    };
+    let Some(picked) = picked else { return Ok(None) };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    start_menu::describe(path.display().to_string()).map(Some)
+}
+
+#[derive(serde::Serialize)]
+struct ClipboardShortcuts {
+    files: Vec<String>,
+    text: Option<String>,
+}
+
+#[tauri::command(async)]
+fn clipboard_shortcut_targets() -> Result<ClipboardShortcuts, String> {
+    let files: Vec<String> = explorer::clipboard::paste_files_from_clipboard()?
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    let text = if files.is_empty() { explorer::clipboard::paste_text_from_clipboard()? } else { None };
+    Ok(ClipboardShortcuts { files, text })
+}
+
+/// Restart to apply module switches. The new process waits for this one to be
+/// gone (`--after-exit`), otherwise the single-instance guard would hand its
+/// arguments to us and quit.
+#[tauri::command(async)]
+fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(exe)
+        .args(["--after-exit", &std::process::id().to_string()])
+        .spawn()
+        .map_err(|e| format!("restart: {e}"))?;
+    log_line("restart: relaunch spawned, quitting");
+    quit_app(app)
+}
+
+/// `--after-exit <pid>`: a restart started us; wait (bounded) for the old
+/// instance to exit before anything claims the single-instance slot.
+fn wait_for_previous_instance() {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    let args: Vec<String> = std::env::args().collect();
+    let Some(pid) = args
+        .iter()
+        .position(|a| a == "--after-exit")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse::<u32>().ok())
+    else {
+        return;
+    };
+    unsafe {
+        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(handle, 20_000);
+            let _ = CloseHandle(handle);
+        }
+    }
+    log_line(format!("main: previous instance {pid} gone, starting"));
 }
 
 #[tauri::command(async)]
@@ -1961,6 +2053,7 @@ fn main() {
     unidtk_api::set_logger(|message| log_line(message));
     load_env_into_process();
     log_line("main: start");
+    wait_for_previous_instance();
     let startup_started = std::time::Instant::now();
     // Open files while Tauri creates WebView2. Setup still waits for the result
     // before registering state, so commands never observe temporary defaults.
@@ -2056,13 +2149,20 @@ fn main() {
             session_info,
             trim_process_memory,
             // wallpaper-only
-            reset_wallpaper,
             attach_wallpaper,
             detach_wallpaper,
             set_clipboard_text,
             attach_main_window,
             detach_main_window,
             quit_app,
+            restart_app,
+            start_menu_list,
+            shortcut_icon,
+            describe_shortcut_target,
+            missing_targets,
+            launch_shortcut,
+            pick_shortcut_target,
+            clipboard_shortcut_targets,
             frontend_log,
             log_list,
             log_clear,
@@ -2265,33 +2365,20 @@ fn main() {
                             log_line("setup: seeded default widget config in redb");
                         }
 
-                        let local_folders_dir = dirs::data_local_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            .join("UniDTK")
-                            .join("folders");
-                        let folders_to_migrate = if local_folders_dir.is_dir() {
-                            local_folders_dir
-                        } else {
-                            dirs::data_local_dir()
-                                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                                .join("Shell")
-                                .join("folders")
-                        };
+                        let folders_to_migrate = unidtk_api::paths::data_dir().join("folders");
                         if let Ok(migrated) = arc.auto_migrate_disk_folders(&folders_to_migrate) {
                             if migrated > 0 {
                                 log_line(format!("setup: auto-migrated {migrated} folders from disk to redb"));
                             }
                         }
-                        if let Some(local) = dirs::data_local_dir() {
-                            match arc.rebase_legacy_shortcut_targets(
-                                &local.join("Shell").join("folders"),
-                                &local.join("UniDTK").join("folders"),
-                            ) {
-                                Ok(0) => {}
-                                Ok(n) => log_line(format!("setup: moved {n} shortcut targets off the legacy Shell data dir")),
-                                Err(e) => log_line(format!("setup: shortcut target migration failed: {e}")),
-                            }
-                        }
+
+                        // Off the UI thread: resolving `.lnk` copies is COM work.
+                        let shortcuts_db = arc.clone();
+                        thread::spawn(move || match start_menu::migrate_copied_shortcuts(&shortcuts_db) {
+                            Ok(0) => {}
+                            Ok(n) => log_line(format!("setup: {n} folder shortcuts now point at their real targets")),
+                            Err(e) => log_line(format!("setup: shortcut copy migration failed: {e}")),
+                        });
 
                         app.manage(arc);
                         log_line(format!("setup: redb data store ready ({})", db_path.display()));
@@ -2364,13 +2451,10 @@ fn main() {
             });
 
             let show = MenuItemBuilder::with_id("show", "Показать виджеты").build(app)?;
-            let reset = MenuItemBuilder::with_id("reset", "Сбросить обои").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Выход").build(app)?;
 
             let menu = MenuBuilder::new(app)
                 .item(&show)
-                .separator()
-                .item(&reset)
                 .separator()
                 .item(&quit)
                 .build()?;
@@ -2382,12 +2466,6 @@ fn main() {
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => {
                         request_wallpaper_attach(app, true);
-                    }
-                    "reset" => {
-                        // Forget the original so the next launch re-snapshots
-                        // whatever the user set after this reset.
-                        wallpaper::forget_original_wallpaper();
-                        let _ = wallpaper::reset();
                     }
                     "quit" => {
                         let _ = wallpaper::reset();

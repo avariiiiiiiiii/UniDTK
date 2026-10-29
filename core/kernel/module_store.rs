@@ -67,36 +67,29 @@ impl RedbStoreFactory {
             .join(format!("{}.redb", spec.name))
     }
 
-    /// Забрать прежний файл хранилища на новое место. Ищем и в каталоге данных,
-    /// и в legacy-каталоге `Shell` рядом с ним: именно там лежали старые базы.
+    /// Забрать прежний файл хранилища из каталога данных на новое место.
     fn adopt_legacy(&self, target: &Path, spec: &StoreSpec) {
         if target.exists() {
             return;
         }
-        let legacy_root = self.root.parent().map(|p| p.join("Shell"));
         for name in &spec.legacy_files {
-            let mut candidates = vec![self.root.join(name)];
-            if let Some(shell) = legacy_root.as_ref() {
-                candidates.push(shell.join(name));
+            let old = self.root.join(name);
+            if !old.is_file() {
+                continue;
             }
-            for old in candidates {
-                if !old.is_file() {
+            if let Some(parent) = target.parent() {
+                if std::fs::create_dir_all(parent).is_err() {
+                    return;
+                }
+            }
+            // Один том → rename; иначе копируем и убираем исходник.
+            if std::fs::rename(&old, target).is_err() {
+                if std::fs::copy(&old, target).is_err() {
                     continue;
                 }
-                if let Some(parent) = target.parent() {
-                    if std::fs::create_dir_all(parent).is_err() {
-                        return;
-                    }
-                }
-                // Один том → rename; иначе копируем и убираем исходник.
-                if std::fs::rename(&old, target).is_err() {
-                    if std::fs::copy(&old, target).is_err() {
-                        continue;
-                    }
-                    let _ = std::fs::remove_file(&old);
-                }
-                return;
+                let _ = std::fs::remove_file(&old);
             }
+            return;
         }
     }
 
@@ -306,8 +299,8 @@ mod tests {
         let factory = factory(&root);
         let id = ModuleId::new("mp3-player");
 
-        // Прежнее имя в каталоге данных — как у shell_ai_dj.redb.
-        let legacy = root.join("shell_ai_dj.redb");
+        // Прежнее имя в каталоге данных — как у unidtk_ai_dj.redb.
+        let legacy = root.join("unidtk_ai_dj.redb");
         {
             let db = Database::create(&legacy).unwrap();
             let txn = db.begin_write().unwrap();
@@ -318,7 +311,7 @@ mod tests {
             txn.commit().unwrap();
         }
 
-        let spec = StoreSpec::cache("ai_dj").legacy(&["shell_ai_dj.redb"]);
+        let spec = StoreSpec::cache("ai_dj").legacy(&["unidtk_ai_dj.redb"]);
         let store = factory.open(&id, &spec).unwrap();
 
         assert!(root.join("cache").join("mp3_player").join("ai_dj.redb").is_file());

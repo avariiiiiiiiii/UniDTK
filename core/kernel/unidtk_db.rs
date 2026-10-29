@@ -28,6 +28,9 @@ pub struct FolderItem {
     pub id: String,
     pub name: String,
     pub target: String,
+    /// Command-line arguments a resolved `.lnk` carried (empty for most items).
+    #[serde(default)]
+    pub args: String,
     pub kind: String, // "url", "file", "folder"
 }
 
@@ -51,23 +54,6 @@ impl UniDtkDatabase {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
-        }
-
-        // Automatic legacy migration if canonical file doesn't exist
-        if !path.exists() && path == Self::default_path() {
-            let legacy_candidates = [
-                path.with_file_name("shell.redb"),
-                dirs::data_local_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("Shell")
-                    .join("shell.redb"),
-            ];
-            for old_path in &legacy_candidates {
-                if old_path.exists() {
-                    let _ = std::fs::copy(old_path, path);
-                    break;
-                }
-            }
         }
 
         let db = if path.exists() {
@@ -267,35 +253,6 @@ impl UniDtkDatabase {
         Ok(existed)
     }
 
-    /// Point shortcut targets that still live under the pre-rename data root
-    /// (`%LOCALAPPDATA%\Shell\folders`) at the same file under the current one.
-    /// Only targets whose file exists at the new root move, so nothing is
-    /// pointed at a missing file. Returns how many targets were rewritten.
-    pub fn rebase_legacy_shortcut_targets(&self, old_root: &Path, new_root: &Path) -> Result<usize, String> {
-        let old_prefix = format!("{}{}", old_root.display(), std::path::MAIN_SEPARATOR).to_lowercase();
-        let mut moved = 0;
-        for mut folder in self.list_folders()? {
-            let mut changed = false;
-            for item in &mut folder.items {
-                // Paths on Windows compare case-insensitively.
-                let Some(rest) = item.target.get(old_prefix.len()..) else { continue };
-                if item.target[..old_prefix.len()].to_lowercase() != old_prefix {
-                    continue;
-                }
-                let rebased = new_root.join(rest);
-                if rebased.exists() {
-                    item.target = rebased.display().to_string();
-                    changed = true;
-                    moved += 1;
-                }
-            }
-            if changed {
-                self.save_folder(&folder)?;
-            }
-        }
-        Ok(moved)
-    }
-
     /// Auto-migrate legacy folders from a directory on disk if redb `folders` table is empty.
     pub fn auto_migrate_disk_folders(&self, folders_dir: &Path) -> Result<usize, String> {
         if !folders_dir.is_dir() {
@@ -370,6 +327,7 @@ impl UniDtkDatabase {
                             id: sname,
                             name: display_name,
                             target: spath.to_string_lossy().to_string(),
+                            args: String::new(),
                             kind,
                         });
                     }
@@ -426,49 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_shortcut_targets_move_to_the_new_root() {
-        let base = std::env::temp_dir().join(format!("test_rebase_shortcuts_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let old_root = base.join("Shell").join("folders");
-        let new_root = base.join("UniDTK").join("folders");
-        std::fs::create_dir_all(new_root.join("games").join("shortcuts")).unwrap();
-        std::fs::write(new_root.join("games").join("shortcuts").join("Steam.lnk"), "lnk").unwrap();
-
-        let db = UniDtkDatabase::open(base.join("test.redb")).unwrap();
-        let item = |id: &str, target: String| FolderItem {
-            id: id.into(),
-            name: id.into(),
-            target,
-            kind: "file".into(),
-        };
-        db.save_folder(&FolderRecord {
-            id: "games".into(),
-            name: "Игры".into(),
-            icon_svg: String::new(),
-            items: vec![
-                item("steam", old_root.join("games").join("shortcuts").join("Steam.lnk").display().to_string()),
-                // Gone from the new root: left alone rather than pointed at nothing.
-                item("gone", old_root.join("games").join("shortcuts").join("Gone.lnk").display().to_string()),
-                item("web", "https://example.com".into()),
-            ],
-        })
-        .unwrap();
-
-        assert_eq!(db.rebase_legacy_shortcut_targets(&old_root, &new_root).unwrap(), 1);
-        let items = &db.list_folders().unwrap()[0].items;
-        assert_eq!(
-            items[0].target,
-            new_root.join("games").join("shortcuts").join("Steam.lnk").display().to_string()
-        );
-        assert!(items[1].target.starts_with(&old_root.display().to_string()));
-        assert_eq!(items[2].target, "https://example.com");
-        // Idempotent.
-        assert_eq!(db.rebase_legacy_shortcut_targets(&old_root, &new_root).unwrap(), 0);
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
     fn test_folders_crud() {
         let dir = std::env::temp_dir().join(format!("test_unidtk_db_folders_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -485,6 +400,7 @@ mod tests {
                 id: "item1".to_string(),
                 name: "Docs".to_string(),
                 target: "https://docs.google.com".to_string(),
+                args: String::new(),
                 kind: "url".to_string(),
             }],
         };

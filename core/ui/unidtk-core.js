@@ -1,9 +1,10 @@
 import { convertFileSrc, invoke, listen, openPath } from "@unidtk/bridge";
-import { getWidgets, getWidgetShortcuts, getWidgetConfig, saveWidgetConfig, openShortcut } from "./widgets-api.js";
+import { getWidgets, getWidgetShortcuts, getWidgetConfig, saveWidgetConfig } from "./widgets-api.js";
 import { initMotionSystem, animate, spring, staggerEnter, fadeTransition, setMotionScale, getDuration, EASINGS, DURATIONS, motionTimeline } from "./motion.js";
 import { initThemeSystem, applyTheme, getActiveTheme, getAllPresets, syncThemeIntoConfig, resolvePresetSize } from "./theme.js";
 import { surfaceManager, syncSurfaceWash } from "./surface-manager.js";
 import { initMenu, openMenu, closeMenu } from "./menu.js";
+import { renderFolderBody } from "./folder-body.js";
 
 initMotionSystem();
 initThemeSystem();
@@ -118,6 +119,16 @@ async function loadConfig() {
   for (const pos of Object.values(config.positions || {})) {
     if (pos && typeof pos === "object" && "expanded" in pos) pos.expanded = false;
   }
+  // The Telegram dock used to be snapped to the right edge at draw time (x past
+  // 1700 px or within 50 px of the edge, 12 px margin). Same place, now as data.
+  const dock = config.positions?.telegram;
+  const canvasW = window.innerWidth || window.screen.width || 1920;
+  if (dock && !dock.anchor && canvasW >= 1200) {
+    const maxX = canvasW - (Number(dock.w) || 56) - 12;
+    if (Number(dock.x) >= 1700 || Number(dock.x) >= maxX - 50) {
+      Object.assign(dock, { anchor: "tr", ax: 12, ay: Math.max(0, Number(dock.y) || 0) });
+    }
+  }
 }
 
 async function saveConfig() {
@@ -151,26 +162,48 @@ function defaultWidgetPosition(widgetType, fallbackY = 68) {
 
 
 
+const ANCHORS = ["tl", "tr", "bl", "br"];
+
 /**
- * Where the Telegram dock is drawn on the current canvas: kept on screen and
- * snapped to the right edge when it sits near it. Pure — the saved position
- * is the user's layout and must survive transient canvas sizes (sleep/wake
- * and display switches briefly report other resolutions).
+ * Where a saved position lands on the current canvas. A position pinned to a
+ * corner (`anchor` ∈ tl/tr/bl/br, `ax`/`ay` — distance from that corner) keeps
+ * its distance to the corner when the screen size changes; a record without
+ * an anchor is a plain top-left x/y, exactly as before anchors existed. Pure:
+ * transient canvas sizes (sleep/wake, display switches) never reach the data.
  */
-function telegramDisplayPosition(position) {
-  const x = Number(position.x) || 0;
-  const y = Number(position.y) || 0;
-  const canvasW = widgetsCanvas.clientWidth || window.innerWidth || window.screen.width || 1920;
-  const canvasH = widgetsCanvas.clientHeight || window.innerHeight || window.screen.height || 1080;
-  if (canvasW < 1200) return { x, y };
-  const width = position.w || 56;
-  const height = position.h || 520;
-  const maxX = Math.max(0, canvasW - width - 12);
-  const maxY = Math.max(0, canvasH - Math.min(height, canvasH));
+function placeOnCanvas(pos, card = null) {
+  const x = Number(pos?.x) || 0;
+  const y = Number(pos?.y) || 0;
+  const anchor = pos?.anchor;
+  if (!ANCHORS.includes(anchor)) return { x, y };
+  const canvasW = widgetsCanvas.clientWidth || window.innerWidth || 1920;
+  const canvasH = widgetsCanvas.clientHeight || window.innerHeight || 1080;
+  const w = Number(pos.w) || card?.offsetWidth || 0;
+  const h = Number(pos.h) || card?.offsetHeight || 0;
+  const ax = Number(pos.ax) || 0;
+  const ay = Number(pos.ay) || 0;
   return {
-    x: x >= 1700 || x >= maxX - 50 ? maxX : Math.max(0, Math.min(x, maxX)),
-    y: Math.max(0, Math.min(y, maxY)),
+    x: anchor[1] === "r" ? Math.max(0, canvasW - w - ax) : ax,
+    y: anchor[0] === "b" ? Math.max(0, canvasH - h - ay) : ay,
   };
+}
+
+// Pin a laid-out card to its nearest screen corner. Only «Готово» calls this:
+// the canvas is the real one then, never a size reported mid-sleep.
+function pinToNearestCorner(pos, card) {
+  const canvasW = widgetsCanvas.clientWidth || window.innerWidth;
+  const canvasH = widgetsCanvas.clientHeight || window.innerHeight;
+  const x = parseInt(card.style.left, 10) || 0;
+  const y = parseInt(card.style.top, 10) || 0;
+  const w = Number(pos.w) || card.offsetWidth;
+  const h = Number(pos.h) || card.offsetHeight;
+  const right = x + w / 2 > canvasW / 2;
+  const bottom = y + h / 2 > canvasH / 2;
+  pos.x = x;
+  pos.y = y;
+  pos.anchor = `${bottom ? "b" : "t"}${right ? "r" : "l"}`;
+  pos.ax = right ? Math.round(canvasW - x - w) : x;
+  pos.ay = bottom ? Math.round(canvasH - y - h) : y;
 }
 
 
@@ -401,7 +434,7 @@ function buildWidgetCard(w, layout) {
     }
 
     const pos = config.positions[w.id] || { x: 0, y: 0 };
-    const at = w.specialType === "telegram" ? telegramDisplayPosition(pos) : pos;
+    const at = placeOnCanvas(pos);
     card.style.left = at.x + "px";
     card.style.top = at.y + "px";
     card.style.transform = "";
@@ -453,10 +486,12 @@ function buildWidgetCard(w, layout) {
     const body = card.querySelector(".widget-body");
 
     if (Array.isArray(w.items)) {
+      card._folderId = w.widgetType || w.id;
       card._shortcutItems = w.items.map((item) => ({
         name: item.name,
         filename: item.name,
         path: item.target,
+        args: item.args || "",
         type: item.kind || "file",
       }));
     }
@@ -602,6 +637,7 @@ async function reconcileWidgets() {
       name: item.name,
       filename: item.name,
       path: item.target,
+      args: item.args || "",
       type: item.kind || "file",
     }));
     const header = card.querySelector(":scope > .widget-header");
@@ -611,7 +647,9 @@ async function reconcileWidgets() {
     if (desc) desc.textContent = w.description;
     const icon = header?.querySelector(".widget-icon");
     if (icon) icon.innerHTML = w.iconSvg || "";
-    if (card.classList.contains("expanded")) collapseActiveDesktopWidget();
+    // An opened folder is being edited in place: redraw it, keep it open.
+    const openBody = card.classList.contains("expanded") && card.querySelector(":scope > .widget-body");
+    if (openBody) renderFolderBody(card, openBody);
   });
 
   relayoutWidgets();
@@ -675,6 +713,7 @@ async function loadWidgets() {
     _startWidgetLoops().catch(() => {});
   } finally {
     _isLoadingWidgets = false;
+    updateDeskHint();
   }
 }
 
@@ -752,8 +791,9 @@ function collapseSingleWidget(card) {
   }
 
   card.classList.remove("expanded");
-  card.style.left = (pos.x ?? 28) + "px";
-  card.style.top = (pos.y ?? 28) + "px";
+  const at = placeOnCanvas({ x: 28, y: 28, ...pos });
+  card.style.left = at.x + "px";
+  card.style.top = at.y + "px";
   card.style.width = (pos.w || 340) + "px";
   card.style.height = (pos.h || 64) + "px";
 
@@ -1080,71 +1120,17 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
     }
     m.renderMusicDashboard(body, widgetId);
   } else {
-    // Load shortcuts
-    body.innerHTML = '<div class="widget-loading">Загрузка...</div>';
-    const shortcuts = Array.isArray(card._shortcutItems)
-      ? card._shortcutItems
-      : await getWidgetShortcuts(widgetType).catch(() => []);
+    if (!Array.isArray(card._shortcutItems)) {
+      card._shortcutItems = await getWidgetShortcuts(widgetType).catch(() => []);
+      card._folderId = widgetType;
+    }
+    await renderFolderBody(card, body);
     if (currentSeq !== expandSequence) {
       if (!card.classList.contains("expanded") && !surfaceManager.getRecord(card)) card._dockGeometryFrozen = false;
       return;
     }
-    
-    if (!shortcuts.length) {
-      body.innerHTML = `
-        <div class="widget-empty">
-          Папка пуста<br>
-          <code>widgets/${widgetType}/shortcuts/</code>
-        </div>
-      `;
-    } else {
-      body.innerHTML = `
-        <div class="shortcuts-grid">
-          ${shortcuts.map((s) => `
-            <button class="shortcut-item" data-path="${s.path}" data-type="${s.type || ""}" data-name="${s.name}" aria-label="${s.name}">
-              <div class="shortcut-icon ${s.type === 'folder' ? 'shortcut-folder' : ''}">
-                ${getShortcutIcon(s.name, s.type)}
-              </div>
-              <span class="shortcut-name">${s.name}</span>
-            </button>
-          `).join("")}
-        </div>
-      `;
-
-      body.querySelectorAll(".shortcut-item").forEach((item) => {
-        item.addEventListener("click", (e) => {
-          e.stopPropagation();
-          e.preventDefault();
-          if (editMode) return;
-          const p = item.dataset.path;
-          const type = (item.dataset.type || "").toLowerCase();
-          const name = (item.dataset.name || "")
-            .toLowerCase()
-            .trim();
-
-          // Folders + explorer shortcut → in-shell file manager
-          if (name === "explorer") {
-            showDebugMessage("opening shell explorer");
-            openExplorer(null, item);
-            return;
-          }
-          if (type === "folder") {
-            showDebugMessage(`opening folder in shell: ${p}`);
-            openExplorer(p, item);
-            return;
-          }
-
-          showDebugMessage(`opening: ${p}`);
-          openShortcut(p, { type, name }).then(() => {
-            showDebugMessage(`opened OK`);
-          }).catch((err) => {
-            showDebugMessage(`open error: ${err}`);
-          });
-        });
-      });
-    }
   }
-  
+
     // Wait for content to render, then expand symmetrically from own center
     requestAnimationFrame(() => {
       if (currentSeq !== expandSequence) {
@@ -1222,8 +1208,9 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
         card.style.transition = "none";
         body.style.transition = "none";
         card.classList.remove("expanded");
-        card.style.left = (pos.x ?? 28) + "px";
-        card.style.top = (pos.y ?? 28) + "px";
+        const at = placeOnCanvas({ x: 28, y: 28, ...pos });
+        card.style.left = at.x + "px";
+        card.style.top = at.y + "px";
         card.style.width = (pos.w || 340) + "px";
         card.style.height = (pos.h || 64) + "px";
         card.style.zIndex = "10";
@@ -1722,14 +1709,6 @@ window.addEventListener("unhandledrejection", (e) => showDebugMessage(`Promise: 
 
 // в”Ђв”Ђв”Ђ System buttons в”Ђв”Ђв”Ђ
 
-document.getElementById("quitApp")?.addEventListener("click", () => {
-  invoke("quit_app").catch((err) => showDebugMessage(`quit: ${err}`));
-});
-
-document.getElementById("resetWallpaper")?.addEventListener("click", () => {
-  invoke("reset_wallpaper").catch((err) => showDebugMessage(`reset: ${err}`));
-});
-
 document.getElementById("openMenu")?.addEventListener("click", (e) => {
   openMenu(e.currentTarget);
 });
@@ -1746,6 +1725,48 @@ document.addEventListener("visibilitychange", () => {
 // ─── Shell Explorer (fullscreen overlay; not a desktop widget) ───
 
 
+
+const SNAP_GRID = 16;
+const SNAP_MAGNET = 10;
+const SNAP_GAP = 12;
+
+// Where a dragged card settles: the nearest screen edge or neighbour edge within
+// the magnet distance, otherwise the grid; never off the screen.
+function snapMove(card, rawX, rawY) {
+  const canvasW = widgetsCanvas.clientWidth || window.innerWidth;
+  const canvasH = widgetsCanvas.clientHeight || window.innerHeight;
+  const w = card.offsetWidth;
+  const h = card.offsetHeight;
+  const xs = [SNAP_GAP, canvasW - w - SNAP_GAP];
+  const ys = [SNAP_GAP, canvasH - h - SNAP_GAP];
+  widgetsCanvas.querySelectorAll(":scope > .widget-card").forEach((other) => {
+    if (other === card || other.classList.contains("expanded")) return;
+    const ow = other.offsetWidth;
+    const oh = other.offsetHeight;
+    if (!ow || !oh) return;
+    const ox = other.offsetLeft;
+    const oy = other.offsetTop;
+    xs.push(ox, ox + ow - w, ox + ow + SNAP_GAP, ox - SNAP_GAP - w);
+    ys.push(oy, oy + oh - h, oy + oh + SNAP_GAP, oy - SNAP_GAP - h);
+  });
+  const settle = (raw, lines) => {
+    let best = Math.round(raw / SNAP_GRID) * SNAP_GRID;
+    let bestDist = SNAP_MAGNET;
+    for (const line of lines) {
+      const dist = Math.abs(line - raw);
+      if (dist < bestDist) {
+        best = line;
+        bestDist = dist;
+      }
+    }
+    return Math.round(best);
+  };
+  const clamp = (v, max) => (max > 0 ? Math.min(Math.max(0, v), max) : 0);
+  return {
+    x: clamp(settle(rawX, xs), canvasW - w),
+    y: clamp(settle(rawY, ys), canvasH - h),
+  };
+}
 
 function setupDragReorder() {
   if (widgetsCanvas._dragReorderReady) return;
@@ -1877,13 +1898,9 @@ function setupDragReorder() {
             card.style.height = newHeight + "px";
         }
       } else {
-        // Normal move
-        let newLeft = startLeft + deltaX;
-        let newTop = startTop + deltaY;
-        newLeft = Math.round(newLeft);
-        newTop = Math.round(newTop);
-        card.style.left = newLeft + "px";
-        card.style.top = newTop + "px";
+        const at = snapMove(card, startLeft + deltaX, startTop + deltaY);
+        card.style.left = at.x + "px";
+        card.style.top = at.y + "px";
       }
 
       if (isResize && card.classList.contains("glyph-bar-widget")) {
@@ -1930,6 +1947,7 @@ function setupDragReorder() {
           saveH = laid.height;
         }
       }
+      // In memory only: «Готово» saves the whole arrangement, «Отменить» drops it.
       config.positions[widgetId] = {
         ...config.positions[widgetId],
         x: parseInt(card.style.left),
@@ -1937,7 +1955,6 @@ function setupDragReorder() {
         w: saveW,
         h: saveH,
       };
-      saveConfig();
       // The free space just changed shape: anything that fills what is left over
       // has to recompute now, not on the next tick.
       notifyGeometryChanged("drag");
@@ -1986,7 +2003,7 @@ function setupDesktopOutsideClickHandler() {
     if (nonTelegramSurface) return;
 
     // Filter out clicks inside widget cards, topbar buttons, add popovers, portals, etc.
-    if (e.target.closest(".widget-card, .topbar-actions, .widget-add, #shell-portals, .explorer-overlay, .menu-overlay, .debug-message")) {
+    if (e.target.closest(".widget-card, .topbar-actions, .widget-add, #shell-portals, .explorer-overlay, .menu-container, .arrange-bar, .toast-host, .debug-message")) {
       return;
     }
 
@@ -2000,27 +2017,123 @@ function setupDesktopOutsideClickHandler() {
 
 
 
-const editBtn = document.getElementById("editMode");
-editBtn.addEventListener("click", () => {
-  editMode = !editMode;
-  document.body.classList.toggle("edit-mode", editMode);
-  editBtn.classList.toggle("active", editMode);
-  if (!editMode) closeWidgetAddPopover();
+// One arrangement session: entering snapshots the layout, «Готово» pins every
+// card to its nearest corner and saves once, «Отменить» / Esc restores it all.
+const arrangeBar = document.getElementById("arrangeBar");
+let arrangeSnapshot = null;
+let arrangeOnExit = null;
 
-  // Collapse all when entering edit mode
-  if (editMode) {
-    document.querySelectorAll(".widget-card.expanded").forEach((c) => {
-      if (c.classList.contains("telegram-widget")) {
-        import("../modules/telegram/widget.js").then((m) => m.collapseTelegramWidget(c, c.dataset.id)).catch(() => {});
-        return;
-      }
-      document.querySelectorAll(".music-widget").forEach((musicCard) => {
-        import("../modules/mp3-player/widget.js").then((m) => m.closeAllMusicPopups(musicCard)).catch(() => {});
-      });
-      collapseSingleWidget(c);
+function enterArrangeMode(onExit = null) {
+  if (editMode) return;
+  arrangeSnapshot = {
+    ...structuredClone({
+      positions: config.positions || {},
+      hidden: config.hidden || [],
+      instances: config.instances || [],
+    }),
+    createdFolders: [],
+  };
+  arrangeOnExit = onExit;
+  editMode = true;
+  document.body.classList.add("edit-mode");
+  document.querySelectorAll(".widget-card.expanded").forEach((c) => {
+    if (c.classList.contains("telegram-widget")) {
+      import("../modules/telegram/widget.js").then((m) => m.collapseTelegramWidget(c, c.dataset.id)).catch(() => {});
+      return;
+    }
+    document.querySelectorAll(".music-widget").forEach((musicCard) => {
+      import("../modules/mp3-player/widget.js").then((m) => m.closeAllMusicPopups(musicCard)).catch(() => {});
     });
+    collapseSingleWidget(c);
+  });
+  if (arrangeBar) {
+    arrangeBar.hidden = false;
+    arrangeBar.querySelector('[data-arrange="done"]')?.focus();
+  }
+}
+
+async function leaveArrangeMode(commit) {
+  if (!editMode) return;
+  editMode = false;
+  document.body.classList.remove("edit-mode");
+  closeWidgetAddPopover();
+  if (arrangeBar) {
+    arrangeBar.hidden = true;
+    arrangeBar.querySelector(".arrange-folder").hidden = true;
+  }
+  const snapshot = arrangeSnapshot;
+  arrangeSnapshot = null;
+  if (commit) {
+    widgetsCanvas.querySelectorAll(":scope > .widget-card").forEach((card) => {
+      const pos = config.positions?.[card.dataset.id];
+      if (!pos || card._geometryController || card.classList.contains("expanded")) return;
+      if (!card.offsetWidth && !pos.w) return;
+      pinToNearestCorner(pos, card);
+    });
+    await saveConfig();
+  } else if (snapshot) {
+    const { createdFolders, ...layout } = snapshot;
+    for (const id of createdFolders) await invoke("delete_folder", { id }).catch(() => {});
+    Object.assign(config, layout);
+    await saveConfig();
+    await syncWidgets();
+    widgetsCanvas.querySelectorAll(":scope > .widget-card").forEach((card) => {
+      const pos = config.positions[card.dataset.id];
+      if (!pos || card._geometryController) return;
+      if (pos.w) card.style.width = pos.w + "px";
+      if (pos.h) card.style.height = pos.h + "px";
+      card._glyphBarGeometry?.layout();
+    });
+    relayoutWidgets();
+  }
+  notifyGeometryChanged("arrange");
+  const onExit = arrangeOnExit;
+  arrangeOnExit = null;
+  onExit?.(commit);
+}
+
+arrangeBar?.addEventListener("click", (e) => {
+  const action = e.target.closest("[data-arrange]")?.dataset.arrange;
+  if (action === "done" || action === "cancel") leaveArrangeMode(action === "done");
+  if (action === "folder") {
+    const form = arrangeBar.querySelector(".arrange-folder");
+    form.hidden = !form.hidden;
+    if (!form.hidden) form.querySelector("input").focus();
+  }
+  const icon = e.target.closest("[data-folder-icon]");
+  if (icon) {
+    arrangeBar.querySelectorAll("[data-folder-icon]").forEach((b) => b.setAttribute("aria-checked", String(b === icon)));
   }
 });
+
+// «+ Папка» while arranging: the folder lands on the desk at once, ready to drag.
+arrangeBar?.querySelector(".arrange-folder")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const input = form.querySelector("input");
+  const iconKey = form.querySelector('[data-folder-icon][aria-checked="true"]')?.dataset.folderIcon || "folder";
+  const { createFolder } = await import("./folders.js");
+  const folder = await createFolder(input.value, iconKey);
+  // The new card counts as part of this arrangement: «Отменить» removes it.
+  arrangeSnapshot?.createdFolders.push(folder.id);
+  input.value = "";
+  form.hidden = true;
+});
+
+// Esc has one meaning while arranging: cancel. Open surfaces (popups) are
+// closed first by surface-manager, which stops the event before it gets here.
+window.addEventListener("keydown", (e) => {
+  if (!editMode || e.key !== "Escape") return;
+  e.preventDefault();
+  leaveArrangeMode(false);
+});
+
+// With every widget hidden the desktop is blank; point at the way back.
+const deskHint = document.getElementById("deskHint");
+function updateDeskHint() {
+  if (!deskHint) return;
+  deskHint.hidden = _isLoadingWidgets || !!widgetsCanvas.querySelector(":scope > .widget-card");
+}
 
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".widget-add")) closeWidgetAddPopover();
@@ -2309,11 +2422,11 @@ function relayoutWidgets() {
     const id = card.dataset.id;
     if (!id || !config.positions || !config.positions[id]) return;
     if (card.classList.contains("expanded")) return;
-    const pos = config.positions[id];
-    const at = card.dataset.widgetType === "telegram" ? telegramDisplayPosition(pos) : pos;
+    const at = placeOnCanvas(config.positions[id], card);
     card.style.left = at.x + "px";
     card.style.top = at.y + "px";
   });
+  updateDeskHint();
   refreshDomCaches();
   notifyGeometryChanged("relayout");
 }
@@ -2346,7 +2459,7 @@ if (typeof window !== "undefined") {
 }
 
 export {
-  config, editMode, widgetsCanvas, rlog, logFrontend, escapeHtml, repairMojibake,
+  config, editMode, widgetsCanvas, placeOnCanvas, enterArrangeMode, leaveArrangeMode, rlog, logFrontend, escapeHtml, repairMojibake,
   displayText, showDebugMessage, refreshDomCaches, defaultWidgetPosition,
   loadConfig, saveConfig, closeWidgetAddPopover,
   notifyGeometryChanged,

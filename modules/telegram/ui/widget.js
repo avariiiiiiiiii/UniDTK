@@ -1,5 +1,5 @@
 import { invoke, convertFileSrc, listen, openPath } from '@unidtk/bridge';
-import { saveConfig, showDebugMessage, logFrontend, repairMojibake, editMode, widgetsCanvas, config, defaultWidgetPosition, cachedTelegramCard, escapeHtml } from '../../unidtk-core.js';
+import { saveConfig, showDebugMessage, logFrontend, repairMojibake, editMode, widgetsCanvas, config, defaultWidgetPosition, cachedTelegramCard, escapeHtml, placeOnCanvas } from '../../unidtk-core.js';
 import { surfaceManager, syncSurfaceWash } from '../../surface-manager.js';
 import { calculateDuration, getDuration, prefersReducedMotion, EASINGS, motionTimeline } from '../../motion.js';
 import { getFileIconName, getFileTypeName } from '../../file-icons.js';
@@ -4620,8 +4620,9 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
     config.positions[widgetId] = pos;
   }
   if (!card.classList.contains("expanded")) {
-    card.style.left = pos.x + "px";
-    card.style.top = (pos.y ?? 118) + "px";
+    const at = placeOnCanvas({ ...pos, y: pos.y ?? 118, w: pos.w || 56, h: pos.h || 520 });
+    card.style.left = at.x + "px";
+    card.style.top = at.y + "px";
     card.style.width = (pos.w || 56) + "px";
     card.style.height = (pos.h || 520) + "px";
   }
@@ -6890,8 +6891,9 @@ function toggleTelegramWidget(card, widgetId) {
       surfaceManager.closeSurface(other);
       return;
     }
-    other.style.left = (oPos.x ?? 28) + "px";
-    other.style.top = (oPos.y ?? 28) + "px";
+    const otherAt = placeOnCanvas({ x: 28, y: 28, ...oPos });
+    other.style.left = otherAt.x + "px";
+    other.style.top = otherAt.y + "px";
     other.style.width = (oPos.w || 340) + "px";
     other.style.height = (oPos.h || 64) + "px";
     other.classList.remove("expanded");
@@ -7007,8 +7009,9 @@ function toggleTelegramWidget(card, widgetId) {
       const cW = widgetsCanvas.clientWidth || window.innerWidth || 1920;
       const dW = pos.w || 56;
       const dH = pos.h || 520;
-      card.style.left = Math.max(0, Math.min(pos.x ?? cW - dW - 12, cW - dW - 12)) + "px";
-      card.style.top = (pos.y ?? 118) + "px";
+      const at = placeOnCanvas({ ...pos, x: pos.x ?? cW - dW - 12, y: pos.y ?? 118, w: dW, h: dH });
+      card.style.left = Math.max(0, Math.min(at.x, cW - dW - 12)) + "px";
+      card.style.top = at.y + "px";
       card.style.width = dW + "px";
       card.style.height = dH + "px";
       card.style.zIndex = "10";
@@ -7070,8 +7073,9 @@ function collapseTelegramWidget(card, widgetId) {
   card.classList.remove("expanded", "expand-left", "expand-right");
   card._tgSurfaceTransitioning = false;
   card.style.transition = "";
-  card.style.left = Math.max(0, Math.min(pos.x ?? canvasW - dockW - 12, canvasW - dockW - 12)) + "px";
-  card.style.top = (pos.y ?? 118) + "px";
+  const at = placeOnCanvas({ ...pos, x: pos.x ?? canvasW - dockW - 12, y: pos.y ?? 118, w: dockW, h: dockH });
+  card.style.left = Math.max(0, Math.min(at.x, canvasW - dockW - 12)) + "px";
+  card.style.top = at.y + "px";
   card.style.width = dockW + "px";
   card.style.height = dockH + "px";
   pos.expanded = false;

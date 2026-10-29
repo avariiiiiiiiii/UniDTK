@@ -44,7 +44,7 @@ impl Default for LogRetention {
     }
 }
 
-/// Dedicated redb store for Shell logs.
+/// Dedicated redb store for UniDTK logs.
 pub struct LogStore {
     db: Arc<Database>,
 }
@@ -55,22 +55,6 @@ impl LogStore {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
-        }
-        // Automatic legacy migration if canonical file doesn't exist
-        if !path.exists() && path == Self::default_path() {
-            let legacy_candidates = [
-                path.with_file_name("shell_logs.redb"),
-                dirs::data_local_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("Shell")
-                    .join("shell_logs.redb"),
-            ];
-            for old_path in &legacy_candidates {
-                if old_path.exists() {
-                    let _ = std::fs::copy(old_path, path);
-                    break;
-                }
-            }
         }
 
         let db = if path.exists() {

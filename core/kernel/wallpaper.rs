@@ -458,8 +458,7 @@ pub fn save_original_wallpaper() -> Option<String> {
 }
 
 /// Restore (or clear) the desktop wallpaper. On app exit we restore the
-/// original image the user had *before* Shell started; the tray "reset"
-/// action still clears it. We deliberately skip `SPIF_SENDCHANGE` when the
+/// original image the user had *before* UniDTK started. We deliberately skip `SPIF_SENDCHANGE` when the
 /// original path is empty or already the current wallpaper — that message is
 /// what forces explorer to repaint the desktop and briefly hide the icons.
 pub fn reset() -> Result<(), String> {
@@ -520,15 +519,6 @@ fn get_current_wallpaper_path() -> String {
     }
     let nul = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..nul])
-}
-
-/// Reset the cached-original flag so a future `save_original_wallpaper()` call
-/// will re-read the current wallpaper. Used by the tray "reset" action when
-/// the user explicitly wants Shell to forget what the desktop looked like.
-pub fn forget_original_wallpaper() {
-    use std::sync::atomic::Ordering;
-    ORIGINAL_WALLPAPER_SAVED.store(false, Ordering::SeqCst);
-    *ORIGINAL_WALLPAPER.lock().unwrap() = None;
 }
 
 pub fn update_geometry(hwnd_raw: isize) -> Result<(), String> {

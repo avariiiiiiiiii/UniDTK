@@ -435,7 +435,7 @@ impl Cdp {
     }
 }
 
-const HARNESS: &str = "(window.__UNIDTK_HARNESS__ || window.__SHELL_HARNESS__)";
+const HARNESS: &str = "window.__UNIDTK_HARNESS__";
 
 /// New high-water mark of the kernel log.
 fn log_max_id() -> Option<u64> {
@@ -1334,41 +1334,6 @@ fn load_env() -> Vec<(String, String)> {
     out
 }
 
-/// Remove artifacts of the old VBS/PowerShell VPN launch chain. Called from
-/// `tasks register` AFTER the tasks have been re-pointed at vpn-helper.exe —
-/// deleting the scripts earlier would break a still-registered old task.
-fn cleanup_legacy_vpn_files() -> Vec<String> {
-    let mut removed = Vec::new();
-    let Some(base) = local_appdata_dir() else {
-        return removed;
-    };
-    let dir = base.join("Shell");
-    for name in [
-        "vpn_hidden_launch.vbs",
-        "vpn_stop.ps1",
-        "xray_config.json",
-        "xray.log",
-        "xray_access.log",
-        "telegram_xray.json",
-        "telegram_xray.log",
-    ] {
-        let path = dir.join(name);
-        if path.exists() && std::fs::remove_file(&path).is_ok() {
-            removed.push(name.to_string());
-        }
-    }
-    removed
-}
-
-fn local_appdata_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(|p| std::path::PathBuf::from(p).join("AppData").join("Local"))
-        })
-}
-
 /// Prune staged frontend resources that no longer exist in the source tree.
 /// Tauri's resource copy only adds/overwrites files, so a renamed or deleted
 /// module folder would otherwise linger in `target/<profile>/modules` and the
@@ -1633,7 +1598,7 @@ fn stop_cmd() -> Result<String, String> {
     let mut graceful = false;
     match Cdp::open() {
         Ok(mut cdp) => match cdp.evaluate(
-            "(() => { const b = document.getElementById('quitApp'); if (b) { b.click(); return true; } return false; })()",
+            "(() => { const h = window.__UNIDTK_HARNESS__; if (!h) return false; h.invoke('quit_app').catch(() => {}); return true; })()",
         ) {
             Ok(v) if v.as_bool() == Some(true) => graceful = true,
             _ => {}
@@ -1838,14 +1803,10 @@ const SCHEDULER_TASKS: &[TaskDef] = &[
 ];
 
 const OBSOLETE_TASKS: &[&str] = &[
-    "Shell",
-    "ShellSingbox",
-    "ShellVpnStop",
     "NothingWallpaper",
     "NothingWallpaperSingbox",
     "NothingWallpaperVpnStop",
     "NothingWallpaperXray",
-    "ShellXray",
 ];
 
 fn find_repo_root() -> Option<std::path::PathBuf> {
@@ -2064,14 +2025,6 @@ fn tasks_cmd(args: &[String]) -> Result<String, String> {
             }
             if results.is_empty() {
                 return Err(format!("Unknown task name '{target}'. Available: all, UniDTK, UniDTKSingbox, UniDTKVpnStop"));
-            }
-            // Tasks now point at vpn-helper.exe — safe to drop the old scripts.
-            let cleaned = cleanup_legacy_vpn_files();
-            if !cleaned.is_empty() {
-                results.push(format!(
-                    "Removed legacy VPN files: {}",
-                    cleaned.join(", ")
-                ));
             }
             let report = results.join("\n");
             if failed {

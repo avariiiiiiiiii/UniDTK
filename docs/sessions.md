@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Сессия | Дата | Git Commit | Ключевая задача / Подсистема | Основные затронутые файлы |
 | :---: | :---: | :---: | :--- | :--- |
+| **131** | 2026-10-29 | `3e2ca7e` | Редизайн меню: боковая панель ~420px, расстановка на столе (сетка 16px, углы), папки без AppData (Пуск, диалог, буфер, BGRA), отмена тостами, чистка Shell | [`core/ui/menu.js`](../core/ui/menu.js), [`core/ui/menu.css`](../core/ui/menu.css), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/kernel/start_menu.rs`](../core/kernel/start_menu.rs), [`core/ui/folders.js`](../core/ui/folders.js), [`core/ui/folder-body.js`](../core/ui/folder-body.js), [`core/ui/toast.js`](../core/ui/toast.js) |
 | **130** | 2026-10-28 | `732ffdd` | Баги меню: пилюли профиля, одна очередь записи, `syncWidgets` без пересборки стола, VPN не затирает настройки, дефолты из ядра, ярлыки из `Shell` | [`core/ui/menu.js`](../core/ui/menu.js), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/ui/widgets-api.js`](../core/ui/widgets-api.js), [`core/kernel/unidtk_db.rs`](../core/kernel/unidtk_db.rs) |
 | **129** | 2026-10-28 | `f16cedd` | Скролл тачпадом над шеллом через сырой HID (DirectManipulation не даёт колеса над WebView2) | [`core/kernel/touchpad.rs`](../core/kernel/touchpad.rs), [`core/kernel/input.rs`](../core/kernel/input.rs), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js) |
 | **128** | 2026-10-27 | `0c0e264` | Скролл тачпадом (`WH_MOUSE_LL` вместо raw-input колеса), раскладка переживает сон (чистая `telegramDisplayPosition`), открытие папок в проводнике без длинных задач | [`core/kernel/input.rs`](../core/kernel/input.rs), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`modules/explorer/ui/explorer.js`](../modules/explorer/ui/explorer.js) |
@@ -4744,6 +4745,64 @@ DOM после reload: часы 541,25 207×187 rings, глиф 1198,58 7×97 (1
 
 ### 122.5 Верификация и метрики
 `udtk build` 14м34с, деплой, ping 1 мс, ERROR пуст. Превью морского варианта — инлайн-стили до сборки; из билда: хук `theme=sea-glass`, полоса изморозь + белые значения + красные чипы с белым текстом (кроп). Меню светлое из билда, рельса аква замером, попап библиотеки белый матовый, глиф белый+красный. Раскладка не тронута (только цвета).
+
+## 131. Сессия 2026-10-29 — полная переделка меню кастомизации (UX, расстановка на столе, папки без AppData, чистка Shell)
+
+### 131.1 Контекст и симптомы
+Реализация согласованного плана переделки меню кастомизации ([`tasks/menu-redesign.md`](tasks/menu-redesign.md)) по результатам глубокого аудита 70 проблем ([`tasks/menu-audit.md`](tasks/menu-audit.md)). Старое меню представляло собой полноэкранную непрозрачную модалку, скрывавшую рабочий стол; настройка геометрии требовала ручного ввода чисел X/Y в инпуты без визуальной обратной связи; управление ярлыками в папках требовало ручного ввода путей в закрытый каталог `%LOCALAPPDATA%`; на столе оставались визуальные рудименты — кнопки `#editMode`, `#resetWallpaper`, `#quitApp`; в ядре и модулях оставался устаревший код миграции из каталога `Shell`.
+
+### 131.2 Корневые причины
+1. **Модальная архитектура меню:** полноэкранный контейнер изолировал пользователя от рабочего стола, делая невозможным живой предпросмотр тем, акцентов и позиций.
+2. **Отсутствие интерактивной модели расстановки:** позиции сохранялись только как абсолютные пиксели `x/y` относительно левого верхнего угла без учета изменения разрешения/DPI экрана и без физического перетаскивания с прилипанием.
+3. **Хранение `.lnk`-копий в AppData:** папки оперировали физическими файлами-копиями ярлыков, что делало невозможным простое добавление установленных программ из Пуска или системного диалога, а переименование или удаление оригинальных файлов приводило к тихим поломкам.
+4. **Засорение кодовой базы legacy-путями:** каталог `%LOCALAPPDATA%\Shell` был окончательно удален на машине пользователя, однако ветки проверок и аварийных миграций сохранялись в `paths.rs`, `unidtk_db.rs`, `log_store.rs`, `module_store.rs`, `opt/cli`.
+5. **Зависимость остановки приложения от DOM-кнопки:** `udtk stop` эмулировал клик по кнопке `#quitApp`, что связывало системный CLI-мост с версткой интерфейса.
+
+### 131.3 Архитектурное решение
+- **Боковая панель (~420 px):** `#menuContainer` реализован как правая скользящая панель внутри того же окна WorkerW, рабочий стол остается живым и видимым; панель структурирована на 3 вкладки («Стол», «Папки», «Вид») и дочерний экран настройки VPN. Клавиатурная навигация (Esc, стрелки табов WAI-ARIA, Enter).
+- **Одна кнопка на столе:** кнопки `#editMode`, `#resetWallpaper`, `#quitApp` удалены под корень. На столе осталась ровно одна кнопка — `#openMenu`. Выход перенесен в подвал панели и пункт трея; `udtk stop` переведен на прямой вызов `quit_app`.
+- **Режим расстановки на столе:** вызывается кнопкой «Расставить» из раздела «Стол». Меню сворачивается, внизу стола открывается плашка `#arrangeBar` («+ Папка», «Отменить» [Esc], «Готово»). Реализована сетка с шагом 16 px, магнитное прилипание к границам экрана и соседним виджетам (10 px, зазор 12 px). По кнопке «Готово» вычисляется ближайший угол и сохраняется привязка `anchor ∈ {tl,tr,bl,br}` со смещением `ax/ay` (через чистую функцию `placeOnCanvas`), обеспечивающая сохранение геометрии при смене монитора или сна. Esc или «Отменить» мгновенно восстанавливают исходный снимок конфигурации.
+- **Папки без AppData:**
+  - Создан ядерный модуль `core/kernel/start_menu.rs` с фоновым STA COM-воркером (`IShellLinkW`, `IShellItemImageFactory`) для перечисления программ меню Пуск и извлечения системных иконок высокого разрешения в формате сырых BGRA пикселей (рендеринг в data URL на canvas без добавления тяжелых FFI-зависимостей вроде libpng).
+  - Поддержка системного диалога выбора файлов и папок через плагин `tauri-plugin-dialog`.
+  - Поддержка вставки из буфера обмена (CF_HDROP файлы, `CF_UNICODETEXT`, URL) через расширенный `modules/explorer/rust/clipboard.rs`.
+  - Редактирование ярлыков прямо на столе в раскрытой карточке папки (`core/ui/folder-body.js`): плитка «+», переименование инлайн, перетаскивание, контекстное меню действий, индикация недоступных ярлыков с действиями «Найти…» и «Убрать».
+  - Единая подсистема тостов с отменой действий в течение 5 секунд (`core/ui/toast.js`), исключающая использование блокирующих `alert`/`confirm`.
+- **Вычистка `Shell`:** полностью удален код миграции и fallback-ветки из `paths.rs`, `unidtk_db.rs`, `log_store.rs`, `module_store.rs`, `main.rs`, `opt/cli/main.rs`.
+
+### 131.4 Изменённые файлы
+- [`core/ui/menu.js`](../core/ui/menu.js) — полный редизайн: табы «Стол», «Папки», «Вид», панель VPN, подсвечивание виджетов на столе, интеграция с Пуском и диалогами.
+- [`core/ui/menu.css`](../core/ui/menu.css) — стили боковой панели 420 px, адаптивная темная/светлая верстка на токенах темы.
+- [`core/ui/index.html`](../core/ui/index.html) — удалены кнопки `#editMode`, `#resetWallpaper`, `#quitApp`, добавлена разметка панели и плашки расстановки `#arrangeBar`.
+- [`core/ui/styles.css`](../core/ui/styles.css) — стили плашки расстановки, сетки стола, тостов и меню папки.
+- [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js) — привязка углов `placeOnCanvas`/`pinToNearestCorner`, сетка и магнит `snapMove`, контроллер режима расстановки `enterArrangeMode`/`leaveArrangeMode`, подсказка `deskHint`.
+- [`core/ui/toast.js`](../core/ui/toast.js) — единый компонент тостов с поддержкой `showUndo`.
+- [`core/ui/folders.js`](../core/ui/folders.js) — единый фасад CRUD-операций папок и ярлыков с отменой через тосты.
+- [`core/ui/folder-body.js`](../core/ui/folder-body.js) — живой рендеринг раскрытой папки на столе, контекстное меню, инлайн-переименование.
+- [`core/ui/shortcut-icons.js`](../core/ui/shortcut-icons.js) — гидратация и кэширование системных Windows-иконок через BGRA canvas data URL.
+- [`core/ui/widgets-api.js`](../core/ui/widgets-api.js) — передача аргументов `.lnk`, `shortcutCount` со склонениями, запуск через `launch_shortcut`.
+- [`core/kernel/start_menu.rs`](../core/kernel/start_menu.rs) — ядерный модуль: сканирование Пуска, извлечение BGRA-иконок в COM STA-потоке, запуск целей, миграция старых копий.
+- [`core/kernel/main.rs`](../core/kernel/main.rs) — регистрация команд меню Пуск, диалога, буфера, перезапуска; удаление `reset_wallpaper`; вычистка `Shell`.
+- [`modules/explorer/rust/clipboard.rs`](../modules/explorer/rust/clipboard.rs) — чтение текстовых ссылок и Unicode из буфера обмена.
+- [`opt/cli/main.rs`](../opt/cli/main.rs) — перевод `udtk stop` на `invoke('quit_app')`, чистка устаревших упоминаний `Shell`.
+- [`core/api/src/paths.rs`](../core/api/src/paths.rs), [`core/kernel/unidtk_db.rs`](../core/kernel/unidtk_db.rs), [`core/kernel/log_store.rs`](../core/kernel/log_store.rs), [`core/kernel/module_store.rs`](../core/kernel/module_store.rs) — вычистка устаревшего кода миграции `Shell`.
+- [`docs/tasks/menu-redesign.md`](tasks/menu-redesign.md) — фиксация выполнения плана.
+- [`docs/architecture.md`](architecture.md) — актуализация контрактов меню и привязки позиций.
+
+### 131.5 Верификация и метрики
+- `udtk doctor`: ALL CHECKS PASSED (компиляция бэкенда, все DLL, 3 задачи планировщика, эмуляция модулей, IPC ping).
+- `udtk doctor -ping`: 1 мс.
+- `udtk logs --level ERROR`: 0 ошибок.
+- Working Set RAM процесса `unidtk.exe`: **46.4 МБ**.
+- Полный сквозной цикл живой проверки через CDP:
+  - Открытие/закрытие боковой панели меню (клик `#openMenu`, Esc, `#menuCloseBtn`);
+  - Переключение вкладок «Стол», «Папки», «Вид»;
+  - Вход в режим «Расставить» (`#btnArrange`), появление плашки `#arrangeBar`, перетаскивание с магнитом, выход по «Готово» и возврат меню;
+  - Скриншоты:
+    - Рабочий стол: `C:\Users\admin\Pictures\Screenshots\unidtk_2026-10-29_21-32-37.png`
+    - Боковая панель: `C:\Users\admin\Pictures\Screenshots\unidtk_2026-10-29_21-32-57.png`
+    - Раздел «Вид»: `C:\Users\admin\Pictures\Screenshots\unidtk_2026-10-29_21-33-22.png`
+    - Режим расстановки на столе: `C:\Users\admin\Pictures\Screenshots\unidtk_2026-10-29_21-34-06.png`
 
 ## 130. Сессия 2026-10-28 — баги меню кастомизации (первый заход по аудиту)
 

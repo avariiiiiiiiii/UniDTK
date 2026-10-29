@@ -62,7 +62,7 @@ fn default_home_subnet() -> String {
     "192.168.31.0/24".to_string()
 }
 
-/// Каталог данных Shell (контракт, не локальная копия логики).
+/// Каталог данных UniDTK (контракт, не локальная копия логики).
 fn data_dir() -> std::path::PathBuf {
     unidtk_api::paths::data_dir()
 }

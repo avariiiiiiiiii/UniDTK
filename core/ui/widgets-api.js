@@ -14,6 +14,15 @@ import {
   openPath,
 } from "@unidtk/bridge";
 
+/** «1 ярлык / 2 ярлыка / 5 ярлыков». */
+export function shortcutCount(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} ярлык`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} ярлыка`;
+  return `${n} ярлыков`;
+}
+
 function flog(msg) {
   console.log(msg);
   invoke("frontend_log", { message: msg }).catch(() => {});
@@ -129,7 +138,7 @@ export async function getWidgets() {
   const folderWidgets = (userFolders || []).map((f) => ({
     id: f.id,
     name: f.name,
-    description: `${(f.items || []).length} ярлыков`,
+    description: shortcutCount((f.items || []).length),
     iconSvg: f.icon_svg || `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>`,
     isFolder: true,
     specialType: "",
@@ -151,6 +160,7 @@ export async function getWidgetShortcuts(widgetId) {
         name: item.name,
         filename: item.name,
         path: item.target,
+        args: item.args || "",
         type: item.kind || "file",
       }));
     }
@@ -311,6 +321,13 @@ export async function openShortcut(shortcutPath, meta = {}) {
   const recycleNames = new Set(["recycle bin", "корзина", "$recycle.bin"]);
   if (recycleNames.has(name) || /\$recycle\.bin$/i.test(p.replace(/\\/g, "/"))) {
     await openInExplorer(p);
+    return;
+  }
+
+  // Arguments from a resolved .lnk, and schemes other than the web
+  // (steam://, com.epicgames.launcher://), go through the shell like Explorer.
+  if (meta.args || type === "app" || (type === "url" && !/^https?:\/\//i.test(p))) {
+    await invoke("launch_shortcut", { target: p, args: meta.args || "" });
     return;
   }
 

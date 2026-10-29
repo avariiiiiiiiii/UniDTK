@@ -35,51 +35,8 @@ pub fn install_dir() -> PathBuf {
 pub fn data_dir() -> PathBuf {
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join("UniDTK");
-    let old_dir = base.join("Shell");
     let _ = std::fs::create_dir_all(&dir);
-
-    // Автоматическая миграция данных из legacy папки Shell при первом запуске UniDTK.
-    // Гейт — собственный маркер, а не отсутствие каталога: `%LOCALAPPDATA%\UniDTK`
-    // создают другие подсистемы (регистрация CLI в PATH, открытие базы и журнала)
-    // задолго до первого обращения к `data_dir()`, поэтому проверка `!dir.exists()`
-    // молча выключала миграцию целиком — так оставались неперенесёнными каталоги
-    // (`tdlib/` с сессией Telegram, `ping/`, пользовательские папки).
-    let marker = dir.join(".migrated-from-shell");
-    if old_dir.is_dir() && !marker.exists() {
-        if let Ok(entries) = std::fs::read_dir(&old_dir) {
-            for entry in entries.flatten() {
-                migrate_entry(&entry.path(), &dir.join(entry.file_name()));
-            }
-        }
-        let _ = std::fs::write(&marker, b"migrated from %LOCALAPPDATA%\\Shell\n");
-    }
-
     dir
-}
-
-/// Перенести одну запись legacy-каталога в `dest`, если её там ещё нет.
-///
-/// Каталоги обходятся рекурсивно: `std::fs::copy` умеет только файлы, а в
-/// `%LOCALAPPDATA%\Shell` каталогами лежат целые подсистемы — в первую очередь
-/// `tdlib/` (сессия Telegram), а также `ping/` и пользовательские папки. Плоское
-/// копирование молча теряло их и оставляло legacy-каталог осиротевшим, потому
-/// что гейт миграции одноразовый.
-fn migrate_entry(src: &std::path::Path, dest: &std::path::Path) {
-    if dest.exists() {
-        return;
-    }
-    if src.is_dir() {
-        if std::fs::create_dir_all(dest).is_err() {
-            return;
-        }
-        if let Ok(entries) = std::fs::read_dir(src) {
-            for entry in entries.flatten() {
-                migrate_entry(&entry.path(), &dest.join(entry.file_name()));
-            }
-        }
-    } else {
-        let _ = std::fs::copy(src, dest);
-    }
 }
 
 /// Производные данные, которые можно удалить целиком:

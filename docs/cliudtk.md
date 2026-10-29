@@ -205,7 +205,7 @@ udtk help [--json]
 | `UniDTKVpnStop` | `UniDTKVpnStopTask.xml` | Хелпер остановки VPN | Elevated |
 
 * `udtk tasks register [all|UniDTK|UniDTKSingbox|UniDTKVpnStop|autostart]` — подстановка `@INSTALL_DIR@` и текущего пользователя в UTF-16 XML, регистрация через `schtasks`, при необходимости — через UAC (`Start-Process … -Verb RunAs`). Требует `vpn-helper.exe` рядом с приложением.
-* `udtk tasks unregister <all|name>` / `cleanup-old` (устаревшие: `Shell*`, `NothingWallpaper*`).
+* `udtk tasks unregister <all|name>` / `cleanup-old` (устаревшие: `NothingWallpaper*`).
 * `udtk autostart [status|enable|disable]` — обёртка над задачей `UniDTK`.
 * `udtk path [status|ensure]` — прописывает в User PATH ровно один каталог: тот, где лежит сам `udtk.exe` (никаких копий бинарника в данных).
 
@@ -251,7 +251,7 @@ udtk help [--json]
 
 * `-env` в секции окружения проверяет только наличие DLL/бинарников, без PE-валидации (она живёт в фазах модулей) — при чтении отчёта это стоит держать в голове.
 
-Legacy-имя `shell` в CLI вычищено: строки `usage:`, подсказки `shot`/`cdp_get`, doc-комментарии, сообщения тестов и шапка файла теперь говорят `udtk`/UniDTK. Осознанно оставлены только безопасные упоминания: `shell32` (Win32 API), `window.__SHELL_HARNESS__` (глобал фронтенда, читается как fallback к `__UNIDTK_HARNESS__`), env-ключ `SHELL_DEBUG`, имена устаревших задач `Shell*` в `OBSOLETE_TASKS` и legacy-каталог `%LOCALAPPDATA%\Shell` (адрес старой цепочки VPN-скриптов для их удаления).
+Legacy-имя `shell` в CLI вычищено: строки `usage:`, подсказки `shot`/`cdp_get`, doc-комментарии, сообщения тестов и шапка файла теперь говорят `udtk`/UniDTK. Осознанно оставлены только `shell32` (Win32 API) и env-ключ `SHELL_DEBUG`; глобал `__SHELL_HARNESS__`, задачи `Shell*` в `OBSOLETE_TASKS` и чистка каталога `%LOCALAPPDATA%\Shell` удалены вместе с миграцией из него (сессия 131).
 
 ---
 

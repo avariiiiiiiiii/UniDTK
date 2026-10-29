@@ -1,16 +1,17 @@
 /**
- * UniDTK — Core Fullscreen Menu (menu.js)
+ * UniDTK — customization panel (menu.js)
  *
- * Core overlay surface providing:
- *   1. Widgets and desktop layout editor (visibility, coordinate editing, reordering, reset)
- *   2. Desktop folders management (create, delete, rename, add/remove shortcuts) via redb
- *   3. VPN configuration (subscription URL, auto-connect, isolated Home Server submodule)
+ * A side panel on the right of the live desktop, inside the wallpaper window:
+ *   1. «Стол»  — which widgets show, arranging them on the desk, backend modules
+ *   2. «Папки» — desktop folders and their shortcuts, added from Start, a system
+ *               dialog or the clipboard — never by typing a path
+ *   3. «Вид»   — theme, colours, everything else folded into «Тонкая настройка»
+ * plus the VPN view, reached from «Стол» (the VPN widget may be hidden).
  */
 
 import { invoke } from "@unidtk/bridge";
-import { surfaceManager } from "./surface-manager.js";
 import { getWidgets, getDefaultWidgetConfig, getDisabledModules, setDisabledModules } from "./widgets-api.js";
-import { config, saveConfig, syncWidgets, relayoutWidgets, escapeHtml } from "./unidtk-core.js";
+import { config, saveConfig, syncWidgets, relayoutWidgets, escapeHtml, enterArrangeMode } from "./unidtk-core.js";
 import {
   getActiveTheme,
   getAllPresets,
@@ -24,12 +25,13 @@ import {
   TINT_TARGETS,
   shuffleColors,
   restorePreviousColors,
-  hasPreviousColors,
 } from "./theme.js";
-import { animate, spring } from "./motion.js";
-
-// Backend-module toggles share one stored list; see the handler.
-let moduleToggleChain = Promise.resolve();
+import { showToast, showUndo } from "./toast.js";
+import {
+  FOLDER_ICONS, shortcutCount, listFolders, createFolder, updateFolder, deleteFolder,
+  addItems, removeItem, renameItem, replaceItemTarget, missingTargets, pickTarget, clipboardDrafts,
+} from "./folders.js";
+import { hydrateShortcutIcons } from "./shortcut-icons.js";
 
 // One submission per click: the control stays disabled while its action is
 // in flight, so a double click cannot create a folder or shortcut twice.
@@ -38,338 +40,307 @@ async function runOnce(control, action) {
   control.disabled = true;
   try {
     await action();
+  } catch (err) {
+    showToast(`Не получилось: ${err?.message || err}`, { tone: "error" });
   } finally {
     if (control.isConnected) control.disabled = false;
   }
 }
 
-const FOLDER_ICONS = {
-  folder: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>`,
-  terminal: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`,
-  gamepad: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="15" y1="13" x2="15.01" y2="13"/><line x1="18" y1="11" x2="18.01" y2="11"/><rect x="2" y="6" width="20" height="12" rx="6"/></svg>`,
-  code: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`,
-  globe: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`,
-  music: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`,
-  tools: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`,
-  book: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`,
-  star: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`,
-};
+const TABS = [
+  { id: "desk", label: "Стол" },
+  { id: "folders", label: "Папки" },
+  { id: "look", label: "Вид" },
+];
 
-let currentTab = "widgets";
-let menuOverlay = null;
-let menuContainer = null;
+// Modules with a Rust half, so the user can switch the background work off.
+// `clock` is absent on purpose: it has no crate, there is nothing to stop.
+const BACKEND_MODULES = [
+  { id: "mp3-player", label: "Плеер" },
+  { id: "telegram", label: "Telegram" },
+  { id: "glyph-bar", label: "Громкость (Glyph Bar)" },
+  { id: "micrographics", label: "Микрографика" },
+  { id: "vpn", label: "VPN" },
+  { id: "explorer", label: "Проводник" },
+];
+
+let panel = null;
+let opener = null;
+let currentView = "desk";
+// A module switch flipped this session: it applies on the next start.
+let modulesPending = false;
 
 export function initMenu() {
-  menuOverlay = document.getElementById("menuOverlay");
-  menuContainer = document.getElementById("menuContainer");
-  if (!menuOverlay || !menuContainer) return;
-
+  panel = document.getElementById("menuContainer");
+  opener = document.getElementById("openMenu");
+  if (!panel) return;
   renderShell();
-  setupEvents();
+  panel.addEventListener("keydown", onPanelKeydown);
 }
 
 function renderShell() {
-  menuContainer.innerHTML = `
-    <div class="menu-header">
-      <div class="menu-brand">
-        <div class="menu-brand-icon">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <line x1="3" y1="6" x2="21" y2="6"></line>
-            <line x1="3" y1="18" x2="21" y2="18"></line>
-          </svg>
-        </div>
-        <div class="menu-title-block">
-          <h2>UniDTK // Menu</h2>
-          <p>Конфигурация модулей, рабочего стола и сетевых параметров</p>
-        </div>
-      </div>
-      <button class="menu-close-btn" id="menuCloseBtn" aria-label="Закрыть меню (Esc)">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <line x1="18" y1="6" x2="6" y2="18"></line>
-          <line x1="6" y1="6" x2="18" y2="18"></line>
+  panel.innerHTML = `
+    <header class="menu-header">
+      <h2 class="menu-title" id="menuTitle">Настройки</h2>
+      <button type="button" class="menu-icon-btn" id="menuCloseBtn" aria-label="Закрыть (Esc)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
+    </header>
+    <nav class="menu-tabs" role="tablist" aria-label="Разделы">
+      ${TABS.map((t) => `
+        <button type="button" class="menu-tab" role="tab" id="tab-${t.id}" data-tab="${t.id}"
+          aria-controls="pane-${t.id}" aria-selected="false" tabindex="-1">${t.label}</button>
+      `).join("")}
+    </nav>
+    <div class="menu-body">
+      ${TABS.map((t) => `<section class="menu-pane" role="tabpanel" id="pane-${t.id}" aria-labelledby="tab-${t.id}" tabindex="0" hidden></section>`).join("")}
+      <section class="menu-pane" id="pane-vpn" aria-label="VPN" hidden></section>
     </div>
-
-    <div class="menu-tabs">
-      <button class="menu-tab-btn active" data-tab="widgets">
-        <span class="tab-dot"></span>
-        Виджеты и стол
-      </button>
-      <button class="menu-tab-btn" data-tab="folders">
-        <span class="tab-dot"></span>
-        Папки ярлыков
-      </button>
-      <button class="menu-tab-btn" data-tab="vpn">
-        <span class="tab-dot"></span>
-        VPN и Сеть
-      </button>
-      <button class="menu-tab-btn" data-tab="theme">
-        <span class="tab-dot"></span>
-        Оформление
-      </button>
-    </div>
-
-    <div class="menu-body" id="menuBody">
-      <div class="menu-tab-pane active" id="pane-widgets"></div>
-      <div class="menu-tab-pane" id="pane-folders"></div>
-      <div class="menu-tab-pane" id="pane-vpn"></div>
-      <div class="menu-tab-pane" id="pane-theme"></div>
-    </div>
+    <footer class="menu-footer">
+      <button type="button" class="menu-btn menu-btn-quiet" id="menuQuit">Выйти из UniDTK</button>
+    </footer>
   `;
+
+  panel.querySelectorAll(".menu-tab").forEach((tab) => {
+    tab.addEventListener("click", () => showView(tab.dataset.tab));
+  });
+  panel.querySelector("#menuCloseBtn").addEventListener("click", () => closeMenu());
+  const quit = panel.querySelector("#menuQuit");
+  quit.addEventListener("click", () => runOnce(quit, () => invoke("quit_app")));
 }
 
-function setupEvents() {
-  menuContainer.querySelectorAll(".menu-tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const tab = btn.dataset.tab;
-      switchTab(tab);
-    });
-  });
-
-  menuContainer.querySelector("#menuCloseBtn")?.addEventListener("click", () => {
-    closeMenu();
-  });
-
-  menuOverlay.addEventListener("click", (e) => {
-    if (e.target === menuOverlay) {
-      closeMenu();
-    }
-  });
-}
-
-function switchTab(tab) {
-  currentTab = tab;
-  menuContainer.querySelectorAll(".menu-tab-btn").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tab === tab);
-  });
-  menuContainer.querySelectorAll(".menu-tab-pane").forEach((p) => {
-    p.classList.toggle("active", p.id === `pane-${tab}`);
-  });
-
-  if (tab === "widgets") renderWidgetsTab();
-  else if (tab === "folders") renderFoldersTab();
-  else if (tab === "vpn") renderVpnTab();
-  else if (tab === "theme") renderThemeTab();
-}
-
-export function openMenu(triggerOrigin = null) {
-  if (!menuOverlay || !menuContainer) return;
-
-  surfaceManager.openSurface(menuContainer, {
-    backdrop: menuOverlay,
-    origin: triggerOrigin || null,
-    originRadius: "16px",
-    content: ".menu-header, .menu-tabs, .menu-body",
-    elevation: "var(--z-surface-overlay, 2000)",
-    onOpen: () => {
-      menuOverlay.classList.add("visible");
-      switchTab(currentTab);
-    },
-    onClosed: () => {
-      menuOverlay.classList.remove("visible");
-    },
-  });
-}
-
-export function closeMenu() {
-  if (menuContainer && surfaceManager.isOpen(menuContainer)) {
-    surfaceManager.closeSurface(menuContainer);
-  } else {
-    menuOverlay?.classList.remove("visible");
+function onPanelKeydown(e) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    if (currentView === "vpn") showView("desk");
+    else closeMenu();
+    return;
+  }
+  // Tabs: arrows move between them (WAI-ARIA tabs pattern).
+  const tab = e.target.closest?.(".menu-tab");
+  if (tab && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
+    e.preventDefault();
+    const ids = TABS.map((t) => t.id);
+    const next = ids[(ids.indexOf(tab.dataset.tab) + (e.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length];
+    showView(next);
+    panel.querySelector(`#tab-${next}`)?.focus();
+  }
+  // Enter submits the small inline forms (rename, new folder, search).
+  if (e.key === "Enter" && e.target.matches?.("input[data-submit]")) {
+    e.preventDefault();
+    panel.querySelector(`#${e.target.dataset.submit}`)?.click();
   }
 }
 
+function showView(view) {
+  currentView = view;
+  panel.querySelectorAll(".menu-tab").forEach((t) => {
+    const active = t.dataset.tab === view;
+    t.setAttribute("aria-selected", String(active));
+    t.tabIndex = active ? 0 : -1;
+  });
+  panel.querySelectorAll(".menu-pane").forEach((p) => {
+    p.hidden = p.id !== `pane-${view}`;
+  });
+  panel.querySelector(".menu-tabs").hidden = view === "vpn";
+  if (view === "desk") renderDesk();
+  else if (view === "folders") renderFolders();
+  else if (view === "look") renderLook();
+  else if (view === "vpn") renderVpn();
+}
+
+export function isMenuOpen() {
+  return Boolean(panel && !panel.hidden && !panel.classList.contains("closing"));
+}
+
+export function openMenu() {
+  if (!panel) return;
+  if (isMenuOpen()) {
+    closeMenu();
+    return;
+  }
+  panel.classList.remove("closing");
+  panel.hidden = false;
+  opener?.setAttribute("aria-expanded", "true");
+  // Next frame: the slide-in transition needs a rendered start state.
+  requestAnimationFrame(() => panel.classList.add("open"));
+  showView(currentView === "vpn" ? "desk" : currentView);
+  panel.querySelector(`#tab-${currentView}`)?.focus();
+}
+
+/** Open «Папки» with the Start list of one folder already unfolded. */
+export function openFoldersFor(folderId) {
+  startPickerFor = folderId;
+  currentView = "folders";
+  if (isMenuOpen()) showView("folders");
+  else openMenu();
+}
+
+export function closeMenu({ restoreFocus = true } = {}) {
+  if (!isMenuOpen()) return;
+  clearHighlight();
+  panel.classList.remove("open");
+  panel.classList.add("closing");
+  opener?.setAttribute("aria-expanded", "false");
+  const done = () => {
+    if (!panel.classList.contains("closing")) return;
+    panel.classList.remove("closing");
+    panel.hidden = true;
+  };
+  panel.addEventListener("transitionend", done, { once: true });
+  // Reduced motion or a zero scale may skip the transition entirely.
+  setTimeout(done, 700);
+  if (restoreFocus) opener?.focus();
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// TAB 1: Виджеты и стол
+// «Стол»
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function renderWidgetsTab() {
-  const pane = document.getElementById("pane-widgets");
-  if (!pane) return;
+function highlight(id) {
+  clearHighlight();
+  document.querySelector(`.widget-card[data-id="${CSS.escape(id)}"]`)?.classList.add("menu-highlight");
+}
 
-  pane.innerHTML = `<div class="menu-empty-state">Загрузка виджетов...</div>`;
+function clearHighlight() {
+  document.querySelectorAll(".widget-card.menu-highlight").forEach((c) => c.classList.remove("menu-highlight"));
+}
 
-  const widgets = await getWidgets().catch(() => []);
-  if (!config.positions) config.positions = {};
-  if (!Array.isArray(config.hidden)) config.hidden = [];
+async function renderDesk() {
+  const pane = panel.querySelector("#pane-desk");
+  pane.innerHTML = `<div class="menu-empty">Загрузка…</div>`;
 
-  const hiddenSet = new Set(config.hidden);
-  const disabledSet = new Set(await getDisabledModules());
-  // Modules with a Rust half, so the user can switch the background work off.
-  // `clock` is absent on purpose: it has no crate, there is nothing to stop.
-  const BACKEND_MODULE_IDS = ["mp3-player", "telegram", "glyph-bar", "vpn", "explorer", "micrographics"];
-  const nonWidgetModules = ["vpn", "explorer"].filter((id) => !widgets.some((w) => w.id === id));
+  let widgets;
+  let disabled;
+  try {
+    [widgets, disabled] = await Promise.all([getWidgets(), getDisabledModules()]);
+  } catch (err) {
+    pane.innerHTML = `
+      <div class="menu-empty menu-empty-error">
+        Не удалось загрузить список виджетов: ${escapeHtml(String(err?.message || err))}
+        <button type="button" class="menu-btn" data-retry>Повторить</button>
+      </div>`;
+    pane.querySelector("[data-retry]").addEventListener("click", renderDesk);
+    return;
+  }
+  const hidden = new Set(config.hidden || []);
+  const disabledSet = new Set(disabled);
+  const modules = widgets.filter((w) => !w.isFolder);
+  const folders = widgets.filter((w) => w.isFolder);
+
+  const row = (w) => `
+    <li class="menu-row" data-widget-id="${escapeHtml(w.id)}">
+      <span class="menu-row-icon" aria-hidden="true">${w.iconSvg || ""}</span>
+      <span class="menu-row-text">
+        <span class="menu-row-name">${escapeHtml(w.name)}</span>
+        ${w.isFolder ? `<span class="menu-row-sub">${shortcutCount((w.items || []).length)}</span>` : ""}
+      </span>
+      <label class="menu-switch" title="Показывать на столе">
+        <input type="checkbox" class="widget-vis-toggle" data-id="${escapeHtml(w.id)}" ${hidden.has(w.id) ? "" : "checked"}
+          aria-label="Показывать «${escapeHtml(w.name)}»">
+        <span class="menu-slider" aria-hidden="true"></span>
+      </label>
+    </li>`;
 
   pane.innerHTML = `
-    <div class="menu-section">
-      <div class="menu-section-header">
-        <div>
-          <div class="menu-section-title">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="3" y="3" width="7" height="7"></rect>
-              <rect x="14" y="3" width="7" height="7"></rect>
-              <rect x="14" y="14" width="7" height="7"></rect>
-              <rect x="3" y="14" width="7" height="7"></rect>
-            </svg>
-            Управление виджетами и положение на экране
-          </div>
-          <div class="menu-section-desc">Включение/выключение отображения на рабочем столе и точная настройка координат (px)</div>
-        </div>
-        <div style="display: flex; gap: 10px;">
-          <button class="menu-btn" id="btnInteractiveEdit">
-            🎯 Переместить на столе
-          </button>
-          <button class="menu-btn" id="btnResetPositions">
-            ↺ Сброс позиций
-          </button>
-        </div>
-      </div>
+    <div class="menu-actions">
+      <button type="button" class="menu-btn menu-btn-primary" id="btnArrange">Расставить</button>
+      <button type="button" class="menu-btn" id="btnResetPositions">Исходная раскладка</button>
+    </div>
 
-      <div class="widgets-mgmt-grid" id="widgetsGrid">
-        ${widgets.map((w) => {
-          const isHidden = hiddenSet.has(w.id);
-          const pos = config.positions[w.id] || { x: 28, y: 28 };
-          return `
-            <div class="widget-mgmt-card" data-widget-id="${w.id}">
-              <div class="widget-mgmt-header">
-                <div class="widget-mgmt-info">
-                  <div class="widget-mgmt-icon">${w.iconSvg || ""}</div>
-                  <div>
-                    <div class="widget-mgmt-name">${escapeHtml(w.name)}</div>
-                    <div class="widget-mgmt-type">${w.isFolder ? "Пользовательская папка" : "Модуль системы"}</div>
-                  </div>
-                </div>
-                <label class="menu-switch">
-                  <input type="checkbox" class="widget-vis-toggle" ${!isHidden ? "checked" : ""} data-id="${w.id}">
-                  <span class="menu-slider"></span>
-                </label>
-              </div>
+    <h3 class="menu-heading">Виджеты</h3>
+    <ul class="menu-list">${modules.map(row).join("")}</ul>
 
-              ${BACKEND_MODULE_IDS.includes(w.id) ? `
-                <div class="widget-mgmt-module" style="margin-top: 8px; display: flex; align-items: center; gap: 8px;">
-                  <span style="font-size: 11px; color: rgba(var(--fg-rgb), 0.55); flex: 1;">Модуль (бэкенд)</span>
-                  <label class="menu-switch">
-                    <input type="checkbox" class="mod-disable-toggle" data-id="${w.id}" ${disabledSet.has(w.id) ? "" : "checked"}>
-                    <span class="menu-slider"></span>
-                  </label>
-                </div>
-                <div class="mod-note" data-mod-note="${w.id}" style="${disabledSet.has(w.id) ? "" : "display:none;"} font-size: 11px; color: rgba(var(--fg-rgb), 0.35); padding: 4px 0 0;">Модуль выключен — бэкенд остановится, применится после перезапуска</div>
-              ` : ""}
+    ${folders.length ? `
+      <h3 class="menu-heading">Папки</h3>
+      <ul class="menu-list">${folders.map(row).join("")}</ul>
+    ` : ""}
 
-              ${!isHidden ? `
-                <div class="widget-mgmt-coords">
-                  <span style="font-size: 11px; color: rgba(var(--fg-rgb), 0.4);">Координаты:</span>
-                  <div class="coord-group">
-                    <span class="coord-label">X</span>
-                    <input type="number" class="menu-input coord-input coord-x" data-id="${w.id}" value="${pos.x ?? 28}" step="10">
-                  </div>
-                  <div class="coord-group">
-                    <span class="coord-label">Y</span>
-                    <input type="number" class="menu-input coord-input coord-y" data-id="${w.id}" value="${pos.y ?? 28}" step="10">
-                  </div>
-                </div>
-              ` : `
-                <div style="font-size: 11px; color: rgba(var(--fg-rgb), 0.3); padding: 6px 0;">Виджет скрыт с рабочего стола</div>
-              `}
-            </div>
-          `;
-        }).join("")}
-      </div>
+    <ul class="menu-list">
+      <li class="menu-row">
+        <span class="menu-row-text">
+          <span class="menu-row-name">VPN</span>
+          <span class="menu-row-sub">Подписка, автоподключение, домашний сервер</span>
+        </span>
+        <button type="button" class="menu-btn" id="btnVpnSettings">Настроить…</button>
+      </li>
+    </ul>
 
-      ${nonWidgetModules.length ? `
-        <div style="margin-top: 20px;">
-          <div class="menu-section-title">Прочие модули (бэкенд)</div>
-          <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 10px;">
-            ${nonWidgetModules.map((id) => `
-              <div style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: rgba(var(--scrim-rgb), 0.3); border-radius: 12px; border: 1px solid rgba(var(--bg-elev-rgb), 0.1);">
-                <span style="flex: 1; font-size: 13px;">${escapeHtml(id)}</span>
-                <label class="menu-switch">
-                  <input type="checkbox" class="mod-disable-toggle" data-id="${id}" ${disabledSet.has(id) ? "" : "checked"}>
-                  <span class="menu-slider"></span>
-                </label>
-                <span data-mod-note="${id}" style="${disabledSet.has(id) ? "" : "display:none;"} font-size: 11px; color: rgba(var(--fg-rgb), 0.35);">после перезапуска</span>
-              </div>
-            `).join("")}
-          </div>
-        </div>
-      ` : ""}
+    <h3 class="menu-heading">Модули</h3>
+    <p class="menu-note">Выключенный модуль не тратит ресурсы: его фоновая работа не запускается. Изменение вступает в силу после перезапуска.</p>
+    <ul class="menu-list">
+      ${BACKEND_MODULES.map((m) => `
+        <li class="menu-row">
+          <span class="menu-row-text"><span class="menu-row-name">${m.label}</span></span>
+          <label class="menu-switch">
+            <input type="checkbox" class="mod-toggle" data-id="${m.id}" ${disabledSet.has(m.id) ? "" : "checked"} aria-label="Модуль «${m.label}» включён">
+            <span class="menu-slider" aria-hidden="true"></span>
+          </label>
+        </li>
+      `).join("")}
+    </ul>
+    <div class="menu-restart" ${modulesPending ? "" : "hidden"}>
+      <p class="menu-note">Плеер и Telegram перезапустятся, музыка остановится.</p>
+      <button type="button" class="menu-btn menu-btn-primary" id="btnRestart">Перезапустить сейчас</button>
     </div>
   `;
 
-  // Visibility toggle
+  pane.querySelectorAll(".menu-row[data-widget-id]").forEach((li) => {
+    li.addEventListener("mouseenter", () => highlight(li.dataset.widgetId));
+    li.addEventListener("mouseleave", clearHighlight);
+  });
+
   pane.querySelectorAll(".widget-vis-toggle").forEach((toggle) => {
     toggle.addEventListener("change", () => runOnce(toggle, async () => {
       const id = toggle.dataset.id;
       const previous = [...(config.hidden || [])];
-      config.hidden = toggle.checked
-        ? previous.filter((h) => h !== id)
-        : [...new Set([...previous, id])];
+      config.hidden = toggle.checked ? previous.filter((h) => h !== id) : [...new Set([...previous, id])];
       if (!(await saveConfig())) {
         config.hidden = previous;
         toggle.checked = !toggle.checked;
         return;
       }
       await syncWidgets();
-      renderWidgetsTab();
+      if (toggle.checked) highlight(id);
     }));
   });
 
-  // Module disable toggle (backend off). Persisted; takes effect on the next
-  // app start (the module is not initialized / skips its heavy background).
-  pane.querySelectorAll(".mod-disable-toggle").forEach((tgl) => {
+  // Read-modify-write of one stored list: chained so a second switch reads the
+  // first one's result instead of the same stale list.
+  let chain = Promise.resolve();
+  pane.querySelectorAll(".mod-toggle").forEach((tgl) => {
     tgl.addEventListener("change", () => {
-      const id = tgl.dataset.id;
-      const checked = tgl.checked;
-      // Read-modify-write of one list: chained so a second toggle reads the
-      // first one's result instead of the same stale list.
-      moduleToggleChain = moduleToggleChain.then(async () => {
+      const { id } = tgl.dataset;
+      const on = tgl.checked;
+      chain = chain.then(async () => {
         const current = new Set(await getDisabledModules());
-        if (checked) current.delete(id);
+        if (on) current.delete(id);
         else current.add(id);
-        const ok = await setDisabledModules([...current]);
-        if (!ok) tgl.checked = !checked;
+        if (!(await setDisabledModules([...current]))) throw new Error("список модулей не сохранён");
+        modulesPending = true;
+        pane.querySelector(".menu-restart").hidden = false;
       }).catch((err) => {
-        console.error("module toggle failed:", err);
-        tgl.checked = !checked;
-      }).finally(() => renderWidgetsTab());
+        tgl.checked = !on;
+        showToast(`Не получилось: ${err?.message || err}`, { tone: "error" });
+      });
     });
   });
 
-  // Position inputs
-  pane.querySelectorAll(".coord-input").forEach((inp) => {
-    inp.addEventListener("change", async (e) => {
-      const id = inp.dataset.id;
-      const isX = inp.classList.contains("coord-x");
-      const val = parseInt(inp.value, 10) || 0;
-      if (!config.positions[id]) config.positions[id] = { x: 28, y: 28 };
-      if (isX) config.positions[id].x = val;
-      else config.positions[id].y = val;
+  const restart = pane.querySelector("#btnRestart");
+  restart.addEventListener("click", () => runOnce(restart, () => invoke("restart_app")));
 
-      const card = document.querySelector(`.widget-card[data-id="${id}"]`);
-      if (card) {
-        if (isX) card.style.left = val + "px";
-        else card.style.top = val + "px";
-      }
+  pane.querySelector("#btnVpnSettings").addEventListener("click", () => showView("vpn"));
 
-      await saveConfig();
-      relayoutWidgets();
-    });
+  pane.querySelector("#btnArrange").addEventListener("click", () => {
+    closeMenu({ restoreFocus: false });
+    enterArrangeMode(() => openMenu());
   });
 
-  // Interactive edit button (opens edit mode on desktop)
-  pane.querySelector("#btnInteractiveEdit")?.addEventListener("click", () => {
-    closeMenu();
-    const editBtn = document.getElementById("editMode");
-    if (editBtn && !document.body.classList.contains("edit-mode")) {
-      editBtn.click();
-    }
-  });
-
-  // Reset positions button
   const resetBtn = pane.querySelector("#btnResetPositions");
-  resetBtn?.addEventListener("click", () => runOnce(resetBtn, async () => {
+  resetBtn.addEventListener("click", () => runOnce(resetBtn, async () => {
+    const before = structuredClone(config.positions || {});
     const defaults = (await getDefaultWidgetConfig()).positions || {};
     const canvas = document.getElementById("widgets");
     const maxX = Math.max(0, (canvas?.clientWidth || window.innerWidth) - 120);
@@ -377,312 +348,621 @@ async function renderWidgetsTab() {
     // Geometry only: settings stored next to it (clock face, AI DJ,
     // micrographics style) are the user's and survive a layout reset.
     Object.entries(config.positions || {}).forEach(([id, pos]) => {
+      delete pos.anchor;
+      delete pos.ax;
+      delete pos.ay;
       const def = defaults[id];
       if (def) {
-        pos.x = def.x;
-        pos.y = def.y;
+        Object.assign(pos, { x: def.x, y: def.y });
         if (def.w) pos.w = def.w;
         if (def.h) pos.h = def.h;
         return;
       }
-      // No kernel default (folders, instances, satellites): keep the place,
-      // only pull it back on screen.
+      // No kernel default (folders, instances): keep the place, only pull it back on screen.
       if (typeof pos.x === "number") pos.x = Math.min(Math.max(0, pos.x), maxX);
       if (typeof pos.y === "number") pos.y = Math.min(Math.max(0, pos.y), maxY);
     });
-    await saveConfig();
-    await syncWidgets();
-    renderWidgetsTab();
+    await applyPositions();
+    showUndo("Раскладка сброшена", async () => {
+      config.positions = before;
+      await applyPositions();
+    });
   }));
 }
 
+async function applyPositions() {
+  await saveConfig();
+  document.querySelectorAll("#widgets > .widget-card").forEach((card) => {
+    const pos = config.positions?.[card.dataset.id];
+    if (!pos || card._geometryController) return;
+    if (pos.w) card.style.width = pos.w + "px";
+    if (pos.h) card.style.height = pos.h + "px";
+    card._glyphBarGeometry?.layout();
+  });
+  relayoutWidgets();
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// TAB 2: Папки ярлыков (redb)
+// «Папки»
 // ═══════════════════════════════════════════════════════════════════════════
 
-let isCreatingFolder = false;
-let selectedFolderIcon = "folder";
+const ICON_LABELS = {
+  folder: "Папка", terminal: "Терминал", gamepad: "Игры", code: "Код", globe: "Сайты",
+  music: "Музыка", tools: "Инструменты", book: "Книги", star: "Избранное",
+};
 
-async function renderFoldersTab() {
-  const pane = document.getElementById("pane-folders");
-  if (!pane) return;
+let startMenuCache = null;
+// Which folder has its «Из Пуска» list open (one at a time).
+let startPickerFor = null;
+let creatingFolder = false;
 
-  pane.innerHTML = `<div class="menu-empty-state">Загрузка папок...</div>`;
+async function renderFolders() {
+  const pane = panel.querySelector("#pane-folders");
+  if (!pane.childElementCount) pane.innerHTML = `<div class="menu-empty">Загрузка…</div>`;
 
-  let folders = [];
+  let folders;
   try {
-    folders = await invoke("get_folders");
-  } catch (e) {
-    console.error("get_folders error:", e);
+    folders = await listFolders();
+  } catch (err) {
+    pane.innerHTML = `
+      <div class="menu-empty menu-empty-error">
+        Не удалось загрузить папки: ${escapeHtml(String(err?.message || err))}
+        <button type="button" class="menu-btn" data-retry>Повторить</button>
+      </div>`;
+    pane.querySelector("[data-retry]").addEventListener("click", renderFolders);
+    return;
   }
+  const missing = await missingTargets(folders.flatMap((f) => f.items || []));
 
   pane.innerHTML = `
-    <div class="menu-section">
-      <div class="menu-section-header">
-        <div>
-          <div class="menu-section-title">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path>
-            </svg>
-            Пользовательские папки
-          </div>
-          <div class="menu-section-desc">Создавайте тематические папки с веб-ссылками, файлами и приложениями. Данные хранятся в базе redb.</div>
-        </div>
-        <button class="menu-btn menu-btn-primary" id="btnToggleCreateFolder">
-          + Создать папку
-        </button>
-      </div>
-
-      <div id="createFolderBox" class="${isCreatingFolder ? "" : "hidden"}" style="margin-bottom: 20px; padding: 18px 20px; background: rgba(var(--scrim-rgb), 0.35); border-radius: 14px; border: 1px solid rgba(var(--bg-elev-rgb), 0.12);">
-        <div style="font-size: 13px; font-weight: 600; margin-bottom: 12px; color: rgb(var(--fg-rgb));">Новая папка на рабочем столе</div>
-        <div style="display: flex; gap: 12px; margin-bottom: 14px;">
-          <input type="text" class="menu-input" id="newFolderName" placeholder="Название папки (например: Игры, Работа, Ссылки)" style="flex: 1;">
-          <button class="menu-btn menu-btn-primary" id="btnConfirmCreateFolder">Создать</button>
-          <button class="menu-btn" id="btnCancelCreateFolder">Отмена</button>
-        </div>
-        <div style="font-size: 11px; color: rgba(var(--fg-rgb), 0.45); margin-bottom: 8px;">Выберите иконку папки:</div>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;" id="iconPicker">
-          ${Object.entries(FOLDER_ICONS).map(([key, svg]) => `
-            <button type="button" class="menu-btn icon-pick-btn ${selectedFolderIcon === key ? "active" : ""}" data-icon="${key}" style="padding: 6px 10px; ${selectedFolderIcon === key ? "border-color: rgb(var(--fg-rgb)); background: rgba(var(--bg-elev-rgb), 0.2);" : ""}">
-              ${svg}
-            </button>
-          `).join("")}
-        </div>
-      </div>
-
-      ${(!folders || folders.length === 0) ? `
-        <div class="menu-empty-state">
-          <div class="menu-empty-icon">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
-              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"></path>
-            </svg>
-          </div>
-          <div class="menu-empty-title">Нет созданных папок</div>
-          <div class="menu-empty-desc">У вас пока нет папок с ярлыками. Нажмите «+ Создать папку», чтобы добавить первую папку на рабочий стол.</div>
-        </div>
-      ` : `
-        <div class="folders-list">
-          ${folders.map((f) => `
-            <div class="folder-mgmt-card" data-folder-id="${f.id}">
-              <div class="folder-top-row">
-                <div class="folder-title-wrap">
-                  <div class="folder-icon-box">${f.icon_svg || FOLDER_ICONS.folder}</div>
-                  <input type="text" class="menu-input folder-name-input" data-id="${f.id}" value="${escapeHtml(f.name)}">
-                  <span style="font-size: 12px; color: rgba(var(--fg-rgb), 0.38);">(${(f.items || []).length} ярлыков)</span>
-                </div>
-                <button class="menu-btn menu-btn-danger btn-delete-folder" data-id="${f.id}">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="3 6 5 6 21 6"></polyline>
-                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
-                  </svg>
-                  Удалить
-                </button>
-              </div>
-
-              ${(!f.items || f.items.length === 0) ? `
-                <div style="font-size: 12px; color: rgba(var(--fg-rgb), 0.35); padding: 8px 0;">В папке пока нет ярлыков</div>
-              ` : `
-                <table class="shortcuts-table">
-                  <thead>
-                    <tr>
-                      <th style="width: 25%;">Название</th>
-                      <th style="width: 15%;">Тип</th>
-                      <th style="width: 50%;">Цель (URL или Путь)</th>
-                      <th style="width: 10%;"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${f.items.map((it) => `
-                      <tr data-item-id="${it.id}">
-                        <td><strong>${escapeHtml(it.name)}</strong></td>
-                        <td><span class="shortcut-kind-pill">${escapeHtml(it.kind || "file")}</span></td>
-                        <td class="shortcut-target-cell" aria-label="${escapeHtml(it.target)}">${escapeHtml(it.target)}</td>
-                        <td style="text-align: right;">
-                          <button class="menu-btn menu-btn-danger btn-delete-shortcut" data-folder-id="${f.id}" data-item-id="${it.id}" style="padding: 4px 8px;" aria-label="Удалить ярлык">
-                            ✕
-                          </button>
-                        </td>
-                      </tr>
-                    `).join("")}
-                  </tbody>
-                </table>
-              `}
-
-              <!-- Add shortcut inline row -->
-              <div class="add-shortcut-bar" data-folder-id="${f.id}">
-                <input type="text" class="menu-input add-sc-name" placeholder="Имя ярлыка (YouTube)" />
-                <select class="menu-select add-sc-kind">
-                  <option value="url">Веб (URL)</option>
-                  <option value="folder">Папка</option>
-                  <option value="file">Файл / ПО</option>
-                </select>
-                <input type="text" class="menu-input add-sc-target" placeholder="https://youtube.com или C:\\..." />
-                <button class="menu-btn menu-btn-primary btn-add-shortcut" data-folder-id="${f.id}">
-                  + Добавить
-                </button>
-              </div>
-            </div>
-          `).join("")}
-        </div>
-      `}
+    <div class="menu-actions">
+      <button type="button" class="menu-btn menu-btn-primary" id="btnNewFolder" aria-expanded="${creatingFolder}">+ Папка</button>
     </div>
+    <form class="menu-new-folder" id="newFolderForm" ${creatingFolder ? "" : "hidden"}>
+      <input type="text" class="menu-input" id="newFolderName" placeholder="Название, например «Игры»" maxlength="40" aria-label="Название папки">
+      <div class="menu-icon-pick" role="radiogroup" aria-label="Значок папки">
+        ${Object.entries(FOLDER_ICONS).map(([key, svg], i) => `
+          <button type="button" class="menu-icon-choice" role="radio" data-icon="${key}" aria-checked="${i === 0}" aria-label="${ICON_LABELS[key] || key}">${svg}</button>
+        `).join("")}
+      </div>
+      <div class="menu-actions">
+        <button type="submit" class="menu-btn menu-btn-primary">Создать</button>
+        <button type="button" class="menu-btn" id="btnCancelFolder">Отмена</button>
+      </div>
+    </form>
+
+    ${folders.length ? folders.map((f) => folderCard(f, missing)).join("") : `
+      <div class="menu-empty">Папок пока нет. Папка — это значок на столе, внутри которого лежат ваши программы, файлы и сайты.</div>
+    `}
   `;
 
-  // Toggle create folder box
-  pane.querySelector("#btnToggleCreateFolder")?.addEventListener("click", () => {
-    isCreatingFolder = !isCreatingFolder;
-    renderFoldersTab();
-  });
+  hydrateShortcutIcons(pane);
+  bindFolderEvents(pane, folders);
+}
 
-  pane.querySelector("#btnCancelCreateFolder")?.addEventListener("click", () => {
-    isCreatingFolder = false;
-    renderFoldersTab();
-  });
+function folderCard(f, missing) {
+  const items = f.items || [];
+  const picker = startPickerFor === f.id;
+  return `
+    <article class="menu-folder" data-folder-id="${escapeHtml(f.id)}">
+      <header class="menu-folder-head">
+        <span class="menu-folder-icon" aria-hidden="true">${f.icon_svg || FOLDER_ICONS.folder}</span>
+        <input type="text" class="menu-input menu-folder-name" value="${escapeHtml(f.name)}" maxlength="40" aria-label="Название папки">
+        <span class="menu-row-sub">${shortcutCount(items.length)}</span>
+        <button type="button" class="menu-icon-btn" data-delete-folder aria-label="Удалить папку «${escapeHtml(f.name)}»">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>
+        </button>
+      </header>
+      ${items.length ? `
+        <ul class="menu-list menu-shortcuts">
+          ${items.map((it) => {
+            const gone = missing.has(it.target);
+            return `
+            <li class="menu-row ${gone ? "is-missing" : ""}" data-item-id="${escapeHtml(it.id)}">
+              <span class="menu-row-icon">
+                <img alt="" hidden data-icon-target="${escapeHtml(it.target)}">
+                <span class="menu-row-glyph" aria-hidden="true">${it.kind === "url" ? FOLDER_ICONS.globe : it.kind === "folder" ? FOLDER_ICONS.folder : ""}</span>
+              </span>
+              <span class="menu-row-text">
+                <input type="text" class="menu-input menu-inline-input" value="${escapeHtml(it.name)}" maxlength="60" aria-label="Название ярлыка">
+                ${gone ? `<span class="menu-row-sub menu-warn">Недоступен — файл перемещён или удалён</span>` : ""}
+              </span>
+              ${gone ? `<button type="button" class="menu-btn" data-relink>Найти…</button>` : ""}
+              <button type="button" class="menu-icon-btn" data-remove-item aria-label="Убрать «${escapeHtml(it.name)}»">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </li>`;
+          }).join("")}
+        </ul>
+      ` : `<p class="menu-note">Пусто. Добавьте программу из Пуска, файл или папку.</p>`}
+      <div class="menu-actions">
+        <button type="button" class="menu-btn" data-from-start aria-expanded="${picker}">Из Пуска</button>
+        <button type="button" class="menu-btn" data-pick-file>Файл…</button>
+        <button type="button" class="menu-btn" data-pick-folder>Папку…</button>
+        <button type="button" class="menu-btn" data-paste title="То, что скопировано: файлы или ссылка">Вставить</button>
+      </div>
+      ${picker ? `
+        <div class="menu-start" data-start-picker>
+          <input type="search" class="menu-input" data-start-search placeholder="Поиск программы" aria-label="Поиск программы">
+          <ul class="menu-list menu-start-list" role="listbox" aria-label="Программы из Пуска">
+            <li class="menu-empty">Загрузка…</li>
+          </ul>
+        </div>
+      ` : ""}
+    </article>`;
+}
 
-  // Icon picker
-  pane.querySelectorAll(".icon-pick-btn").forEach((btn) => {
+function bindFolderEvents(pane, folders) {
+  const byId = (id) => folders.find((f) => f.id === id);
+  const refresh = () => renderFolders();
+
+  const form = pane.querySelector("#newFolderForm");
+  let iconKey = "folder";
+  pane.querySelector("#btnNewFolder").addEventListener("click", () => {
+    creatingFolder = !creatingFolder;
+    form.hidden = !creatingFolder;
+    if (creatingFolder) form.querySelector("#newFolderName").focus();
+  });
+  pane.querySelector("#btnCancelFolder").addEventListener("click", () => {
+    creatingFolder = false;
+    form.hidden = true;
+  });
+  form.querySelectorAll(".menu-icon-choice").forEach((btn) => {
     btn.addEventListener("click", () => {
-      selectedFolderIcon = btn.dataset.icon;
-      renderFoldersTab();
+      iconKey = btn.dataset.icon;
+      form.querySelectorAll(".menu-icon-choice").forEach((b) => b.setAttribute("aria-checked", String(b === btn)));
+    });
+  });
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const submit = form.querySelector('[type="submit"]');
+    runOnce(submit, async () => {
+      const folder = await createFolder(form.querySelector("#newFolderName").value, iconKey);
+      creatingFolder = false;
+      showToast(`Папка «${folder.name}» появилась на столе`);
+      await refresh();
     });
   });
 
-  // Create folder confirm
-  const createBtn = pane.querySelector("#btnConfirmCreateFolder");
-  createBtn?.addEventListener("click", () => runOnce(createBtn, async () => {
-    const nameInp = pane.querySelector("#newFolderName");
-    const name = (nameInp?.value || "").trim();
-    if (!name) return;
+  pane.querySelectorAll(".menu-folder").forEach((card) => {
+    const folder = byId(card.dataset.folderId);
+    if (!folder) return;
 
-    const newFolder = {
-      id: `folder_${crypto.randomUUID()}`,
-      name,
-      icon_svg: FOLDER_ICONS[selectedFolderIcon] || FOLDER_ICONS.folder,
-      items: [],
-    };
+    const nameInput = card.querySelector(".menu-folder-name");
+    nameInput.addEventListener("change", () => {
+      const name = nameInput.value.trim();
+      if (!name) {
+        nameInput.value = folder.name;
+        return;
+      }
+      updateFolder(folder, { name }).then((next) => Object.assign(folder, next))
+        .catch((err) => {
+          nameInput.value = folder.name;
+          showToast(`Не переименовано: ${err?.message || err}`, { tone: "error" });
+        });
+    });
+    nameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") nameInput.blur();
+    });
 
+    const del = card.querySelector("[data-delete-folder]");
+    del.addEventListener("click", () => runOnce(del, async () => {
+      await deleteFolder(folder, refresh);
+      await refresh();
+    }));
+
+    card.querySelectorAll(".menu-row[data-item-id]").forEach((li) => {
+      const itemId = li.dataset.itemId;
+      const input = li.querySelector(".menu-inline-input");
+      input.addEventListener("change", () => {
+        renameItem(folder, itemId, input.value).then((next) => Object.assign(folder, next))
+          .catch((err) => showToast(`Не переименовано: ${err?.message || err}`, { tone: "error" }));
+      });
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") input.blur();
+      });
+      const remove = li.querySelector("[data-remove-item]");
+      remove.addEventListener("click", () => runOnce(remove, async () => {
+        await removeItem(folder, itemId, refresh);
+        await refresh();
+      }));
+      const relink = li.querySelector("[data-relink]");
+      relink?.addEventListener("click", () => runOnce(relink, async () => {
+        const item = folder.items.find((it) => it.id === itemId);
+        const draft = await pickTarget(item?.kind === "folder");
+        if (!draft) return;
+        await replaceItemTarget(folder, itemId, draft);
+        await refresh();
+      }));
+    });
+
+    const add = (drafts) => addItems(folder, drafts).then(refresh);
+    const pickFile = card.querySelector("[data-pick-file]");
+    pickFile.addEventListener("click", () => runOnce(pickFile, async () => {
+      const draft = await pickTarget(false);
+      if (draft) await add([draft]);
+    }));
+    const pickFolder = card.querySelector("[data-pick-folder]");
+    pickFolder.addEventListener("click", () => runOnce(pickFolder, async () => {
+      const draft = await pickTarget(true);
+      if (draft) await add([draft]);
+    }));
+    const paste = card.querySelector("[data-paste]");
+    paste.addEventListener("click", () => runOnce(paste, async () => {
+      const drafts = await clipboardDrafts();
+      if (!drafts.length) {
+        showToast("В буфере обмена нет ни файлов, ни ссылки");
+        return;
+      }
+      await add(drafts);
+    }));
+
+    card.querySelector("[data-from-start]").addEventListener("click", () => {
+      startPickerFor = startPickerFor === folder.id ? null : folder.id;
+      refresh();
+    });
+    const picker = card.querySelector("[data-start-picker]");
+    if (picker) bindStartPicker(picker, (draft) => add([draft]));
+  });
+}
+
+async function bindStartPicker(picker, onPick) {
+  const list = picker.querySelector(".menu-start-list");
+  const search = picker.querySelector("[data-start-search]");
+  search.focus();
+
+  const load = async () => {
+    list.innerHTML = `<li class="menu-empty">Загрузка…</li>`;
     try {
-      await invoke("save_folder", { folder: newFolder });
-      isCreatingFolder = false;
-      await syncWidgets();
-      renderFoldersTab();
-    } catch (e) {
-      alert(`Ошибка создания папки: ${e}`);
+      startMenuCache = startMenuCache || await invoke("start_menu_list");
+      draw();
+    } catch (err) {
+      startMenuCache = null;
+      list.innerHTML = `<li class="menu-empty menu-empty-error">Не удалось прочитать меню Пуск: ${escapeHtml(String(err?.message || err))}
+        <button type="button" class="menu-btn" data-retry>Повторить</button></li>`;
+      list.querySelector("[data-retry]").addEventListener("click", load);
     }
-  }));
+  };
 
-  // Rename folder on change
-  pane.querySelectorAll(".folder-name-input").forEach((inp) => {
-    inp.addEventListener("change", async () => {
-      const id = inp.dataset.id;
-      const newName = inp.value.trim();
-      const target = folders.find((f) => f.id === id);
-      if (!target) return;
-      if (!newName) {
-        inp.value = target.name;
-        return;
-      }
-      try {
-        await invoke("save_folder", { folder: { ...target, name: newName } });
-        target.name = newName;
-        await syncWidgets();
-      } catch (e) {
-        inp.value = target.name;
-        alert(`Ошибка переименования: ${e}`);
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    const apps = startMenuCache.filter((a) => !q || a.name.toLowerCase().includes(q));
+    if (!startMenuCache.length) {
+      list.innerHTML = `<li class="menu-empty">В меню Пуск нет программ</li>`;
+      return;
+    }
+    if (!apps.length) {
+      list.innerHTML = `<li class="menu-empty">Ничего не нашлось</li>`;
+      return;
+    }
+    list.innerHTML = apps.slice(0, 200).map((a) => `
+      <li>
+        <button type="button" class="menu-start-app" role="option" data-index="${startMenuCache.indexOf(a)}">
+          <span class="menu-row-icon"><img alt="" hidden data-icon-target="${escapeHtml(a.target)}"><span class="menu-row-glyph" aria-hidden="true"></span></span>
+          <span class="menu-row-name">${escapeHtml(a.name)}</span>
+        </button>
+      </li>
+    `).join("");
+    hydrateShortcutIcons(list);
+  };
+
+  search.addEventListener("input", () => {
+    if (startMenuCache) draw();
+  });
+  list.addEventListener("click", (e) => {
+    const btn = e.target.closest(".menu-start-app");
+    if (!btn) return;
+    const app = startMenuCache[Number(btn.dataset.index)];
+    runOnce(btn, () => onPick({ name: app.name, target: app.target, args: app.args, kind: app.kind }));
+  });
+  await load();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// «Вид»
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SLOT_LABELS = {
+  neutral: "Нейтральный", blue: "Цвет 1", aqua: "Цвет 2", mint: "Цвет 3",
+  lilac: "Цвет 4", peach: "Цвет 5", magenta: "Цвет 6", coral: "Коралловый",
+};
+
+const TINT_LABELS = {
+  panel: "Панели: меню, проводник", folder: "Папки", clock: "Часы", telegram: "Telegram",
+  "mp3-player": "Плеер", "glyph-bar": "Громкость",
+  "mg.date": "Дата", "mg.time": "Время", "mg.freshness": "Устаревание", "mg.temperature": "Температура",
+  "mg.condition": "Погода", "mg.feels": "Ощущается", "mg.wind": "Ветер", "mg.precipitation": "Осадки",
+  "mg.precipitation-amount": "Объём осадков", "mg.sunrise": "Восход", "mg.sunset": "Закат",
+  "mg.daylight": "Световой день", "mg.geolocation": "Геолокация", "mg.location": "Место",
+  "mg.ip-location": "Место по IP", "mg.network": "Сеть", "mg.volume": "Громкость",
+};
+
+const PALETTE_FIELDS = [
+  { field: "fgRgb", label: "Текст и значки", kind: "rgb" },
+  { field: "bgElevRgb", label: "Оттенок элементов", kind: "rgb" },
+  { field: "surfaceRgb", label: "Фон панелей", kind: "rgb" },
+  { field: "surfaceDeepRgb", label: "Глубокий фон", kind: "rgb" },
+  { field: "scrimRgb", label: "Затемнение", kind: "rgb" },
+  { field: "statusOk", label: "Статус: норма", kind: "hex" },
+  { field: "statusWarn", label: "Статус: внимание", kind: "hex" },
+  { field: "statusError", label: "Статус: ошибка", kind: "hex" },
+  { field: "statusInfo", label: "Статус: сведения", kind: "hex" },
+];
+
+const pct = (v) => `${Math.round(v * 100)}%`;
+// One generic live-preview/commit handler serves every slider.
+// radiusStrip shows its top value as a full pill (999 px).
+const SLIDERS = [
+  { field: "glassOpacity", label: "Плотность стекла", min: 0.4, max: 1, step: 0.02, fmt: pct },
+  { field: "blur", label: "Размытие фона", min: 0, max: 36, step: 4, fmt: (v) => `${v} пикс.` },
+  { field: "radiusCard", label: "Скругление углов", min: 0, max: 28, step: 2, fmt: (v) => `${v} пикс.`,
+    also: (v) => setLiveToken("radiusSurface", v + 8) },
+  { field: "motionScale", label: "Длительность анимаций", min: 0, max: 2, step: 0.05, fmt: (v) => (v === 0 ? "без анимаций" : `×${Number(v).toFixed(2)}`) },
+  { field: "glassGrain", label: "Зерно", min: 0, max: 1, step: 0.02, fmt: pct },
+  { field: "glassDepth", label: "Тёмная кромка", min: 0, max: 1, step: 0.05, fmt: pct },
+  { field: "glassSheen", label: "Блик", min: 0, max: 1, step: 0.05, fmt: pct },
+  { field: "glassRim", label: "Светлый ободок", min: 0, max: 1, step: 0.05, fmt: pct },
+  { field: "glassShadow", label: "Тень", min: 0, max: 1, step: 0.05, fmt: pct },
+  { field: "shadowOffset", label: "Сдвиг тени", min: 0, max: 24, step: 1, fmt: (v) => `${v} пикс.` },
+  { field: "inkDepth", label: "Светлота текста", min: 0.15, max: 0.38, step: 0.01, fmt: (v) => Number(v).toFixed(2) },
+  { field: "surfaceTint", label: "Оттенок раскрытых окон", min: 0, max: 1, step: 0.05, fmt: pct },
+  { field: "radiusStrip", label: "Скругление полос", min: 0, max: 64, step: 2, fmt: (v) => (v >= 64 ? "пилюля" : `${v} пикс.`),
+    toUi: (v) => Math.min(64, v), fromUi: (v) => (v >= 64 ? 999 : v) },
+];
+
+const CHOICES = [
+  { field: "motionProfile", label: "Характер анимаций", options: [["responsive", "Отзывчивый"], ["balanced", "Сбалансированный"], ["fluid", "Плавный"]] },
+  // Must stay in sync with FONT_BODY_OPTIONS in theme.js (exact strings).
+  { field: "fontBody", label: "Шрифт текста", options: [["'Geist', sans-serif", "Geist"], ["'Segoe UI', 'Geist', sans-serif", "Segoe UI"], ["system-ui, sans-serif", "Системный"], ["'Ndot', monospace", "Ndot"]] },
+  { field: "material", label: "Материал карточек", options: [["flat", "Плоское стекло"], ["jelly", "Морское стекло"]] },
+  { field: "mgLayout", label: "Микрографика", options: [["panel", "Одной панелью"], ["pills", "Пилюлями"]] },
+  { field: "avatarColor", label: "Аватары Telegram", options: [[false, "Чёрно-белые"], [true, "Цветные"]] },
+];
+
+let fineOpen = false;
+
+function rgbToHex(rgb) {
+  const m = String(rgb || "").match(/(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
+  if (!m) return "#ffffff";
+  const part = (n) => Math.max(0, Math.min(255, Number(n))).toString(16).padStart(2, "0");
+  return `#${part(m[1])}${part(m[2])}${part(m[3])}`;
+}
+
+function hexToRgb(hex) {
+  const h = String(hex || "").replace("#", "");
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
+  return `${parseInt(h.slice(0, 2), 16)}, ${parseInt(h.slice(2, 4), 16)}, ${parseInt(h.slice(4, 6), 16)}`;
+}
+
+// Only validated hex values may enter HTML attributes (defense in depth —
+// normalizeTheme already guarantees the shape for everything it returns).
+function safeColor(value, fallback = "#ffffff") {
+  return /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
+}
+
+function renderLook() {
+  const pane = panel.querySelector("#pane-look");
+  const t = getActiveTheme();
+  const presets = getAllPresets();
+  const accents = [...new Set(PALETTE_SLOTS.map((s) => safeColor(t.palette?.[s], "")).filter(Boolean))];
+
+  pane.innerHTML = `
+    <h3 class="menu-heading">Тема</h3>
+    <div class="menu-themes" role="radiogroup" aria-label="Тема">
+      ${presets.map((p) => `
+        <button type="button" class="menu-theme" role="radio" aria-checked="${p.id === t.id}" data-preset="${escapeHtml(p.id)}"
+          data-material="${p.material === "jelly" ? "jelly" : "flat"}"
+          style="--theme-card-bg: rgb(${escapeHtml(p.surfaceRgb || "18, 18, 24")}); --theme-card-fg: rgb(${escapeHtml(p.fgRgb || "255, 255, 255")}); --theme-card-accent: ${safeColor(p.accent, "#d71921")};">
+          <span class="menu-theme-swatch" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span class="menu-theme-name">${escapeHtml(p.name)}</span>
+        </button>
+      `).join("")}
+    </div>
+
+    <h3 class="menu-heading">Цвета</h3>
+    <div class="menu-accents" role="radiogroup" aria-label="Акцентный цвет">
+      ${accents.map((c) => `
+        <button type="button" class="menu-accent" role="radio" aria-checked="${c.toLowerCase() === String(t.accent).toLowerCase()}"
+          data-accent="${c}" style="background: ${c};" aria-label="Акцент ${c}"></button>
+      `).join("")}
+    </div>
+    <div class="menu-actions">
+      <button type="button" class="menu-btn" id="btnShuffle">Перемешать цвета</button>
+    </div>
+
+    <details class="menu-details" id="lookFine" ${fineOpen ? "open" : ""}>
+      <summary>Тонкая настройка</summary>
+      ${CHOICES.map((c) => `
+        <div class="menu-field">
+          <span class="menu-field-label">${c.label}</span>
+          <div class="menu-pills" role="radiogroup" aria-label="${c.label}">
+            ${c.options.map(([value, label]) => `
+              <button type="button" class="menu-pill" role="radio" data-choice="${c.field}" data-value="${escapeHtml(String(value))}"
+                aria-checked="${String(t[c.field] ?? "") === String(value)}">${label}</button>
+            `).join("")}
+          </div>
+        </div>
+      `).join("")}
+
+      ${SLIDERS.map((sl) => {
+        const v = Number(t[sl.field] ?? 0);
+        const ui = sl.toUi ? sl.toUi(v) : v;
+        return `
+          <label class="menu-field">
+            <span class="menu-field-label">${sl.label}<output data-out="${sl.field}">${sl.fmt(ui)}</output></span>
+            <input type="range" class="menu-range" data-slider="${sl.field}" min="${sl.min}" max="${sl.max}" step="${sl.step}" value="${ui}">
+          </label>`;
+      }).join("")}
+
+      <span class="menu-field-label">Палитра оттенков</span>
+      <div class="menu-colors">
+        ${PALETTE_SLOTS.map((slot) => `
+          <label class="menu-color"><input type="color" data-slot="${slot}" value="${safeColor(t.palette?.[slot])}"><span>${SLOT_LABELS[slot]}</span></label>
+        `).join("")}
+      </div>
+
+      <span class="menu-field-label">Каким цветом окрашено</span>
+      <div class="menu-tints">
+        ${TINT_TARGETS.map((target) => `
+          <div class="menu-tint">
+            <span>${TINT_LABELS[target] || target}</span>
+            <div class="menu-tint-dots" role="radiogroup" aria-label="${TINT_LABELS[target] || target}">
+              ${PALETTE_SLOTS.map((s) => `
+                <button type="button" class="menu-tint-dot" role="radio" data-target="${target}" data-slot="${s}"
+                  aria-checked="${t.tintMap?.[target] === s}" aria-label="${SLOT_LABELS[s]}"
+                  style="background: ${safeColor(t.palette?.[s])};"></button>
+              `).join("")}
+            </div>
+          </div>
+        `).join("")}
+      </div>
+
+      <span class="menu-field-label">Текст, фоны и статусы</span>
+      <div class="menu-colors">
+        ${PALETTE_FIELDS.map((f) => `
+          <label class="menu-color"><input type="color" data-field="${f.field}" data-kind="${f.kind}"
+            value="${f.kind === "rgb" ? rgbToHex(t[f.field]) : safeColor(t[f.field])}"><span>${f.label}</span></label>
+        `).join("")}
+      </div>
+
+      <span class="menu-field-label">Свои темы</span>
+      <form class="menu-inline-form" id="presetForm">
+        <input type="text" class="menu-input" id="presetName" placeholder="Название темы" maxlength="32" aria-label="Название темы">
+        <button type="submit" class="menu-btn">Сохранить текущую</button>
+      </form>
+      ${presets.filter((p) => !p.isBuiltin).map((p) => `
+        <div class="menu-row">
+          <span class="menu-row-text"><span class="menu-row-name">${escapeHtml(p.name)}</span></span>
+          <button type="button" class="menu-icon-btn" data-delete-preset="${escapeHtml(p.id)}" aria-label="Удалить тему «${escapeHtml(p.name)}»">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </div>
+      `).join("")}
+      <div class="menu-actions">
+        <button type="button" class="menu-btn" id="btnResetSizes">Размеры виджетов как в теме</button>
+      </div>
+    </details>
+  `;
+
+  pane.querySelectorAll("[data-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const before = getActiveTheme().id;
+      selectPreset(btn.dataset.preset);
+      renderLook();
+      if (before !== btn.dataset.preset) {
+        showUndo(`Тема «${getActiveTheme().name}»`, () => {
+          selectPreset(before);
+          renderLook();
+        });
       }
     });
   });
 
-  // Delete folder
-  pane.querySelectorAll(".btn-delete-folder").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const id = btn.dataset.id;
-      if (!confirm("Удалить эту папку и все её ярлыки?")) return;
-      try {
-        await invoke("delete_folder", { id });
-        delete config.positions?.[id];
-        config.hidden = (config.hidden || []).filter((h) => h !== id);
-        config.instances = (config.instances || []).filter((it) => it.widgetType !== id);
-        await saveConfig();
-        await syncWidgets();
-        renderFoldersTab();
-      } catch (e) {
-        alert(`Ошибка удаления: ${e}`);
+  pane.querySelectorAll("[data-accent]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setLiveToken("accent", btn.dataset.accent);
+      commitLiveChange();
+      renderLook();
+    });
+  });
+
+  pane.querySelector("#btnShuffle").addEventListener("click", () => {
+    shuffleColors();
+    renderLook();
+    showUndo("Цвета перемешаны", () => {
+      restorePreviousColors();
+      renderLook();
+    });
+  });
+
+  pane.querySelector("#lookFine").addEventListener("toggle", (e) => {
+    fineOpen = e.currentTarget.open;
+  });
+
+  pane.querySelectorAll("[data-choice]").forEach((pill) => {
+    pill.addEventListener("click", () => {
+      const field = pill.dataset.choice;
+      const raw = pill.dataset.value;
+      setLiveToken(field, field === "avatarColor" ? raw === "true" : raw);
+      commitLiveChange();
+      renderLook();
+    });
+  });
+
+  pane.querySelectorAll("[data-slider]").forEach((input) => {
+    const spec = SLIDERS.find((sl) => sl.field === input.dataset.slider);
+    input.addEventListener("input", () => {
+      const ui = parseFloat(input.value);
+      const value = spec.fromUi ? spec.fromUi(ui) : ui;
+      setLiveToken(spec.field, value);
+      spec.also?.(value);
+      pane.querySelector(`[data-out="${spec.field}"]`).textContent = spec.fmt(ui);
+    });
+    input.addEventListener("change", () => commitLiveChange());
+  });
+
+  pane.querySelectorAll("input[data-slot]").forEach((input) => {
+    input.addEventListener("input", () => {
+      setLiveToken("palette", { ...getActiveTheme().palette, [input.dataset.slot]: input.value });
+    });
+    input.addEventListener("change", () => {
+      commitLiveChange();
+      renderLook();
+    });
+  });
+
+  pane.querySelectorAll(".menu-tint-dot").forEach((dot) => {
+    dot.addEventListener("click", () => {
+      setLiveToken("tintMap", { ...getActiveTheme().tintMap, [dot.dataset.target]: dot.dataset.slot });
+      commitLiveChange();
+      renderLook();
+    });
+  });
+
+  pane.querySelectorAll("input[data-field]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const value = input.dataset.kind === "rgb" ? hexToRgb(input.value) : input.value;
+      if (value !== null) setLiveToken(input.dataset.field, value);
+    });
+    input.addEventListener("change", () => commitLiveChange());
+  });
+
+  pane.querySelector("#presetForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const name = pane.querySelector("#presetName").value.trim();
+    if (!name) return;
+    saveCustomPreset(name, getActiveTheme());
+    showToast(`Тема «${name}» сохранена`);
+    renderLook();
+  });
+
+  pane.querySelectorAll("[data-delete-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const preset = getAllPresets().find((p) => p.id === btn.dataset.deletePreset);
+      deleteCustomPreset(btn.dataset.deletePreset);
+      renderLook();
+      if (preset) {
+        showUndo(`Тема «${preset.name}» удалена`, () => {
+          saveCustomPreset(preset.name, preset);
+          renderLook();
+        });
       }
     });
   });
 
-  // Add shortcut
-  pane.querySelectorAll(".btn-add-shortcut").forEach((btn) => {
-    btn.addEventListener("click", () => runOnce(btn, async () => {
-      const folderId = btn.dataset.folderId;
-      const card = btn.closest(".folder-mgmt-card");
-      if (!card) return;
-
-      const nameInp = card.querySelector(".add-sc-name");
-      const kindSel = card.querySelector(".add-sc-kind");
-      const targetInp = card.querySelector(".add-sc-target");
-
-      const scName = (nameInp?.value || "").trim();
-      const scKind = (kindSel?.value || "file").trim();
-      const scTarget = (targetInp?.value || "").trim();
-
-      if (!scName || !scTarget) {
-        alert("Укажите название ярлыка и путь/URL");
-        return;
-      }
-
-      const targetFolder = folders.find((f) => f.id === folderId);
-      if (!targetFolder) return;
-
-      const items = [...(targetFolder.items || []), {
-        id: `item_${crypto.randomUUID()}`,
-        name: scName,
-        kind: scKind,
-        target: scTarget,
-      }];
-
-      try {
-        await invoke("save_folder", { folder: { ...targetFolder, items } });
-        targetFolder.items = items;
-        await syncWidgets();
-        renderFoldersTab();
-      } catch (e) {
-        alert(`Ошибка сохранения: ${e}`);
-      }
-    }));
-  });
-
-  // Delete shortcut
-  pane.querySelectorAll(".btn-delete-shortcut").forEach((btn) => {
-    btn.addEventListener("click", () => runOnce(btn, async () => {
-      const folderId = btn.dataset.folderId;
-      const itemId = btn.dataset.itemId;
-      const targetFolder = folders.find((f) => f.id === folderId);
-      if (!targetFolder || !targetFolder.items) return;
-
-      const items = targetFolder.items.filter((it) => it.id !== itemId);
-      try {
-        await invoke("save_folder", { folder: { ...targetFolder, items } });
-        targetFolder.items = items;
-        await syncWidgets();
-        renderFoldersTab();
-      } catch (e) {
-        alert(`Ошибка удаления: ${e}`);
-      }
-    }));
+  pane.querySelector("#btnResetSizes").addEventListener("click", () => {
+    resetSizesToPreset();
+    showToast("Размеры виджетов — как в теме");
   });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TAB 3: VPN и Сеть
+// VPN
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function renderVpnTab() {
-  const pane = document.getElementById("pane-vpn");
-  if (!pane) return;
-
-  pane.innerHTML = `<div class="menu-empty-state">Загрузка настроек VPN...</div>`;
+async function renderVpn() {
+  const pane = panel.querySelector("#pane-vpn");
+  pane.innerHTML = `<div class="menu-empty">Загрузка…</div>`;
 
   let settings = null;
   let status = null;
@@ -691,883 +971,135 @@ async function renderVpnTab() {
       invoke("vpn_settings"),
       invoke("vpn_status").catch(() => null),
     ]);
-  } catch (e) {
-    console.error("vpn status/settings error:", e);
+  } catch (err) {
+    console.error("vpn settings error:", err);
   }
+
+  const back = `
+    <button type="button" class="menu-back" data-back>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"></polyline></svg>
+      Стол
+    </button>`;
 
   // Without the stored settings the form would show blanks, and saving it
   // would overwrite the real subscription and server with them.
   if (!settings) {
-    pane.innerHTML = `
-      <div class="menu-empty-state">
+    pane.innerHTML = `${back}
+      <div class="menu-empty menu-empty-error">
         Не удалось загрузить настройки VPN. Форма скрыта, чтобы не затереть сохранённую подписку.
-        <div style="margin-top: 12px;"><button class="menu-btn" id="btnVpnRetry">Повторить</button></div>
+        <button type="button" class="menu-btn" data-retry>Повторить</button>
       </div>`;
-    pane.querySelector("#btnVpnRetry")?.addEventListener("click", () => renderVpnTab());
+    pane.querySelector("[data-back]").addEventListener("click", () => showView("desk"));
+    pane.querySelector("[data-retry]").addEventListener("click", renderVpn);
     return;
   }
 
   const home = settings.home_server || {
-    enabled: false,
-    host: "",
-    port: 443,
-    uuid: "",
-    public_key: "",
-    short_id: "",
-    sni: "",
-    subnet: "10.10.0.0/16",
+    enabled: false, host: "", port: 443, uuid: "", public_key: "", short_id: "", sni: "", subnet: "10.10.0.0/16",
   };
+  const statusLabel = !status ? "Состояние неизвестно" : status.connected ? "Подключено" : "Отключено";
+  const field = (id, label, value, placeholder, type = "text") => `
+    <label class="menu-field">
+      <span class="menu-field-label">${label}</span>
+      <input type="${type}" class="menu-input" id="${id}" value="${escapeHtml(String(value ?? ""))}" placeholder="${placeholder}">
+    </label>`;
 
-  const isConnected = !!status?.connected;
-  const statusLabel = !status ? "Статус неизвестен" : isConnected ? "Подключено" : "Отключено";
+  pane.innerHTML = `${back}
+    <h3 class="menu-heading">VPN <span class="menu-status ${status?.connected ? "is-on" : ""}">${statusLabel}</span></h3>
 
-  pane.innerHTML = `
-    <!-- VPN Subscription Section -->
-    <div class="menu-section">
-      <div class="menu-section-header">
-        <div>
-          <div class="menu-section-title">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-            </svg>
-            Подписка VPN
-          </div>
-          <div class="menu-section-desc">Настройка внешней VLESS / Singbox подписки и автоматического подключения</div>
-        </div>
-        <div>
-          <span class="menu-status-badge ${isConnected ? "active" : ""}">
-            <span style="width: 6px; height: 6px; border-radius: 50%; background: ${isConnected ? "var(--status-ok)" : "rgba(var(--fg-rgb), 0.53)"};"></span>
-            ${statusLabel}
-          </span>
-        </div>
-      </div>
+    <form class="menu-form" id="vpnSubForm">
+      ${field("vpnSubUrl", "Ссылка на подписку", settings.subscription_url || "", "https://…")}
+      <button type="submit" class="menu-btn menu-btn-primary">Сохранить подписку</button>
+    </form>
 
-      <div class="vpn-field-row">
-        <input type="text" class="menu-input" id="vpnSubUrl" placeholder="https://your-provider.com/sub/..." value="${escapeHtml(settings?.subscription_url || "")}" />
-        <button class="menu-btn menu-btn-primary" id="btnSaveVpnSub">Сохранить подписку</button>
-      </div>
-
-      <div style="margin-top: 16px;">
-        <label class="menu-switch-label">
-          <div>
-            <div style="font-size: 13px; font-weight: 500; color: rgb(var(--fg-rgb));">Автоматическое подключение при старте</div>
-            <div style="font-size: 11px; color: rgba(var(--fg-rgb), 0.45);">Автоматически запускать VPN при запуске UniDTK</div>
-          </div>
-          <div class="menu-switch">
-            <input type="checkbox" id="vpnAutoConnectToggle" ${settings?.auto_connect ? "checked" : ""}>
-            <span class="menu-slider"></span>
-          </div>
-        </label>
-      </div>
-
-      <div class="menu-toast" id="vpnSubToast"></div>
+    <div class="menu-row">
+      <span class="menu-row-text">
+        <span class="menu-row-name">Подключаться при запуске</span>
+        <span class="menu-row-sub">VPN включится сам, когда запустится UniDTK</span>
+      </span>
+      <label class="menu-switch">
+        <input type="checkbox" id="vpnAutoConnect" ${settings.auto_connect ? "checked" : ""} aria-label="Подключаться при запуске">
+        <span class="menu-slider" aria-hidden="true"></span>
+      </label>
     </div>
 
-    <!-- Home Server Submodule Section -->
-    <div class="menu-section">
-      <div class="menu-section-header">
-        <div>
-          <div class="menu-section-title">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
-              <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
-              <line x1="6" y1="6" x2="6.01" y2="6"></line>
-              <line x1="6" y1="18" x2="6.01" y2="18"></line>
-            </svg>
-            Подмодуль: Домашний сервер (VLESS)
-          </div>
-          <div class="menu-section-desc">Изолированный отключаемый подмодуль для прямого VLESS Reality подключения к личному серверу</div>
-        </div>
-        <label class="menu-switch">
-          <input type="checkbox" id="homeServerToggle" ${home.enabled ? "checked" : ""}>
-          <span class="menu-slider"></span>
-        </label>
-      </div>
-
-      <div id="homeServerFieldsBox" class="${home.enabled ? "" : "hidden"}">
-        <div class="vpn-submodule-box">
-          <div class="vpn-submodule-fields">
-            <div class="vpn-field-group">
-              <label>Хост / IP</label>
-              <input type="text" class="menu-input" id="hsHost" placeholder="213.108.x.x или domain" value="${escapeHtml(home.host || "")}">
-            </div>
-            <div class="vpn-field-group">
-              <label>Порт</label>
-              <input type="number" class="menu-input" id="hsPort" placeholder="443" value="${home.port || 443}">
-            </div>
-            <div class="vpn-field-group">
-              <label>UUID пользователя</label>
-              <input type="text" class="menu-input" id="hsUuid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${escapeHtml(home.uuid || "")}">
-            </div>
-            <div class="vpn-field-group">
-              <label>Public Key</label>
-              <input type="text" class="menu-input" id="hsPublicKey" placeholder="Reality public key" value="${escapeHtml(home.public_key || "")}">
-            </div>
-            <div class="vpn-field-group">
-              <label>Short ID</label>
-              <input type="text" class="menu-input" id="hsShortId" placeholder="Reality short ID" value="${escapeHtml(home.short_id || "")}">
-            </div>
-            <div class="vpn-field-group">
-              <label>SNI (Server Name)</label>
-              <input type="text" class="menu-input" id="hsSni" placeholder="example.com" value="${escapeHtml(home.sni || "")}">
-            </div>
-            <div class="vpn-field-group">
-              <label>LAN Подсеть / Subnet</label>
-              <input type="text" class="menu-input" id="hsSubnet" placeholder="10.10.0.0/16" value="${escapeHtml(home.subnet || "10.10.0.0/16")}">
-            </div>
-          </div>
-
-          <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
-            <button class="menu-btn menu-btn-primary" id="btnSaveHomeServer">
-              Сохранить конфигурацию сервера
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div class="menu-toast" id="homeServerToast"></div>
+    <h3 class="menu-heading">Домашний сервер</h3>
+    <div class="menu-row">
+      <span class="menu-row-text">
+        <span class="menu-row-name">Прямое подключение к своему серверу</span>
+        <span class="menu-row-sub">Отдельно от подписки, протокол VLESS Reality</span>
+      </span>
+      <label class="menu-switch">
+        <input type="checkbox" id="homeServerToggle" ${home.enabled ? "checked" : ""} aria-label="Домашний сервер">
+        <span class="menu-slider" aria-hidden="true"></span>
+      </label>
     </div>
+    <form class="menu-form" id="homeServerForm" ${home.enabled ? "" : "hidden"}>
+      ${field("hsHost", "Адрес сервера", home.host, "IP или домен")}
+      ${field("hsPort", "Порт", home.port || 443, "443", "number")}
+      ${field("hsUuid", "UUID пользователя", home.uuid, "xxxxxxxx-xxxx-…")}
+      ${field("hsPublicKey", "Открытый ключ", home.public_key, "Reality public key")}
+      ${field("hsShortId", "Короткий ID", home.short_id, "Reality short id")}
+      ${field("hsSni", "Имя сервера (SNI)", home.sni, "example.com")}
+      ${field("hsSubnet", "Домашняя подсеть", home.subnet || "10.10.0.0/16", "10.10.0.0/16")}
+      <button type="submit" class="menu-btn menu-btn-primary">Сохранить сервер</button>
+    </form>
   `;
 
-  // Subscription save
-  const saveSubBtn = pane.querySelector("#btnSaveVpnSub");
-  saveSubBtn?.addEventListener("click", () => runOnce(saveSubBtn, async () => {
-    const url = (pane.querySelector("#vpnSubUrl")?.value || "").trim();
-    const toast = pane.querySelector("#vpnSubToast");
-    try {
-      await invoke("vpn_set_subscription_url", { url });
-      if (toast) {
-        toast.className = "menu-toast visible success";
-        toast.textContent = "Ссылка на подписку сохранена. Список серверов обновлен.";
-        setTimeout(() => toast.classList.remove("visible"), 4000);
-      }
-    } catch (e) {
-      if (toast) {
-        toast.className = "menu-toast visible error";
-        toast.textContent = `Ошибка сохранения: ${e}`;
-      }
-    }
-  }));
+  pane.querySelector("[data-back]").addEventListener("click", () => {
+    showView("desk");
+    panel.querySelector("#btnVpnSettings")?.focus();
+  });
 
-  // Auto connect toggle
-  pane.querySelector("#vpnAutoConnectToggle")?.addEventListener("change", async (e) => {
+  const subForm = pane.querySelector("#vpnSubForm");
+  subForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    runOnce(subForm.querySelector('[type="submit"]'), async () => {
+      await invoke("vpn_set_subscription_url", { url: pane.querySelector("#vpnSubUrl").value.trim() });
+      showToast("Подписка сохранена, список серверов обновлён");
+    });
+  });
+
+  pane.querySelector("#vpnAutoConnect").addEventListener("change", async (e) => {
     const toggle = e.target;
     try {
       await invoke("vpn_set_auto_connect", { enabled: toggle.checked });
     } catch (err) {
-      console.error("vpn_set_auto_connect failed:", err);
       toggle.checked = !toggle.checked;
-      const toast = pane.querySelector("#vpnSubToast");
-      if (toast) {
-        toast.className = "menu-toast visible error";
-        toast.textContent = `Автоподключение не сохранено: ${err}`;
-      }
+      showToast(`Автоподключение не сохранено: ${err?.message || err}`, { tone: "error" });
     }
   });
 
-  // Home server toggle
-  pane.querySelector("#homeServerToggle")?.addEventListener("change", (e) => {
-    const box = pane.querySelector("#homeServerFieldsBox");
-    if (box) box.classList.toggle("hidden", !e.target.checked);
-  });
-
-  // Home server save
-  const saveHomeBtn = pane.querySelector("#btnSaveHomeServer");
-  saveHomeBtn?.addEventListener("click", () => runOnce(saveHomeBtn, async () => {
-    const isEnabled = pane.querySelector("#homeServerToggle")?.checked ?? false;
-    const config = {
-      enabled: isEnabled,
-      host: (pane.querySelector("#hsHost")?.value || "").trim(),
-      port: parseInt(pane.querySelector("#hsPort")?.value || "443", 10) || 443,
-      uuid: (pane.querySelector("#hsUuid")?.value || "").trim(),
-      public_key: (pane.querySelector("#hsPublicKey")?.value || "").trim(),
-      short_id: (pane.querySelector("#hsShortId")?.value || "").trim(),
-      sni: (pane.querySelector("#hsSni")?.value || "").trim(),
-      subnet: (pane.querySelector("#hsSubnet")?.value || "10.10.0.0/16").trim(),
-    };
-
-    const toast = pane.querySelector("#homeServerToast");
-    try {
-      await invoke("vpn_set_home_server_config", { config });
-      if (toast) {
-        toast.className = "menu-toast visible success";
-        toast.textContent = "Настройки домашнего сервера успешно сохранены в redb.";
-        setTimeout(() => toast.classList.remove("visible"), 4000);
-      }
-    } catch (e) {
-      if (toast) {
-        toast.className = "menu-toast visible error";
-        toast.textContent = `Ошибка сохранения: ${e}`;
-      }
-    }
-  }));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// TAB 4: Оформление и Анимации (theme.js & motion.js)
-// ═══════════════════════════════════════════════════════════════════════════
-
-// Palette fields of theme schema v2 (theme.js). kind "rgb" fields hold an
-// "r, g, b" string and need hex conversion for <input type="color">.
-const PALETTE_FIELDS = [
-  { field: "fgRgb", label: "Текст и иконки", kind: "rgb" },
-  { field: "bgElevRgb", label: "Тинт элементов", kind: "rgb" },
-  { field: "surfaceRgb", label: "Фон поверхностей", kind: "rgb" },
-  { field: "surfaceDeepRgb", label: "Глубокий фон", kind: "rgb" },
-  { field: "scrimRgb", label: "Затемнение", kind: "rgb" },
-  { field: "statusOk", label: "Статус: норма", kind: "hex" },
-  { field: "statusWarn", label: "Статус: внимание", kind: "hex" },
-  { field: "statusError", label: "Статус: ошибка", kind: "hex" },
-  { field: "statusInfo", label: "Статус: инфо", kind: "hex" },
-];
-
-// Material section (theme schema v4). Labels live here; keys come from theme.js.
-// Slot keys are stable ids; their hues are random per user, so labels are
-// neutral numbers rather than color names. Coral keeps its hue (warm accent).
-const SLOT_LABELS = {
-  neutral: "Нейтральный", blue: "Цвет 1", aqua: "Цвет 2", mint: "Цвет 3",
-  lilac: "Цвет 4", peach: "Цвет 5", magenta: "Цвет 6", coral: "Коралловый",
-};
-
-const TINT_LABELS = {
-  panel: "Панели: меню, проводник", folder: "Папки", clock: "Часы", telegram: "Telegram",
-  "mp3-player": "Плеер", "glyph-bar": "Glyph Bar",
-  "mg.date": "Дата", "mg.time": "Время", "mg.freshness": "Устаревание", "mg.temperature": "Температура",
-  "mg.condition": "Погода", "mg.feels": "Ощущается", "mg.wind": "Ветер", "mg.precipitation": "Осадки",
-  "mg.precipitation-amount": "Объём осадков", "mg.sunrise": "Восход", "mg.sunset": "Закат",
-  "mg.daylight": "Световой день", "mg.geolocation": "Геолокация", "mg.location": "Место",
-  "mg.ip-location": "Место по IP", "mg.network": "Сеть", "mg.volume": "Громкость",
-};
-
-// Fine tuning sliders: one generic live-preview/commit handler serves all.
-// radiusStrip shows its top value as a full pill (999 px).
-const MATERIAL_SLIDERS = [
-  { field: "glassGrain", label: "Зерно", min: 0, max: 1, step: 0.02, fmt: (v) => `${Math.round(v * 100)}%` },
-  { field: "glassDepth", label: "Глубина (тёмная кромка)", min: 0, max: 1, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
-  { field: "glassSheen", label: "Блик", min: 0, max: 1, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
-  { field: "glassRim", label: "Светлый ободок", min: 0, max: 1, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
-  { field: "glassShadow", label: "Тень", min: 0, max: 1, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
-  { field: "shadowOffset", label: "Сдвиг тени", min: 0, max: 24, step: 1, fmt: (v) => `${v}px` },
-  { field: "inkDepth", label: "Светлота текста (меньше — глубже)", min: 0.15, max: 0.38, step: 0.01, fmt: (v) => v.toFixed(2) },
-  { field: "surfaceTint", label: "Оттенок раскрытых окон", min: 0, max: 1, step: 0.05, fmt: (v) => `${Math.round(v * 100)}%` },
-  { field: "radiusStrip", label: "Скругление полос", min: 0, max: 64, step: 2, fmt: (v) => (v >= 64 ? "пилюля" : `${v}px`),
-    toUi: (v) => Math.min(64, v), fromUi: (v) => (v >= 64 ? 999 : v) },
-];
-
-let materialDetailsOpen = { mg: false, fine: false };
-
-function renderTintRow(target, current) {
-  const slot = current.tintMap[target];
-  return `
-    <div class="theme-tint-row">
-      <span class="theme-tint-name">${TINT_LABELS[target] || target}</span>
-      <div class="theme-tint-dots">
-        ${PALETTE_SLOTS.map((s) => `
-          <button type="button" class="theme-tint-dot ${s === slot ? "active" : ""}" data-target="${target}" data-slot="${s}"
-            style="background: ${safeColor(current.palette[s], "#ffffff")};" title="${SLOT_LABELS[s]}" aria-label="${TINT_LABELS[target]}: ${SLOT_LABELS[s]}"></button>
-        `).join("")}
-      </div>
-    </div>`;
-}
-
-function rgbToHexPicker(rgb) {
-  const m = String(rgb || "").match(/(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
-  if (!m) return "#ffffff";
-  const part = (n) => Math.max(0, Math.min(255, Number(n))).toString(16).padStart(2, "0");
-  return `#${part(m[1])}${part(m[2])}${part(m[3])}`;
-}
-
-function hexToRgbString(hex) {
-  const h = String(hex || "").replace("#", "");
-  if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
-  return `${parseInt(h.slice(0, 2), 16)}, ${parseInt(h.slice(2, 4), 16)}, ${parseInt(h.slice(4, 6), 16)}`;
-}
-
-// Only validated hex values may enter HTML attributes (defense in depth —
-// normalizeTheme already guarantees the shape for everything it returns).
-function safeColor(value, fallback) {
-  return /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
-}
-
-function renderThemeTab() {
-  const pane = document.getElementById("pane-theme");
-  if (!pane) return;
-
-  const current = getActiveTheme();
-  const presets = getAllPresets();
-
-  const COLOR_CHIPS = [
-    { label: "Nothing Red", val: "#d71921" },
-    { label: "Amber", val: "#ffaa00" },
-    { label: "Cyan", val: "#00d2ff" },
-    { label: "Emerald", val: "#10b981" },
-    { label: "Purple", val: "#a855f7" },
-    { label: "White", val: "#ffffff" },
-    { label: "Slate", val: "#a0a5b5" },
-  ];
-
-  const MOTION_PROFILES = [
-    { id: "responsive", label: "Отзывчивый" },
-    { id: "balanced", label: "Сбалансированный" },
-    { id: "fluid", label: "Плавный" },
-  ];
-
-  // Must stay in sync with FONT_BODY_OPTIONS in theme.js (exact strings).
-  const FONT_BODY_OPTIONS = [
-    { value: "'Geist', sans-serif", label: "Geist" },
-    { value: "'Segoe UI', 'Geist', sans-serif", label: "Segoe UI" },
-    { value: "system-ui, sans-serif", label: "Системный" },
-    { value: "'Ndot', monospace", label: "Ndot" },
-  ];
-
-  pane.innerHTML = `
-    <div class="theme-tab-layout">
-      <!-- Section 1: Presets -->
-      <div class="theme-section">
-        <div class="theme-section-header">
-          <div class="theme-section-title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"></path>
-            </svg>
-            Пресеты стиля и анимаций
-          </div>
-          <span style="font-size: 11px; color: rgba(var(--fg-rgb), 0.45);">Мгновенное переключение без перезапуска</span>
-        </div>
-
-        <div class="theme-presets-grid" id="themePresetsGrid">
-          ${presets.map((p) => {
-            const accent = safeColor(p.accent, "#d71921");
-            return `
-            <div class="theme-preset-card ${p.id === current.id ? "active" : ""}" data-preset-id="${p.id}">
-              <div class="theme-preset-info">
-                <span class="theme-color-dot" style="background: ${accent}; ${accent === '#ffffff' ? 'box-shadow: 0 0 8px rgba(255,255,255,0.8);' : ''}"></span>
-                <span class="theme-preset-name">${escapeHtml(p.name)}</span>
-                ${p.isBuiltin ? '' : '<span class="theme-preset-badge">Свой</span>'}
-              </div>
-              ${p.isBuiltin ? '' : `
-                <button type="button" class="theme-preset-delete-btn" data-delete-id="${p.id}" aria-label="Удалить пользовательский пресет">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="18" y1="6" x2="6" y2="18"></line>
-                    <line x1="6" y1="6" x2="18" y2="18"></line>
-                  </svg>
-                </button>
-              `}
-            </div>
-          `;}).join("")}
-        </div>
-
-        <div class="theme-save-preset-row">
-          <input type="text" class="theme-save-input" id="newPresetName" placeholder="Название нового пресета (например: Мой Киберпанк)..." maxlength="32">
-          <button type="button" class="theme-save-btn" id="btnSavePreset">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-            Сохранить стиль
-          </button>
-        </div>
-
-        <div class="theme-save-preset-row">
-          <span style="font-size: 11px; color: rgba(var(--fg-rgb), 0.55);">Размеры виджетов — из активного пресета. Свои правки переживают смену стиля.</span>
-          <button type="button" class="theme-save-btn" id="btnResetSizes">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="1 4 1 10 7 10"></polyline>
-              <path d="M3.51 15a9 9 0 105.64-11.36L1 10"></path>
-            </svg>
-            Сбросить размеры
-          </button>
-        </div>
-      </div>
-
-      <!-- Section 2: Interactive Controls & Live Preview -->
-      <div class="theme-section">
-        <div class="theme-section-header">
-          <div class="theme-section-title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-            Параметры стилей и Live-превью
-          </div>
-        </div>
-
-        <div class="theme-interactive-grid">
-          <!-- Sliders Column -->
-          <div class="theme-sliders-col">
-            <!-- Accent Color -->
-            <div class="theme-slider-row">
-              <div class="theme-slider-label">
-                <span>Акцентный цвет интерфейса</span>
-                <span class="theme-slider-val" id="valAccent">${current.accent}</span>
-              </div>
-              <div class="theme-color-chips-row" id="themeColorChipsRow">
-                ${COLOR_CHIPS.map((c) => `
-                  <button type="button" class="theme-color-chip ${c.val.toLowerCase() === current.accent.toLowerCase() ? "active" : ""}"
-                    style="background: ${c.val};" data-color="${c.val}" aria-label="${c.label}">
-                  </button>
-                `).join("")}
-                <label class="theme-custom-color-btn">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <line x1="12" y1="8" x2="12" y2="16"></line>
-                    <line x1="8" y1="12" x2="16" y2="12"></line>
-                  </svg>
-                  Спектр…
-                  <input type="color" class="theme-native-color-picker" id="pickerCustomColor" value="${current.accent}">
-                </label>
-              </div>
-            </div>
-
-            <!-- Glass Opacity -->
-            <div class="theme-slider-row">
-              <div class="theme-slider-label">
-                <span>Непрозрачность стекла (Glass Opacity)</span>
-                <span class="theme-slider-val" id="valOpacity">${Math.round(current.glassOpacity * 100)}%</span>
-              </div>
-              <input type="range" class="theme-range-input" id="sliderOpacity"
-                min="0.4" max="1.0" step="0.02" value="${current.glassOpacity}">
-            </div>
-
-            <!-- Blur Strength -->
-            <div class="theme-slider-row">
-              <div class="theme-slider-label">
-                <span>Сила размытия фона (Blur Strength)</span>
-                <span class="theme-slider-val" id="valBlur">${current.blur}px</span>
-              </div>
-              <input type="range" class="theme-range-input" id="sliderBlur"
-                min="0" max="36" step="4" value="${current.blur}">
-            </div>
-
-            <!-- Corner Radius -->
-            <div class="theme-slider-row">
-              <div class="theme-slider-label">
-                <span>Скругление углов карточек (Corner Radius)</span>
-                <span class="theme-slider-val" id="valRadius">${current.radiusCard}px</span>
-              </div>
-              <input type="range" class="theme-range-input" id="sliderRadius"
-                min="0" max="28" step="2" value="${current.radiusCard}">
-            </div>
-
-            <!-- Motion Scale -->
-            <div class="theme-slider-row">
-              <div class="theme-slider-label">
-                <span>Скорость анимаций (Motion Duration Scale)</span>
-                <span class="theme-slider-val" id="valMotion">${Number(current.motionScale ?? 1.0).toFixed(2)}x</span>
-              </div>
-              <input type="range" class="theme-range-input" id="sliderMotion"
-                min="0.0" max="2.0" step="0.05" value="${current.motionScale ?? 1.0}">
-            </div>
-
-            <!-- Motion Profiles -->
-            <div class="theme-slider-row">
-              <div class="theme-slider-label">
-                <span>Профиль динамики переходов</span>
-              </div>
-              <div class="theme-motion-pills" id="themeMotionPillsRow">
-                ${MOTION_PROFILES.map((mp) => `
-                  <button type="button" class="theme-motion-pill ${mp.id === (current.motionProfile || "balanced") ? "active" : ""}"
-                    data-profile="${mp.id}">
-                    ${mp.label}
-                  </button>
-                `).join("")}
-              </div>
-            </div>
-            <!-- Font Family (body) -->
-            <div class="theme-slider-row">
-              <div class="theme-slider-label">
-                <span>Шрифт текста (пресетный токен)</span>
-                <span class="theme-slider-val" id="valFontBody">Aa</span>
-              </div>
-              <div class="theme-motion-pills" id="themeFontBodyRow">
-                ${FONT_BODY_OPTIONS.map((f) => `
-                  <button type="button" class="theme-motion-pill ${f.value === current.fontBody ? "active" : ""}"
-                    data-font="${f.value}" title="${f.label}">
-                    ${f.label}
-                  </button>
-                `).join("")}
-              </div>
-            </div>
-          </div>
-
-          <!-- Preview Column -->
-          <div class="theme-preview-col">
-            <div class="theme-preview-card" id="themePreviewCard">
-              <div class="theme-preview-header">
-                <div class="theme-preview-brand">
-                  <span class="theme-preview-dot" id="themePreviewDot" style="background: ${current.accent};"></span>
-                  <span>Виджет // Превью</span>
-                </div>
-                <span style="font-size: 11px; opacity: 0.5;">Live</span>
-              </div>
-
-              <div class="theme-preview-mock-content">
-                <div style="display: flex; justify-content: space-between; font-size: 11px; opacity: 0.8;">
-                  <span>Уровень сигнала</span>
-                  <span id="previewPercentText">64%</span>
-                </div>
-                <div class="theme-preview-mock-bar">
-                  <div class="theme-preview-mock-fill" id="previewMockFill" style="background: ${current.accent};"></div>
-                </div>
-              </div>
-
-              <div class="theme-preview-actions">
-                <button type="button" class="theme-preview-btn primary" id="btnTestAnimation" style="background: ${current.accent}; border-color: ${current.accent};">
-                  ▶ Тест анимации
-                </button>
-              </div>
-
-              <div class="theme-test-anim-target" id="themeTestAnimTarget">
-                Нажмите «Тест анимации» для проверки кривой и скорости
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Section 3: Palette (theme schema v2 color channels) -->
-      <div class="theme-section">
-        <div class="theme-section-header">
-          <div class="theme-section-title">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="13.5" cy="6.5" r=".5" fill="currentColor"></circle>
-              <circle cx="17.5" cy="10.5" r=".5" fill="currentColor"></circle>
-              <circle cx="8.5" cy="7.5" r=".5" fill="currentColor"></circle>
-              <circle cx="6.5" cy="12.5" r=".5" fill="currentColor"></circle>
-              <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 011.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"></path>
-            </svg>
-            Палитра текста, фонов и статусов
-          </div>
-          <span style="font-size: 11px; color: rgba(var(--fg-rgb), 0.45);">Живой предпросмотр — применяется сразу</span>
-        </div>
-
-        <div class="theme-palette-grid" id="themePaletteGrid">
-          ${PALETTE_FIELDS.map((f) => {
-            const value = f.kind === "rgb" ? rgbToHexPicker(current[f.field]) : safeColor(current[f.field], "#ffffff");
-            return `
-            <label class="theme-palette-item">
-              <span class="theme-palette-name">${f.label}</span>
-              <input type="color" class="theme-native-color-picker theme-palette-picker" data-field="${f.field}" data-kind="${f.kind}" value="${value}" aria-label="${f.label}">
-            </label>
-          `;}).join("")}
-        </div>
-      </div>
-
-      <!-- Section 4: Material (theme schema v4) -->
-      <div class="theme-section">
-        <div class="theme-section-header">
-          <div class="theme-section-title">Материал и оттенки виджетов</div>
-          <span style="font-size: 11px; color: rgba(var(--fg-rgb), 0.45);">Живой предпросмотр — применяется сразу</span>
-        </div>
-
-        <div class="theme-slider-row">
-          <div class="theme-slider-label"><span>Материал карточек</span></div>
-          <div class="theme-motion-pills">
-            <button type="button" class="theme-motion-pill theme-enum-pill ${current.material === "flat" ? "active" : ""}" data-field="material" data-value="flat">Плоское стекло</button>
-            <button type="button" class="theme-motion-pill theme-enum-pill ${current.material === "jelly" ? "active" : ""}" data-field="material" data-value="jelly">Морское стекло (желе)</button>
-          </div>
-        </div>
-
-        <div class="theme-slider-row">
-          <div class="theme-slider-label"><span>Микрографика</span></div>
-          <div class="theme-motion-pills">
-            <button type="button" class="theme-motion-pill theme-enum-pill ${current.mgLayout === "panel" ? "active" : ""}" data-field="mgLayout" data-value="panel">Одной панелью</button>
-            <button type="button" class="theme-motion-pill theme-enum-pill ${current.mgLayout === "pills" ? "active" : ""}" data-field="mgLayout" data-value="pills">Пилюлями по группам</button>
-          </div>
-        </div>
-
-        <div class="theme-slider-row">
-          <div class="theme-slider-label"><span>Аватары Telegram</span></div>
-          <div class="theme-motion-pills">
-            <button type="button" class="theme-motion-pill theme-enum-pill ${current.avatarColor ? "" : "active"}" data-field="avatarColor" data-value="false">Чёрно-белые</button>
-            <button type="button" class="theme-motion-pill theme-enum-pill ${current.avatarColor ? "active" : ""}" data-field="avatarColor" data-value="true">Цветные</button>
-          </div>
-        </div>
-
-        <div class="theme-slider-label" style="margin-top: 6px;">
-          <span>Палитра оттенков</span>
-          <span class="theme-motion-pills">
-            <button type="button" class="theme-motion-pill" id="btnShuffleColors">Перемешать цвета</button>
-            <button type="button" class="theme-motion-pill" id="btnRestoreColors" ${hasPreviousColors() ? "" : "disabled"}>Вернуть прошлые</button>
-          </span>
-        </div>
-        <div class="theme-palette-grid">
-          ${PALETTE_SLOTS.map((slot) => `
-            <label class="theme-palette-item">
-              <span class="theme-palette-name">${SLOT_LABELS[slot]}</span>
-              <input type="color" class="theme-native-color-picker theme-slot-picker" data-slot="${slot}" value="${safeColor(current.palette[slot], "#ffffff")}" aria-label="${SLOT_LABELS[slot]}">
-            </label>
-          `).join("")}
-        </div>
-
-        <div class="theme-slider-label" style="margin-top: 14px;"><span>Оттенок виджетов</span></div>
-        <div class="theme-tint-list">
-          ${TINT_TARGETS.filter((t) => !t.startsWith("mg.")).map((t) => renderTintRow(t, current)).join("")}
-        </div>
-
-        <details class="theme-details" data-details="mg" ${materialDetailsOpen.mg ? "open" : ""}>
-          <summary>Оттенки групп микрографики</summary>
-          <div class="theme-tint-list">
-            ${TINT_TARGETS.filter((t) => t.startsWith("mg.")).map((t) => renderTintRow(t, current)).join("")}
-          </div>
-        </details>
-
-        <details class="theme-details" data-details="fine" ${materialDetailsOpen.fine ? "open" : ""}>
-          <summary>Тонкая настройка материала</summary>
-          ${MATERIAL_SLIDERS.map((sl) => {
-            const v = Number(current[sl.field]);
-            const ui = sl.toUi ? sl.toUi(v) : v;
-            return `
-            <div class="theme-slider-row">
-              <div class="theme-slider-label">
-                <span>${sl.label}</span>
-                <span class="theme-slider-val" data-val-for="${sl.field}">${sl.fmt(ui)}</span>
-              </div>
-              <input type="range" class="theme-range-input theme-material-slider" data-field="${sl.field}"
-                min="${sl.min}" max="${sl.max}" step="${sl.step}" value="${ui}">
-            </div>`;
-          }).join("")}
-        </details>
-      </div>
-    </div>
-  `;
-
-  setupThemeTabEvents(pane);
-}
-
-function setupThemeTabEvents(pane) {
-  // Preset Selection
-  pane.querySelectorAll(".theme-preset-card").forEach((card) => {
-    card.addEventListener("click", (e) => {
-      if (e.target.closest(".theme-preset-delete-btn")) return;
-      const id = card.dataset.presetId;
-      selectPreset(id);
-      renderThemeTab();
+  const homeForm = pane.querySelector("#homeServerForm");
+  const homeToggle = pane.querySelector("#homeServerToggle");
+  const saveHome = async () => {
+    await invoke("vpn_set_home_server_config", {
+      config: {
+        enabled: homeToggle.checked,
+        host: pane.querySelector("#hsHost").value.trim(),
+        port: parseInt(pane.querySelector("#hsPort").value, 10) || 443,
+        uuid: pane.querySelector("#hsUuid").value.trim(),
+        public_key: pane.querySelector("#hsPublicKey").value.trim(),
+        short_id: pane.querySelector("#hsShortId").value.trim(),
+        sni: pane.querySelector("#hsSni").value.trim(),
+        subnet: pane.querySelector("#hsSubnet").value.trim() || "10.10.0.0/16",
+      },
+    });
+  };
+  // The switch saves by itself: turning the server off must not wait for a
+  // second click on a form that is now hidden.
+  homeToggle.addEventListener("change", () => {
+    homeForm.hidden = !homeToggle.checked;
+    runOnce(homeToggle, async () => {
+      await saveHome();
+      showToast(homeToggle.checked ? "Домашний сервер включён" : "Домашний сервер выключен");
     });
   });
-
-  // Preset Deletion
-  pane.querySelectorAll(".theme-preset-delete-btn").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.deleteId;
-      deleteCustomPreset(id);
-      renderThemeTab();
-    });
-  });
-
-  // Save Custom Preset
-  pane.querySelector("#btnSavePreset")?.addEventListener("click", () => {
-    const input = pane.querySelector("#newPresetName");
-    const name = (input?.value || "").trim();
-    saveCustomPreset(name, getActiveTheme());
-    renderThemeTab();
-  });
-
-  // Reset Sizes To Preset
-  pane.querySelector("#btnResetSizes")?.addEventListener("click", () => {
-    resetSizesToPreset();
-    renderThemeTab();
-  });
-
-  // Font Family (body token): live preview + commit
-  pane.querySelectorAll("#themeFontBodyRow .theme-motion-pill").forEach((pill) => {
-    pill.addEventListener("click", () => {
-      setLiveToken("fontBody", pill.dataset.font);
-      commitLiveChange();
-      renderThemeTab();
-    });
-  });
-
-  // Color Chips
-  pane.querySelectorAll(".theme-color-chip").forEach((chip) => {
-    chip.addEventListener("click", () => {
-      const color = chip.dataset.color;
-      setLiveToken("accent", color);
-      commitLiveChange();
-      renderThemeTab();
-    });
-  });
-
-  // Custom Color Picker
-  const picker = pane.querySelector("#pickerCustomColor");
-  if (picker) {
-    picker.addEventListener("input", (e) => {
-      const color = e.target.value;
-      setLiveToken("accent", color);
-      pane.querySelector("#valAccent").textContent = color;
-      const previewDot = pane.querySelector("#themePreviewDot");
-      const previewFill = pane.querySelector("#previewMockFill");
-      const previewBtn = pane.querySelector("#btnTestAnimation");
-      if (previewDot) previewDot.style.background = color;
-      if (previewFill) previewFill.style.background = color;
-      if (previewBtn) {
-        previewBtn.style.background = color;
-        previewBtn.style.borderColor = color;
-      }
-    });
-    picker.addEventListener("change", () => {
-      commitLiveChange();
-    });
-  }
-
-  // Sliders: Glass Opacity
-  const sliderOpacity = pane.querySelector("#sliderOpacity");
-  if (sliderOpacity) {
-    sliderOpacity.addEventListener("input", (e) => {
-      const val = parseFloat(e.target.value);
-      setLiveToken("glassOpacity", val);
-      pane.querySelector("#valOpacity").textContent = `${Math.round(val * 100)}%`;
-    });
-    sliderOpacity.addEventListener("change", () => {
-      commitLiveChange();
-    });
-  }
-
-  // Sliders: Blur Strength
-  const sliderBlur = pane.querySelector("#sliderBlur");
-  if (sliderBlur) {
-    sliderBlur.addEventListener("input", (e) => {
-      const val = parseInt(e.target.value, 10);
-      setLiveToken("blur", val);
-      pane.querySelector("#valBlur").textContent = `${val}px`;
-    });
-    sliderBlur.addEventListener("change", () => {
-      commitLiveChange();
-    });
-  }
-
-  // Sliders: Corner Radius
-  const sliderRadius = pane.querySelector("#sliderRadius");
-  if (sliderRadius) {
-    sliderRadius.addEventListener("input", (e) => {
-      const val = parseInt(e.target.value, 10);
-      setLiveToken("radiusCard", val);
-      setLiveToken("radiusSurface", val + 8);
-      pane.querySelector("#valRadius").textContent = `${val}px`;
-    });
-    sliderRadius.addEventListener("change", () => {
-      commitLiveChange();
-    });
-  }
-
-  // Sliders: Motion Scale
-  const sliderMotion = pane.querySelector("#sliderMotion");
-  if (sliderMotion) {
-    sliderMotion.addEventListener("input", (e) => {
-      const val = parseFloat(e.target.value);
-      setLiveToken("motionScale", val);
-      pane.querySelector("#valMotion").textContent = `${val.toFixed(2)}x`;
-    });
-    sliderMotion.addEventListener("change", () => {
-      commitLiveChange();
-    });
-  }
-
-  // Motion Profile Pills
-  // `.theme-motion-pill` is only the pill look (font, enum and shuffle buttons
-  // share it); the profile handler must bind to profile pills alone.
-  pane.querySelectorAll("#themeMotionPillsRow [data-profile]").forEach((pill) => {
-    pill.addEventListener("click", () => {
-      const profile = pill.dataset.profile;
-      setLiveToken("motionProfile", profile);
-      commitLiveChange();
-      renderThemeTab();
-    });
-  });
-
-  // Palette pickers (theme schema v2 channels): live preview on input,
-  // validation + persistence on change (see commitLiveChange).
-  pane.querySelectorAll(".theme-palette-picker").forEach((input) => {
-    const field = input.dataset.field;
-    const kind = input.dataset.kind;
-    if (!field || !kind) return;
-    input.addEventListener("input", (e) => {
-      const hex = e.target.value;
-      const value = kind === "rgb" ? hexToRgbString(hex) : hex;
-      if (value === null) return;
-      setLiveToken(field, value);
-    });
-    input.addEventListener("change", () => {
-      commitLiveChange();
-    });
-  });
-
-  // Material: enum pills (material, mgLayout, avatarColor)
-  pane.querySelectorAll(".theme-enum-pill").forEach((pill) => {
-    pill.addEventListener("click", () => {
-      const { field, value } = pill.dataset;
-      setLiveToken(field, field === "avatarColor" ? value === "true" : value);
-      commitLiveChange();
-      renderThemeTab();
-    });
-  });
-
-  // Material: a new random coloring / undo the last one
-  pane.querySelector("#btnShuffleColors")?.addEventListener("click", () => {
-    shuffleColors();
-    renderThemeTab();
-  });
-  pane.querySelector("#btnRestoreColors")?.addEventListener("click", () => {
-    restorePreviousColors();
-    renderThemeTab();
-  });
-
-  // Material: palette slots (live on input, commit on change)
-  pane.querySelectorAll(".theme-slot-picker").forEach((input) => {
-    input.addEventListener("input", (e) => {
-      setLiveToken("palette", { ...getActiveTheme().palette, [input.dataset.slot]: e.target.value });
-    });
-    input.addEventListener("change", () => {
-      commitLiveChange();
-      renderThemeTab();
-    });
-  });
-
-  // Material: which slot tints which surface
-  pane.querySelectorAll(".theme-tint-dot").forEach((dot) => {
-    dot.addEventListener("click", () => {
-      setLiveToken("tintMap", { ...getActiveTheme().tintMap, [dot.dataset.target]: dot.dataset.slot });
-      commitLiveChange();
-      renderThemeTab();
-    });
-  });
-
-  // Material: fine tuning sliders
-  pane.querySelectorAll(".theme-material-slider").forEach((input) => {
-    const spec = MATERIAL_SLIDERS.find((sl) => sl.field === input.dataset.field);
-    if (!spec) return;
-    input.addEventListener("input", (e) => {
-      const ui = parseFloat(e.target.value);
-      setLiveToken(spec.field, spec.fromUi ? spec.fromUi(ui) : ui);
-      const label = pane.querySelector(`[data-val-for="${spec.field}"]`);
-      if (label) label.textContent = spec.fmt(ui);
-    });
-    input.addEventListener("change", () => {
-      commitLiveChange();
-    });
-  });
-
-  // Keep collapsible blocks open across re-renders.
-  pane.querySelectorAll(".theme-details").forEach((el) => {
-    el.addEventListener("toggle", () => {
-      materialDetailsOpen = { ...materialDetailsOpen, [el.dataset.details]: el.open };
-    });
-  });
-
-  // Test Animation Trigger
-  pane.querySelector("#btnTestAnimation")?.addEventListener("click", () => {
-    const target = pane.querySelector("#themeTestAnimTarget");
-    if (!target) return;
-    target.textContent = "Анимация запущена…";
-    spring(target, [
-      { transform: "scale(0.92)", opacity: 0.5 },
-      { transform: "scale(1.05)", opacity: 1 },
-      { transform: "scale(1)", opacity: 1 },
-    ], { duration: "motion" }).then(() => {
-      target.textContent = "Физика отработана успешно ✓";
-      setTimeout(() => {
-        if (target) target.textContent = "Нажмите «Тест анимации» для проверки кривой и скорости";
-      }, 2500);
+  homeForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    runOnce(homeForm.querySelector('[type="submit"]'), async () => {
+      await saveHome();
+      showToast("Настройки сервера сохранены");
     });
   });
 }

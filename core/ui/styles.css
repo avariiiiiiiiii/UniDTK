@@ -688,6 +688,54 @@ body.no-widgets .debug-message {
   -webkit-box-orient: vertical;
 }
 
+.shortcut-item.is-missing .shortcut-icon { opacity: 0.4; }
+.shortcut-item.is-missing .shortcut-name { color: var(--status-warn); }
+.shortcut-item.is-dragging { position: relative; z-index: 2; opacity: 0.85; transition: none; }
+.shortcut-add .shortcut-icon { border-style: dashed; }
+
+.shortcut-rename {
+  width: 68px;
+  padding: 2px 4px;
+  border: 1px solid var(--theme-accent);
+  border-radius: 6px;
+  background: rgba(var(--scrim-rgb), 0.4);
+  color: rgb(var(--fg-rgb));
+  font: inherit;
+  font-size: 0.62rem;
+  text-align: center;
+}
+
+/* Actions of an opened folder: «+» and right click (folder-body.js). */
+.folder-menu {
+  position: fixed;
+  z-index: var(--z-surface-menu, 4000);
+  min-width: 180px;
+  padding: 4px;
+  border-radius: var(--theme-radius-card, 14px);
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.14);
+  background: rgba(var(--bg-surface-rgb), 0.98);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+}
+
+.folder-menu-item {
+  display: block;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: rgb(var(--fg-rgb));
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-menu-item:hover,
+.folder-menu-item:focus-visible { background: rgba(var(--bg-elev-rgb), 0.12); outline: none; }
+.folder-menu-item.is-danger { color: var(--status-error); }
+
 .widget-empty {
   text-align: center;
   color: rgba(var(--fg-rgb), 0.3);
@@ -707,12 +755,155 @@ body.no-widgets .debug-message {
   color: rgba(var(--fg-rgb), 0.5);
 }
 
-/* ─── Edit mode ─── */
+/* ─── Edit mode (arranging the desk) ─── */
 
 body.edit-mode .widget-card {
   cursor: grab;
   border-color: rgba(var(--bg-elev-rgb), 0.14);
 }
+
+/* The snap grid (16 px, unidtk-core.js SNAP_GRID), drawn every second line. */
+body.edit-mode .widgets-canvas {
+  background-image: radial-gradient(circle, rgba(var(--fg-rgb), 0.22) 1px, transparent 1.5px);
+  background-size: 32px 32px;
+}
+
+/* The menu row under the pointer points at its widget on the desk. */
+.widget-card.menu-highlight {
+  outline: 2px solid var(--theme-accent);
+  outline-offset: 4px;
+}
+
+.arrange-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: var(--z-surface-menu, 4000);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.14);
+  background: rgba(var(--bg-surface-rgb), 0.96);
+  box-shadow: var(--theme-surface-shadow, 0 18px 50px rgba(0, 0, 0, 0.5));
+  color: rgb(var(--fg-rgb));
+  font-size: 13px;
+  transform: translateX(-50%);
+}
+
+.arrange-bar[hidden],
+.arrange-folder[hidden] { display: none; }
+
+.arrange-folder { display: flex; align-items: center; gap: 6px; }
+
+.arrange-folder input {
+  width: 160px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.16);
+  border-radius: 9px;
+  background: rgba(var(--scrim-rgb), 0.2);
+  color: rgb(var(--fg-rgb));
+  font: inherit;
+}
+
+.arrange-folder-icons { display: flex; gap: 2px; }
+
+.arrange-folder-icons button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: rgb(var(--fg-rgb));
+  cursor: pointer;
+}
+
+.arrange-folder-icons button[aria-checked="true"] { border-color: var(--theme-accent); }
+.arrange-bar-hint { color: rgba(var(--fg-rgb), 0.78); margin-right: 8px; }
+
+.arrange-btn {
+  min-height: 32px;
+  padding: 6px 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.16);
+  background: rgba(var(--bg-elev-rgb), 0.08);
+  color: rgb(var(--fg-rgb));
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.arrange-btn-primary {
+  background: var(--theme-accent);
+  border-color: var(--theme-accent);
+  color: #fff;
+}
+
+.arrange-btn:focus-visible { outline: 2px solid var(--theme-accent); outline-offset: 2px; }
+
+.desk-hint {
+  position: fixed;
+  top: 24px;
+  right: 64px;
+  z-index: 50;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(var(--bg-surface-rgb), 0.9);
+  color: rgb(var(--fg-rgb));
+  font-size: 13px;
+}
+
+.desk-hint[hidden] { display: none; }
+
+/* One toast for the whole UI (toast.js). */
+.toast-host {
+  position: fixed;
+  left: 50%;
+  bottom: 84px;
+  z-index: var(--z-surface-toast, 5000);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 8px 8px 8px 16px;
+  border-radius: 14px;
+  background: rgba(var(--bg-surface-rgb), 0.97);
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.14);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+  color: rgb(var(--fg-rgb));
+  font-size: 13px;
+  pointer-events: auto;
+}
+
+.toast-error { border-color: var(--status-error); }
+.toast-text { padding: 6px 0; }
+
+.toast-action {
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(var(--bg-elev-rgb), 0.14);
+  color: rgb(var(--fg-rgb));
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.toast-action:focus-visible { outline: 2px solid var(--theme-accent); outline-offset: 2px; }
 
 body.edit-mode .widget-header {
   pointer-events: auto;

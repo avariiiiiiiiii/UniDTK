@@ -44,7 +44,7 @@ impl AppState {
         // файл целиком. Путь выбирает ядро — см. `core/kernel/module_store.rs`.
         let ai_dj_store = ctx.store(
             unidtk_api::StoreSpec::cache("ai_dj")
-                .legacy(&["unidtk_ai_dj.redb", "shell_ai_dj.redb"])
+                .legacy(&["unidtk_ai_dj.redb"])
                 // Прежняя схема AI DJ — две таблицы; контракт даёт плоские ключи.
                 .legacy_tables(&[("embeddings", "emb:"), ("analyses", "ana:")]),
         )?;
