@@ -85,7 +85,9 @@ function renderGlyphBar(card, widgetId) {
     return `<button type="button" class="gb-seg${red}" data-gb-index="${i}" aria-label="Volume ${pct}%"></button>`;
   }).join("");
 
-  card.innerHTML += `<div class="gb-container">${segs}<span class="gb-knob" aria-hidden="true"></span></div>`;
+  // Append, not `innerHTML +=`: re-parsing the card would replace the remove
+  // button the core already wired, leaving a × that does nothing (#3).
+  card.insertAdjacentHTML("beforeend", `<div class="gb-container">${segs}<span class="gb-knob" aria-hidden="true"></span></div>`);
 
   const container = card.querySelector(".gb-container");
   let suppressClick = false;
