@@ -553,6 +553,8 @@ const DEFAULT_WIDGET_CONFIG: &str = r#"{
     "glyph-bar": { "x": 1170, "y": 30, "w": 56, "h": 587 }
   },
   "instances": [],
+  "nested": { "clock": ["vpn"] },
+  "migrations": { "vpnNested": true },
   "hidden": ["tools-shortcut", "scripts"]
 }"#;
 

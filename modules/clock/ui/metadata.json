@@ -15,5 +15,6 @@
       "default": "lilac",
       "role": "calm"
     }
-  ]
+  ],
+  "container": true
 }

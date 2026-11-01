@@ -7,6 +7,53 @@ let vpnBusy = false;
 let vpnPingResults = null; // Map<tag, { latencyMs, ok }> from the last "PING ALL"
 let vpnPinging = false;
 let isUpdatingAutoConnect = false;
+let vpnPoll = null;
+
+const PANEL_HTML = `
+<div class="dash-vpn">
+  <div class="vpn-row">
+    <div class="vpn-icon off">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2 4 6v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6l-8-4Z" />
+      </svg>
+    </div>
+    <div class="vpn-info">
+      <div class="vpn-label">VPN: Off</div>
+      <div class="vpn-server-name">—</div>
+    </div>
+    <label class="vpn-toggle">
+      <input type="checkbox" class="vpn-toggle-input" />
+      <span class="vpn-toggle-slider"></span>
+    </label>
+  </div>
+  <select class="vpn-server-select" disabled>
+    <option>Загрузка...</option>
+  </select>
+  <div class="vpn-server-picker">
+    <button type="button" class="vpn-server-button" disabled>Loading...</button>
+    <div class="vpn-server-menu">
+      <div class="vpn-menu-head">
+        <span class="vpn-menu-title">SERVERS</span>
+        <button type="button" class="vpn-ping-btn">PING ALL</button>
+      </div>
+      <div class="vpn-menu-list"></div>
+    </div>
+  </div>
+  <div class="vpn-auto-row">
+    <span class="vpn-auto-label">AUTO</span>
+    <label class="vpn-toggle vpn-auto-toggle">
+      <input type="checkbox" class="vpn-auto-toggle-input" />
+      <span class="vpn-toggle-slider"></span>
+    </label>
+  </div>
+</div>
+`;
+
+/** Draw the panel into `container`: an opened desk card or a nesting host. */
+function renderVpnPanel(container) {
+  container.innerHTML = PANEL_HTML;
+  return initVpnPanel(container);
+}
 
 async function initVpnPanel(body) {
   const select = body.querySelector(".vpn-server-select");
@@ -26,6 +73,7 @@ async function initVpnPanel(body) {
     logFrontend(`vpn toggle ${source} checked=${nextChecked} busy=${vpnBusy} selectDisabled=${select.disabled} tag=${select.value || ""}`);
     if (vpnBusy) {
       logFrontend("vpn toggle ignored: busy");
+      refreshVpnStatus();
       return;
     }
     vpnBusy = true;
@@ -229,9 +277,15 @@ async function initVpnPanel(body) {
 
   refreshVpnStatus();
 
-  if (!window.vpnStatusInterval) {
-    window.vpnStatusInterval = setInterval(refreshVpnStatus, 3000);
-  }
+  // One poll for every panel; it ends with the last one on screen.
+  vpnPoll ||= setInterval(() => {
+    if (document.querySelector(".dash-vpn")) {
+      refreshVpnStatus();
+      return;
+    }
+    clearInterval(vpnPoll);
+    vpnPoll = null;
+  }, 3000);
 }
 
 async function refreshVpnStatus() {
@@ -336,4 +390,4 @@ function formatSelectedVpnServer(status) {
   return line;
 }
 
-export { initVpnPanel, refreshVpnStatus };
+export { renderVpnPanel, initVpnPanel, refreshVpnStatus };

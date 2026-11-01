@@ -2,6 +2,8 @@ import { convertFileSrc, invoke, listen, openPath } from "@unidtk/bridge";
 import { getWidgets, getWidgetShortcuts, getWidgetConfig, saveWidgetConfig } from "./widgets-api.js";
 import { initMotionSystem, animate, spring, staggerEnter, fadeTransition, setMotionScale, getDuration, EASINGS, DURATIONS, motionTimeline } from "./motion.js";
 import { initThemeSystem, applyTheme, getActiveTheme, getAllPresets, syncThemeIntoConfig, resolvePresetSize, registerThemeContracts, tintVarKey } from "./theme.js";
+import { canNest, effectiveNested, moveNested } from "./nesting.js";
+import { showToast } from "./toast.js";
 import { surfaceManager, syncSurfaceWash } from "./surface-manager.js";
 import { initMenu, openMenu, closeMenu } from "./menu.js";
 import { renderFolderBody } from "./folder-body.js";
@@ -409,7 +411,80 @@ function desiredWidgets(widgets) {
       })
       .filter(Boolean),
   ];
-  return renderWidgets;
+  knownWidgets = new Map(renderWidgets.map((w) => [w.id, w]));
+  activeNested = effectiveNested(config.nested, renderWidgets);
+  const nestedChildren = new Set(Object.values(activeNested).flat());
+  return renderWidgets.filter((w) => !nestedChildren.has(w.id));
+}
+
+// Widgets on hand, and which of them sit inside which host right now.
+let knownWidgets = new Map();
+let activeNested = {};
+
+// Draw a host's nested widgets at the end of its opened body. The host's own
+// render replaces the body, so it calls this each time.
+async function mountNested(card, body) {
+  const children = activeNested[card.dataset.id];
+  if (!children?.length) return;
+  const zone = document.createElement("div");
+  zone.className = "nested-zone";
+  body.appendChild(zone);
+  for (const id of children) {
+    const w = knownWidgets.get(id);
+    const item = document.createElement("div");
+    item.className = "nested-widget";
+    item.dataset.id = id;
+    item.innerHTML = `
+      <div class="nested-head">
+        <span class="nested-name">${escapeHtml(w.name)}</span>
+        <button type="button" class="nested-eject" aria-label="Вынуть «${escapeHtml(w.name)}» на стол">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+        </button>
+      </div>
+      <div class="nested-body"></div>
+    `;
+    item.addEventListener("click", (e) => e.stopPropagation());
+    item.querySelector(".nested-eject").addEventListener("click", () => {
+      item.remove();
+      moveWidgetToHost(id, null);
+    });
+    zone.appendChild(item);
+    try {
+      const m = await import(`../modules/${w.widgetType}/${w.embeddable.module}`);
+      await m[w.embeddable.render](item.querySelector(".nested-body"));
+    } catch (err) {
+      logFrontend(`nested render failed: ${id}: ${err?.message || err}`);
+    }
+  }
+}
+
+async function moveWidgetToHost(childId, hostId) {
+  config.nested = moveNested(config.nested, childId, hostId);
+  await saveConfig();
+  await syncWidgets();
+}
+
+// The card under the pointer that a dragged card would land on.
+function nestHostAt(card, x, y) {
+  return [...widgetsCanvas.querySelectorAll(":scope > .widget-card")].find((other) => {
+    if (other === card || other.classList.contains("micrographics-card")) return false;
+    const r = other.getBoundingClientRect();
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  });
+}
+
+function nestVerdict(card, host) {
+  return canNest(knownWidgets.get(card.dataset.id), knownWidgets.get(host.dataset.id));
+}
+
+function clearNestMarks() {
+  widgetsCanvas.querySelectorAll(".nest-target, .nest-refused").forEach((c) => c.classList.remove("nest-target", "nest-refused"));
+}
+
+function markNestTarget(card, x, y) {
+  clearNestMarks();
+  const host = nestHostAt(card, x, y);
+  if (host) host.classList.add(nestVerdict(card, host).ok ? "nest-target" : "nest-refused");
 }
 
 // One desktop card, fully wired; `layout.offsetY` stacks cards that have no
@@ -563,6 +638,7 @@ function buildWidgetCard(w, layout) {
     // Micrographics is ambient: it has nothing to open, and it covers the largest
     // area on the desktop, so a click target on it would swallow clicks meant for
     // the desktop behind it and expand it as if it were a folder.
+    card._afterBodyRender = (renderedBody) => mountNested(card, renderedBody);
     if (w.specialType !== "mp3-player" && w.specialType !== "glyph-bar" && w.specialType !== "telegram" && w.specialType !== "micrographics") {
       const clickTarget = w.specialType ? card : header;
       clickTarget.addEventListener("click", (e) => {
@@ -1120,6 +1196,14 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
       };
     }
     m.renderClockDashboard(body, widgetId);
+    card._afterBodyRender(body);
+  } else if (specialType === "vpn") {
+    const m = await import("../modules/vpn/vpn-panel.js");
+    if (currentSeq !== expandSequence) {
+      if (!card.classList.contains("expanded") && !surfaceManager.getRecord(card)) card._dockGeometryFrozen = false;
+      return;
+    }
+    m.renderVpnPanel(body);
   } else if (specialType === "mp3-player") {
     const m = card._widgetModule || await card._widgetModulePromise || await import("../modules/mp3-player/widget.js");
     if (currentSeq !== expandSequence) {
@@ -1909,6 +1993,7 @@ function setupDragReorder() {
         const at = snapMove(card, startLeft + deltaX, startTop + deltaY);
         card.style.left = at.x + "px";
         card.style.top = at.y + "px";
+        markNestTarget(card, ev.clientX, ev.clientY);
       }
 
       if (isResize && card.classList.contains("glyph-bar-widget")) {
@@ -1941,6 +2026,19 @@ function setupDragReorder() {
       document.removeEventListener("pointercancel", onCancel);
       
       card.classList.remove("dragging");
+
+      const host = isResize || cancelled ? null : nestHostAt(card, ev.clientX, ev.clientY);
+      clearNestMarks();
+      if (host) {
+        const verdict = nestVerdict(card, host);
+        if (verdict.ok) {
+          moveWidgetToHost(card.dataset.id, host.dataset.id);
+          return;
+        }
+        showToast(verdict.reason, { tone: "error" });
+        card.style.left = startLeft + "px";
+        card.style.top = startTop + "px";
+      }
       
       // Сохраняем ТОЛЬКО геометрию, не теряя пользовательских настроек
       // (authUser, autoShuffle, version и т.п.)
@@ -2038,6 +2136,7 @@ function enterArrangeMode(onExit = null) {
       positions: config.positions || {},
       hidden: config.hidden || [],
       instances: config.instances || [],
+      nested: config.nested || {},
     }),
     createdFolders: [],
   };

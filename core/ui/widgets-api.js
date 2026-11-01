@@ -104,6 +104,14 @@ function migrateWidgetConfig(config) {
     }
   }
 
+  // The VPN panel used to be part of the clock: keep it there, once, so that
+  // taking it out later stays final.
+  if (!config.migrations?.vpnNested) {
+    config.migrations = { ...config.migrations, vpnNested: true };
+    if (!config.hidden?.includes("vpn")) config.nested = { ...config.nested, clock: ["vpn"] };
+    changed = true;
+  }
+
   return changed;
 }
 

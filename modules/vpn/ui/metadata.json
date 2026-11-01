@@ -14,5 +14,9 @@
       "default": "blue",
       "role": "calm"
     }
-  ]
+  ],
+  "embeddable": {
+    "module": "vpn-panel.js",
+    "render": "renderVpnPanel"
+  }
 }

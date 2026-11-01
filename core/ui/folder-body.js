@@ -89,6 +89,7 @@ export async function renderFolderBody(card, body) {
     </div>
     ${shortcuts.length ? "" : `<p class="widget-empty">Пусто. Нажмите «+» или вставьте скопированный файл (Ctrl+V).</p>`}
   `;
+  card._afterBodyRender?.(body);
 
   const withRecord = async (fn) => {
     const folder = await folderRecord(folderId);
