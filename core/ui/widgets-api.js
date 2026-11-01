@@ -197,12 +197,14 @@ export async function getWidgetConfig() {
       return config;
     }
     // Layout blob without positions: start from defaults but PRESERVE the
-    // theme state (theme + customPresets + userColors) — an empty layout must never wipe
+    // theme state (theme + customPresets + colorOverrides) — an empty layout must never wipe
     // the user's saved appearance from redb.
-    if (config && typeof config === "object" && (config.theme || config.customPresets || config.userColors)) {
+    if (config && typeof config === "object" && (config.theme || config.customPresets || config.colorOverrides || config.userColors)) {
       const defaultConfig = await getDefaultWidgetConfig();
       if (config.theme && typeof config.theme === "object") defaultConfig.theme = config.theme;
       if (Array.isArray(config.customPresets)) defaultConfig.customPresets = config.customPresets;
+      if (config.colorOverrides && typeof config.colorOverrides === "object") defaultConfig.colorOverrides = config.colorOverrides;
+      // Written by older builds; loadColorOverrides converts it.
       if (config.userColors && typeof config.userColors === "object") defaultConfig.userColors = config.userColors;
       window.__shellConfigSource = "redb";
       await saveWidgetConfig(defaultConfig).catch(() => {});
@@ -261,7 +263,7 @@ export function saveWidgetConfig(config) {
     && Object.keys(config.positions).length > 0;
   const hasSettings = config && typeof config === "object" && config.settings
     && Object.keys(config.settings).length > 0;
-  const hasTheme = config && typeof config === "object" && Boolean(config.theme || config.customPresets || config.userColors);
+  const hasTheme = config && typeof config === "object" && Boolean(config.theme || config.customPresets || config.colorOverrides);
   if (!hasPositions && !hasSettings && !hasTheme) {
     return Promise.resolve(true);
   }

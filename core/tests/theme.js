@@ -1,7 +1,7 @@
 /** Run through `udtk gui js` in the real WebView; no external JS runtime. */
 import {
   normalizeTheme, computeThemeVars, computeThemeAttrs, BUILTIN_PRESETS, SCHEMA_VERSION,
-  rollColors, withUserColors, inkFor, PALETTE_SLOTS,
+  rollColors, withColorOverrides, loadColorOverrides, inkFor, PALETTE_SLOTS,
 } from "../ui/theme.js";
 
 // Nothing Classic primitives as shipped before schema v4: the Classic
@@ -145,14 +145,58 @@ export function runThemeDiagnostics() {
   }
   assert(firstHues.size > 20, `palettes really vary (${firstHues.size} hue buckets)`);
 
-  // Sea Glass takes the user's colors; other presets keep their own.
+  // Overrides belong to one theme and cover every color field.
   const mine = rollColors(7);
-  const composed = withUserColors(sea, mine);
-  assert(composed.palette.blue === mine.palette.blue && composed.tintMap.clock === mine.tintMap.clock, "sea glass wears user colors");
+  const composed = withColorOverrides(sea, { [sea.id]: { ...mine, accent: "#112233", fgRgb: "1, 2, 3" } });
+  assert(composed.palette.blue === mine.palette.blue && composed.tintMap.clock === mine.tintMap.clock, "theme wears its palette");
+  assert(composed.accent === "#112233" && composed.fgRgb === "1, 2, 3", "theme wears its other colors");
   assert(sea.palette.blue !== mine.palette.blue || sea.palette.aqua !== mine.palette.aqua, "built-in untouched");
-  assert(withUserColors(classic, mine).palette.blue === classic.palette.blue, "classic ignores user colors");
-  assert(withUserColors(sea, null).palette.blue === sea.palette.blue, "no user colors -> preset colors");
+  assert(withColorOverrides(classic, { [sea.id]: mine }).palette.blue === classic.palette.blue, "other theme unaffected");
+  assert(withColorOverrides(sea, null).palette.blue === sea.palette.blue, "no overrides -> preset colors");
+
+  // Old records: `userColors` becomes the Sea Glass entry; junk is dropped.
+  const legacy = loadColorOverrides({ userColors: { palette: { blue: "#123456" }, tintMap: { clock: "coral" } } });
+  assert(legacy[sea.id].palette.blue === "#123456" && legacy[sea.id].tintMap.clock === "coral", "userColors migrates");
+  assert(legacy[sea.id].accent === sea.accent, "migrated entry keeps preset accent");
+  const dirty = loadColorOverrides({ colorOverrides: { "bad id!": {}, [classic.id]: { accent: "nope", statusOk: "#010203" } } });
+  assert(!("bad id!" in dirty) && dirty[classic.id].accent === classic.accent && dirty[classic.id].statusOk === "#010203", "overrides validated");
+  assert(Object.keys(loadColorOverrides(null)).length === 0, "nothing stored -> no overrides");
   const attrs = computeThemeAttrs(normalizeTheme(sea));
   assert(attrs.material === "jelly" && attrs.mgLayout === "pills" && attrs.avatarColor === "true", "sea attrs");
+  return { checks };
+}
+
+/**
+ * The commit path against a recording `saved` stub of saveWidgetConfig: each
+ * write must be complete on its own, because any of them can be the last.
+ */
+export function runThemePersistenceDiagnostics(theme, saved) {
+  let checks = 0;
+  const assert = (ok, message) => { checks++; if (!ok) throw new Error(message); };
+  const last = () => JSON.parse(JSON.stringify(saved[saved.length - 1]));
+  const config = { positions: { clock: { x: 0, y: 0 } }, userColors: { palette: { blue: "#000001" }, tintMap: {} } };
+  theme.initThemeSystem(config);
+  theme.selectPreset("sea-glass");
+  assert(theme.getActiveTheme().palette.blue === "#000001", "migrated userColors reach the theme");
+  assert(!("userColors" in last()), "old key leaves the record");
+
+  const coral = (value) => theme.setLiveToken("palette", { ...theme.getActiveTheme().palette, coral: value });
+  coral("#123456");
+  theme.syncThemeIntoConfig();
+  assert(config.theme.palette.coral !== "#123456", "drag value stays out of the config");
+  theme.commitLiveChange();
+  assert(last().theme.palette.coral === "#123456", "commit saves the theme");
+  assert(last().colorOverrides["sea-glass"].palette.coral === "#123456", "same write saves the override");
+
+  theme.setLiveToken("accent", "#00ff01");
+  theme.commitLiveChange();
+  theme.selectPreset("nothing-dark");
+  assert(theme.getActiveTheme().accent !== "#00ff01", "other theme keeps its accent");
+  theme.setLiveToken("fgRgb", "9, 8, 7");
+  theme.commitLiveChange();
+  theme.selectPreset("sea-glass");
+  assert(theme.getActiveTheme().accent === "#00ff01" && theme.getActiveTheme().palette.coral === "#123456", "colors survive a theme switch");
+  theme.selectPreset("nothing-dark");
+  assert(theme.getActiveTheme().fgRgb === "9, 8, 7", "classic keeps its colors too");
   return { checks };
 }

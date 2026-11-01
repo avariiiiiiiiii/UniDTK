@@ -238,6 +238,8 @@ const ID_RE = /^[\w.-]{1,64}$/;
 
 const HEX_FIELDS = ["accent", "statusOk", "statusWarn", "statusError", "statusInfo"];
 const RGB_FIELDS = ["bgBase", "fgRgb", "bgElevRgb", "scrimRgb", "surfaceRgb", "surfaceDeepRgb"];
+// Every color a user can edit, besides the palette and tint maps.
+const COLOR_FIELDS = [...HEX_FIELDS, ...RGB_FIELDS, "inkDepth"];
 const NUM_FIELDS = {
   glassOpacity: [0, 1, false],
   glassRim: [0, 1, false],
@@ -469,21 +471,40 @@ export function newColorSeed() {
 const USER_COLOR_PRESET = "sea-glass";
 
 /** The preset record with the user's colors applied (pure, never mutates). */
-export function withUserColors(preset, colors) {
+export function withColorOverrides(preset, overrides) {
   const theme = cloneTheme(preset);
-  if (preset.id !== USER_COLOR_PRESET || !colors) return theme;
-  theme.palette = { ...theme.palette, ...colors.palette };
-  theme.tintMap = { ...theme.tintMap, ...colors.tintMap };
+  const own = overrides && overrides[preset.id];
+  if (!own) return theme;
+  for (const field of COLOR_FIELDS) {
+    if (own[field] !== undefined) theme[field] = own[field];
+  }
+  theme.palette = { ...theme.palette, ...own.palette };
+  theme.tintMap = { ...theme.tintMap, ...own.tintMap };
   return theme;
 }
 
-function normalizeUserColors(raw) {
-  if (!raw || typeof raw !== "object") return null;
-  const base = BUILTIN_BY_ID.get(USER_COLOR_PRESET);
-  const palette = normalizeMap(raw.palette, base.palette, PALETTE_SLOTS, (v) => normalizeHex(v) !== null);
-  for (const slot of PALETTE_SLOTS) palette[slot] = normalizeHex(palette[slot]);
-  const tintMap = normalizeMap(raw.tintMap, base.tintMap, TINT_TARGETS, (v) => PALETTE_SLOTS.includes(v));
-  return { palette, tintMap };
+/** The color part of a theme: what is remembered per theme id. */
+function colorsOf(theme) {
+  const colors = { palette: { ...theme.palette }, tintMap: { ...theme.tintMap } };
+  for (const field of COLOR_FIELDS) colors[field] = theme[field];
+  return colors;
+}
+
+/**
+ * Validate stored overrides. A record written before per-theme overrides holds
+ * `userColors` (Sea Glass palette and tints) instead: it becomes that theme's entry.
+ */
+export function loadColorOverrides(source) {
+  const raw = source && typeof source === "object"
+    ? source.colorOverrides || (source.userColors ? { [USER_COLOR_PRESET]: source.userColors } : null)
+    : null;
+  const overrides = {};
+  if (!raw || typeof raw !== "object") return overrides;
+  for (const [id, own] of Object.entries(raw)) {
+    if (!ID_RE.test(id) || !own || typeof own !== "object") continue;
+    overrides[id] = colorsOf(normalizeTheme({ ...(BUILTIN_BY_ID.get(id) || BUILTIN_PRESETS[0]), ...own, id }));
+  }
+  return overrides;
 }
 
 function normalizeHex(value) {
@@ -722,6 +743,9 @@ export function computeThemeAttrs(theme) {
 // ── State ───────────────────────────────────────────────────────────────────
 
 let currentTheme = normalizeTheme(BUILTIN_PRESETS[0]);
+// The last applied theme: `currentTheme` also carries uncommitted drag values,
+// and those must never reach storage through an unrelated config save.
+let committedTheme = cloneTheme(currentTheme);
 let customPresets = [];
 let rafId = null;
 let pendingFields = new Set();
@@ -729,9 +753,9 @@ let configRef = null;
 let lastApplied = {};
 let lastAttrs = {};
 let lastStorageJson = "";
-// The user's personal Sea Glass colors ({palette, tintMap}) and the colors
-// they replaced last (one-step undo of "shuffle").
-let userColors = null;
+// The user's colors per theme id, and the colors they replaced last
+// (one-step undo of "shuffle").
+let colorOverrides = {};
 let previousColors = null;
 
 /**
@@ -788,10 +812,10 @@ function writeStorage() {
     // before first paint — the token map itself, never a hand mirror of it.
     const json = JSON.stringify({
       schemaVersion: SCHEMA_VERSION,
-      activeTheme: currentTheme,
+      activeTheme: committedTheme,
       customPresets,
-      userColors,
-      paint: { vars: computeThemeVars(currentTheme), attrs: computeThemeAttrs(currentTheme) },
+      colorOverrides,
+      paint: { vars: computeThemeVars(committedTheme), attrs: computeThemeAttrs(committedTheme) },
     });
     if (json === lastStorageJson) return;
     localStorage.setItem(STORAGE_KEY, json);
@@ -818,6 +842,7 @@ export function applyTheme(theme, opts = {}) {
   // An older-schema built-in was just upgraded: heal storage once.
   const healed = Boolean(currentTheme.migrated);
   delete currentTheme.migrated;
+  committedTheme = cloneTheme(currentTheme);
 
   let changed = writeVars(computeThemeVars(currentTheme));
   // Structural switches (material, micrographics layout) are attributes:
@@ -883,19 +908,16 @@ export function setLiveToken(field, value) {
  * persist. Re-normalizes the live-mutated state (validation happens here).
  */
 export function commitLiveChange() {
+  // Before applyTheme: its single redb write must already carry these colors.
+  colorOverrides[currentTheme.id] = colorsOf(normalizeTheme(currentTheme));
   applyTheme(currentTheme, { persist: true });
-  if (currentTheme.id === USER_COLOR_PRESET) {
-    userColors = { palette: { ...currentTheme.palette }, tintMap: { ...currentTheme.tintMap } };
-    writeStorage();
-  }
 }
 
 /** Replace the active theme's colors and persist at once (no debounce). */
 function applyColors(colors) {
   const next = { ...cloneTheme(currentTheme), palette: { ...colors.palette }, tintMap: { ...colors.tintMap } };
-  if (currentTheme.id === USER_COLOR_PRESET) userColors = { palette: { ...colors.palette }, tintMap: { ...colors.tintMap } };
-  applyTheme(next);
-  flushPersistence();
+  colorOverrides[next.id] = colorsOf(normalizeTheme(next));
+  applyTheme(next, { persist: true });
 }
 
 /** "Перемешать цвета": a new random coloring; the old one stays restorable. */
@@ -925,7 +947,7 @@ export function hasPreviousColors() {
  */
 export function selectPreset(presetId) {
   const all = getAllPresets();
-  const found = withUserColors(all.find((p) => p.id === presetId) || BUILTIN_PRESETS[0], userColors);
+  const found = withColorOverrides(all.find((p) => p.id === presetId) || BUILTIN_PRESETS[0], colorOverrides);
   const oldTheme = cloneTheme(currentTheme);
   applyTheme(found, { persist: true });
   migrateSizesToPreset(found, oldTheme);
@@ -1080,6 +1102,7 @@ export function deleteCustomPreset(presetId) {
   if (idx === -1) return false;
 
   customPresets.splice(idx, 1);
+  delete colorOverrides[presetId];
 
   // If the deleted preset was active, fall back to Nothing Classic.
   if (currentTheme.id === presetId) {
@@ -1097,9 +1120,10 @@ export function deleteCustomPreset(presetId) {
  */
 export function syncThemeIntoConfig() {
   if (!configRef) return;
-  configRef.theme = cloneTheme(currentTheme);
+  configRef.theme = cloneTheme(committedTheme);
   configRef.customPresets = customPresets.map(cloneTheme);
-  configRef.userColors = userColors ? { palette: { ...userColors.palette }, tintMap: { ...userColors.tintMap } } : null;
+  configRef.colorOverrides = JSON.parse(JSON.stringify(colorOverrides));
+  delete configRef.userColors;
 }
 
 /**
@@ -1142,7 +1166,7 @@ export function initThemeSystem(globalConfig = null) {
     if (raw) {
       lastStorageJson = raw;
       const parsed = JSON.parse(raw);
-      userColors = normalizeUserColors(parsed.userColors);
+      colorOverrides = loadColorOverrides(parsed);
       if (Array.isArray(parsed.customPresets)) {
         customPresets = parsed.customPresets
           .map((p) => normalizeTheme(p))
@@ -1161,7 +1185,7 @@ export function initThemeSystem(globalConfig = null) {
   // 2. Slow path: reconcile with the redb config if provided.
   if (globalConfig) {
     // redb is authoritative for the user's colors; the cache only bridges boot.
-    userColors = normalizeUserColors(globalConfig.userColors) || userColors;
+    colorOverrides = { ...colorOverrides, ...loadColorOverrides(globalConfig) };
     if (Array.isArray(globalConfig.customPresets)) {
       customPresets = globalConfig.customPresets
         .map((p) => normalizeTheme(p))
@@ -1185,13 +1209,17 @@ export function initThemeSystem(globalConfig = null) {
 
   // 3. First run for this user (after the redb reconcile, so a stored coloring
   // always wins): deal their personal Sea Glass colors once and persist now.
-  if (globalConfig && !userColors) {
+  if (globalConfig && !colorOverrides[USER_COLOR_PRESET]) {
     const rolled = rollColors(newColorSeed());
     if (currentTheme.id === USER_COLOR_PRESET) {
       applyColors(rolled);
     } else {
-      userColors = rolled;
+      colorOverrides[USER_COLOR_PRESET] = colorsOf(normalizeTheme({ ...BUILTIN_BY_ID.get(USER_COLOR_PRESET), ...rolled }));
       flushPersistence();
     }
   }
+
+  // 4. The active theme's record is the truth for its colors: this also heals
+  // overrides that an older build left behind the theme it saved.
+  if (globalConfig) colorOverrides[currentTheme.id] = colorsOf(currentTheme);
 }

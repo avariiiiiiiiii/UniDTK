@@ -677,8 +677,11 @@ const TINT_LABELS = {
   "mg.ip-location": "Место по IP", "mg.network": "Сеть", "mg.volume": "Громкость",
 };
 
+// `material` limits a control to the material where it has an effect: jelly
+// cards draw text in ink derived from their tint, flat cards ignore the palette.
 const PALETTE_FIELDS = [
-  { field: "fgRgb", label: "Текст и значки", kind: "rgb" },
+  { field: "accent", label: "Акцент", kind: "hex", material: "flat" },
+  { field: "fgRgb", label: "Текст и значки", kind: "rgb", material: "flat" },
   { field: "bgElevRgb", label: "Оттенок элементов", kind: "rgb" },
   { field: "surfaceRgb", label: "Фон панелей", kind: "rgb" },
   { field: "surfaceDeepRgb", label: "Глубокий фон", kind: "rgb" },
@@ -704,7 +707,7 @@ const SLIDERS = [
   { field: "glassRim", label: "Светлый ободок", min: 0, max: 1, step: 0.05, fmt: pct },
   { field: "glassShadow", label: "Тень", min: 0, max: 1, step: 0.05, fmt: pct },
   { field: "shadowOffset", label: "Сдвиг тени", min: 0, max: 24, step: 1, fmt: (v) => `${v} пикс.` },
-  { field: "inkDepth", label: "Светлота текста", min: 0.15, max: 0.38, step: 0.01, fmt: (v) => Number(v).toFixed(2) },
+  { field: "inkDepth", label: "Светлота текста", min: 0.15, max: 0.38, step: 0.01, fmt: (v) => Number(v).toFixed(2), material: "jelly" },
   { field: "surfaceTint", label: "Оттенок раскрытых окон", min: 0, max: 1, step: 0.05, fmt: pct },
   { field: "radiusStrip", label: "Скругление полос", min: 0, max: 64, step: 2, fmt: (v) => (v >= 64 ? "пилюля" : `${v} пикс.`),
     toUi: (v) => Math.min(64, v), fromUi: (v) => (v >= 64 ? 999 : v) },
@@ -745,6 +748,8 @@ function renderLook() {
   const t = getActiveTheme();
   const presets = getAllPresets();
   const accents = [...new Set(PALETTE_SLOTS.map((s) => safeColor(t.palette?.[s], "")).filter(Boolean))];
+  const jelly = t.material === "jelly";
+  const forMaterial = (spec) => !spec.material || spec.material === t.material;
 
   pane.innerHTML = `
     <h3 class="menu-heading">Тема</h3>
@@ -759,7 +764,7 @@ function renderLook() {
       `).join("")}
     </div>
 
-    <h3 class="menu-heading">Цвета</h3>
+    ${jelly ? `<h3 class="menu-heading">Цвета</h3>
     <div class="menu-accents" role="radiogroup" aria-label="Акцентный цвет">
       ${accents.map((c) => `
         <button type="button" class="menu-accent" role="radio" aria-checked="${c.toLowerCase() === String(t.accent).toLowerCase()}"
@@ -768,7 +773,7 @@ function renderLook() {
     </div>
     <div class="menu-actions">
       <button type="button" class="menu-btn" id="btnShuffle">Перемешать цвета</button>
-    </div>
+    </div>` : ""}
 
     <details class="menu-details" id="lookFine" ${fineOpen ? "open" : ""}>
       <summary>Тонкая настройка</summary>
@@ -784,7 +789,7 @@ function renderLook() {
         </div>
       `).join("")}
 
-      ${SLIDERS.map((sl) => {
+      ${SLIDERS.filter(forMaterial).map((sl) => {
         const v = Number(t[sl.field] ?? 0);
         const ui = sl.toUi ? sl.toUi(v) : v;
         return `
@@ -794,7 +799,7 @@ function renderLook() {
           </label>`;
       }).join("")}
 
-      <span class="menu-field-label">Палитра оттенков</span>
+      ${jelly ? `<span class="menu-field-label">Палитра оттенков</span>
       <div class="menu-colors">
         ${PALETTE_SLOTS.map((slot) => `
           <label class="menu-color"><input type="color" data-slot="${slot}" value="${safeColor(t.palette?.[slot])}"><span>${SLOT_LABELS[slot]}</span></label>
@@ -815,11 +820,11 @@ function renderLook() {
             </div>
           </div>
         `).join("")}
-      </div>
+      </div>` : ""}
 
       <span class="menu-field-label">Текст, фоны и статусы</span>
       <div class="menu-colors">
-        ${PALETTE_FIELDS.map((f) => `
+        ${PALETTE_FIELDS.filter(forMaterial).map((f) => `
           <label class="menu-color"><input type="color" data-field="${f.field}" data-kind="${f.kind}"
             value="${f.kind === "rgb" ? rgbToHex(t[f.field]) : safeColor(t[f.field])}"><span>${f.label}</span></label>
         `).join("")}
@@ -866,7 +871,7 @@ function renderLook() {
     });
   });
 
-  pane.querySelector("#btnShuffle").addEventListener("click", () => {
+  pane.querySelector("#btnShuffle")?.addEventListener("click", () => {
     shuffleColors();
     renderLook();
     showUndo("Цвета перемешаны", () => {
