@@ -326,7 +326,8 @@
   position: absolute;
   inset: 0;
   border-radius: 12px;
-  background: rgba(var(--bg-elev-rgb), 0.2);
+  /* The track is drawn in text colour: --bg-elev is white on light themes. */
+  background: rgba(var(--fg-rgb), 0.22);
   pointer-events: none;
   transition: background var(--dur-transient) var(--ease-standard);
 }

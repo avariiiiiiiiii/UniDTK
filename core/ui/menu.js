@@ -990,6 +990,7 @@ async function renderVpn() {
         <button type="button" class="menu-btn" data-retry>Повторить</button>
       </div>`;
     pane.querySelector("[data-back]").addEventListener("click", () => showView("desk"));
+    pane.querySelector("[data-back]").focus();
     pane.querySelector("[data-retry]").addEventListener("click", renderVpn);
     return;
   }
@@ -1050,6 +1051,8 @@ async function renderVpn() {
     showView("desk");
     panel.querySelector("#btnVpnSettings")?.focus();
   });
+  // The view replaced the pane the focus was in; keep the keyboard in place.
+  pane.querySelector("[data-back]").focus();
 
   const subForm = pane.querySelector("#vpnSubForm");
   subForm.addEventListener("submit", (e) => {

@@ -271,6 +271,8 @@ async function renderWidgetAddPopover(popover) {
 
 function ensureWidgetAddControls(widgetTypes) {
   cachedWidgetTypes = widgetTypes || cachedWidgetTypes;
+  // Reconciles run on every menu change: the control is built once.
+  if (widgetsCanvas.querySelector(":scope > .widget-add")) return;
 
   const controls = document.createElement("div");
   controls.className = "widget-add";

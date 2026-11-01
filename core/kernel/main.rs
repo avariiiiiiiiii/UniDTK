@@ -1930,9 +1930,11 @@ mod frontend_contract_tests {
                 continue;
             };
             for name in literals_after(&source, &listen_marker) {
-                if !known.contains(&name) {
-                    orphans.push(format!("{}: listen(\"{name}\")", file.display()));
+                // Tauri's own events (`tauri://drag-drop`) are emitted by Tauri itself.
+                if name.starts_with("tauri://") || known.contains(&name) {
+                    continue;
                 }
+                orphans.push(format!("{}: listen(\"{name}\")", file.display()));
             }
         }
         assert!(

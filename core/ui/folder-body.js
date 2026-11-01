@@ -56,6 +56,9 @@ function showFolderMenu(x, y, actions) {
     }
   });
   menu.querySelector("button")?.focus();
+  // Esc on the folder reaches surface-manager first and folds it without
+  // passing the key on; the fold reports a geometry change — close with it.
+  window.addEventListener("unidtk-geometry-changed", closeFolderMenu, { once: true });
   // Any press outside dismisses it; capture so the desk handler sees it after.
   setTimeout(() => document.addEventListener("pointerdown", (e) => {
     if (!menu.contains(e.target)) closeFolderMenu();
