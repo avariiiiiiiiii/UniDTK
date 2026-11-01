@@ -1,1 +1,18 @@
-{ "name": "Громкость", "description": "Вертикальная светодиодная полоса громкости", "specialType": "glyph-bar", "simulate": { "module": "widget.js", "function": "renderGlyphBar", "sandbox": "<div class=\"widget-header\"></div><div class=\"widget-body\"></div>" } }
+{
+  "name": "Громкость",
+  "description": "Вертикальная светодиодная полоса громкости",
+  "specialType": "glyph-bar",
+  "simulate": {
+    "module": "widget.js",
+    "function": "renderGlyphBar",
+    "sandbox": "<div class=\"widget-header\"></div><div class=\"widget-body\"></div>"
+  },
+  "tints": [
+    {
+      "id": "glyph-bar",
+      "label": "Громкость",
+      "default": "aqua",
+      "role": "player"
+    }
+  ]
+}

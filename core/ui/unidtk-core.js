@@ -1,7 +1,7 @@
 import { convertFileSrc, invoke, listen, openPath } from "@unidtk/bridge";
 import { getWidgets, getWidgetShortcuts, getWidgetConfig, saveWidgetConfig } from "./widgets-api.js";
 import { initMotionSystem, animate, spring, staggerEnter, fadeTransition, setMotionScale, getDuration, EASINGS, DURATIONS, motionTimeline } from "./motion.js";
-import { initThemeSystem, applyTheme, getActiveTheme, getAllPresets, syncThemeIntoConfig, resolvePresetSize } from "./theme.js";
+import { initThemeSystem, applyTheme, getActiveTheme, getAllPresets, syncThemeIntoConfig, resolvePresetSize, registerThemeContracts, tintVarKey } from "./theme.js";
 import { surfaceManager, syncSurfaceWash } from "./surface-manager.js";
 import { initMenu, openMenu, closeMenu } from "./menu.js";
 import { renderFolderBody } from "./folder-body.js";
@@ -381,6 +381,7 @@ async function fetchRenderableWidgets() {
     ...widget,
     specialType: widget.specialType || builtinSpecialTypes[widget.id] || "",
   }));
+  registerThemeContracts(widgets);
   return widgets;
 }
 
@@ -421,6 +422,11 @@ function buildWidgetCard(w, layout) {
 
     const isMicrographics = w.specialType === "micrographics";
     if (isMicrographics) card.classList.add("micrographics-card");
+    const tint = w.tints?.[0]?.id;
+    if (tint) {
+      card.style.setProperty("--own-tint", `var(--tint-${tintVarKey(tint)})`);
+      card.style.setProperty("--own-ink", `var(--ink-tint-${tintVarKey(tint)})`);
+    }
     if (!config.positions[w.id]) {
       config.positions[w.id] = w.isInstance
         ? defaultWidgetPosition(w.widgetType || w.id, layout.offsetY)

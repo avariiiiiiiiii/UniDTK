@@ -233,7 +233,7 @@
 .menu-btn-primary {
   background: var(--theme-accent);
   border-color: var(--theme-accent);
-  color: #fff;
+  color: rgb(var(--on-accent-rgb));
 }
 
 .menu-btn-primary:hover { background: var(--theme-accent); filter: brightness(1.08); }
@@ -345,7 +345,7 @@
 }
 
 .menu-switch input:checked + .menu-slider { background: var(--theme-accent); }
-.menu-switch input:checked + .menu-slider::before { transform: translateX(16px); background: #fff; }
+.menu-switch input:checked + .menu-slider::before { transform: translateX(16px); background: rgb(var(--on-accent-rgb)); }
 .menu-switch input:focus-visible + .menu-slider { outline: 2px solid var(--theme-accent); outline-offset: 2px; }
 
 .menu-status {

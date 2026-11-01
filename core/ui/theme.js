@@ -26,7 +26,7 @@
  *   material         enum   "flat" (Classic cards) | "jelly" (sea-glass material)
  *   palette          map    {slot: hex} pastel slots (PALETTE_SLOTS)
  *   tintMap          map    {target: slot} — which slot tints which surface
- *                    (TINT_TARGETS: widgets, panels, micrographics groups)
+ *                    (targets are declared by modules, see registerThemeContracts)
  *   glassGrain, glassDepth, inkDepth, shadowOffset, radiusStrip
  *                    jelly optics: grain alpha, bevel strength, ink lightness
  *                    (oklch L), shadow drop in px, strip radius in px
@@ -87,12 +87,17 @@ const FONT_MONO_OPTIONS = new Set([
 
 export const PALETTE_SLOTS = ["neutral", "blue", "aqua", "mint", "lilac", "peach", "magenta", "coral"];
 
-const MG_GROUPS = ["date", "time", "freshness", "temperature", "condition", "feels", "wind",
-  "precipitation", "precipitation-amount", "sunrise", "sunset", "daylight",
-  "geolocation", "location", "ip-location", "network", "volume"];
+// What can be tinted. The core owns its own surfaces; each module declares the
+// rest in metadata.json (`tints`), so this file never names a module. `role`
+// groups targets that share one color when colors are shuffled.
+const tintRegistry = new Map([
+  ["panel", { label: "Панели", default: "lilac", role: "calm" }],
+  ["folder", { label: "Папки", default: "mint", role: "folder" }],
+]);
+// Settings that belong to a module but live in the theme (`lookOptions`).
+let lookOptions = [];
 
-export const TINT_TARGETS = ["panel", "folder", "clock", "telegram", "mp3-player", "glyph-bar",
-  ...MG_GROUPS.map((g) => `mg.${g}`)];
+const TINT_KEY_RE = /^[\w.:-]{1,64}$/;
 
 // Equal lightness/chroma pastels (sea glass pebbles); ink is derived in CSS.
 const SEA_PALETTE = {
@@ -106,22 +111,7 @@ const SEA_PALETTE = {
   coral: "#f7a38c",
 };
 
-// Micrographics tinted by meaning: calendar/place blue, weather aqua, sky/sun mint.
-const MG_TINTS = {
-  date: "blue", time: "blue", location: "blue", "ip-location": "blue", geolocation: "blue", network: "blue", volume: "blue",
-  temperature: "aqua", condition: "aqua", feels: "aqua", freshness: "aqua",
-  wind: "mint", precipitation: "mint", "precipitation-amount": "mint", sunrise: "mint", sunset: "mint", daylight: "mint",
-};
-
-const SEA_TINTS = {
-  panel: "lilac",
-  folder: "mint",
-  clock: "lilac",
-  telegram: "peach",
-  "mp3-player": "magenta",
-  "glyph-bar": "aqua",
-  ...Object.fromEntries(MG_GROUPS.map((g) => [`mg.${g}`, MG_TINTS[g]])),
-};
+const SEA_TINTS = { panel: "lilac", folder: "mint" };
 
 function freezePreset(p) {
   for (const key of ["sizes", "palette", "tintMap"]) Object.freeze(p[key]);
@@ -137,6 +127,7 @@ export const BUILTIN_PRESETS = Object.freeze([
     accent: "#d71921",
     bgBase: "15, 18, 30",
     fgRgb: "255, 255, 255",
+    onAccentRgb: "255, 255, 255",
     bgElevRgb: "255, 255, 255",
     scrimRgb: "0, 0, 0",
     surfaceRgb: "18, 18, 24",
@@ -178,6 +169,7 @@ export const BUILTIN_PRESETS = Object.freeze([
     accent: "#4a5fc1",
     bgBase: "242, 244, 247",
     fgRgb: "30, 34, 48",
+    onAccentRgb: "255, 255, 255",
     bgElevRgb: "255, 255, 255",
     scrimRgb: "40, 48, 70",
     surfaceRgb: "242, 244, 247",
@@ -237,7 +229,7 @@ const MOTION_PROFILE_IDS = new Set(["responsive", "balanced", "fluid"]);
 const ID_RE = /^[\w.-]{1,64}$/;
 
 const HEX_FIELDS = ["accent", "statusOk", "statusWarn", "statusError", "statusInfo"];
-const RGB_FIELDS = ["bgBase", "fgRgb", "bgElevRgb", "scrimRgb", "surfaceRgb", "surfaceDeepRgb"];
+const RGB_FIELDS = ["bgBase", "fgRgb", "onAccentRgb", "bgElevRgb", "scrimRgb", "surfaceRgb", "surfaceDeepRgb"];
 // Every color a user can edit, besides the palette and tint maps.
 const COLOR_FIELDS = [...HEX_FIELDS, ...RGB_FIELDS, "inkDepth"];
 const NUM_FIELDS = {
@@ -292,6 +284,18 @@ function normalizeSizes(rawSizes, fallback) {
  * Validate a {key: value} map against allowed keys; invalid entries keep
  * the fallback's value. Returns a fresh object (never the fallback itself).
  */
+// Targets are registered after boot, so a stored key cannot be checked against
+// them here: anything well-formed is kept.
+function normalizeTintMap(raw, fallback) {
+  const out = { ...fallback };
+  if (raw && typeof raw === "object") {
+    for (const [key, slot] of Object.entries(raw)) {
+      if (TINT_KEY_RE.test(key) && PALETTE_SLOTS.includes(slot)) out[key] = slot;
+    }
+  }
+  return out;
+}
+
 function normalizeMap(raw, fallback, keys, valueOk) {
   const out = { ...fallback };
   if (raw && typeof raw === "object") {
@@ -393,16 +397,8 @@ const ROLL_MIN_GAP = 35;
 const OLIVE_BAND = [90, 125];
 const CHROMA_SLOTS = PALETTE_SLOTS.filter((s) => s !== "neutral");
 
-// Seven colored roles; micrographics rows share their row's role.
-const ROLL_ROLES = {
-  folder: ["folder"],
-  clock: ["clock"],
-  telegram: ["telegram"],
-  player: ["mp3-player"],
-  calendar: ["mg.date", "mg.time", "mg.location", "mg.ip-location", "mg.geolocation", "mg.network", "mg.volume"],
-  weather: ["mg.temperature", "mg.condition", "mg.feels", "mg.freshness"],
-  sky: ["mg.wind", "mg.precipitation", "mg.precipitation-amount", "mg.sunrise", "mg.sunset", "mg.daylight"],
-};
+// Seven colored roles; targets name theirs in `tintRegistry`.
+const ROLL_ROLES = ["folder", "calm", "social", "player", "calendar", "weather", "sky"];
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -452,15 +448,81 @@ export function rollColors(seed) {
     const j = Math.floor(rand() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
   }
+  // Roles are stored too: a target registered later still finds its color.
   const tintMap = {};
-  Object.values(ROLL_ROLES).forEach((targets, i) => {
-    for (const target of targets) tintMap[target] = deck[i];
-  });
-  // The volume bar sits beside Telegram: take a color that is not Telegram's.
-  tintMap["glyph-bar"] = deck[Object.keys(ROLL_ROLES).indexOf("player")];
-  // Panels (menu, explorer) wear a light wash (surfaceTint) of the clock's color.
-  tintMap.panel = deck[Object.keys(ROLL_ROLES).indexOf("clock")];
+  ROLL_ROLES.forEach((role, i) => { tintMap[`role:${role}`] = deck[i]; });
+  for (const [target, spec] of tintRegistry) {
+    if (tintMap[`role:${spec.role}`]) tintMap[target] = tintMap[`role:${spec.role}`];
+  }
   return { palette, tintMap };
+}
+
+/** The palette slot a target wears in this theme. */
+export function tintSlot(theme, target) {
+  const spec = tintRegistry.get(target);
+  return theme.tintMap[target] || (spec && theme.tintMap[`role:${spec.role}`]) || spec?.default || "neutral";
+}
+
+/** CSS variable suffix of a tint target (`--tint-<key>`, `--ink-tint-<key>`). */
+export function tintVarKey(target) {
+  return target.replace(".", "-");
+}
+
+export function getTintTargets() {
+  return [...tintRegistry].map(([id, spec]) => ({ id, label: spec.label }));
+}
+
+export function getLookOptions() {
+  return lookOptions.map((option) => ({ ...option }));
+}
+
+/**
+ * Take the module side of the theme contract from `metadata.json`. Metadata
+ * arrives after the theme is live, so new targets are painted here.
+ */
+export function registerThemeContracts(modules) {
+  let added = false;
+  const options = [];
+  for (const module of modules) {
+    for (const tint of module.tints || []) {
+      if (!TINT_KEY_RE.test(tint.id || "") || !PALETTE_SLOTS.includes(tint.default)) continue;
+      if (!tintRegistry.has(tint.id)) added = true;
+      tintRegistry.set(tint.id, { label: tint.label || tint.id, default: tint.default, role: tint.role });
+    }
+    options.push(...(module.lookOptions || []));
+  }
+  lookOptions = options;
+  if (!added) return;
+  writeVars(computeThemeVars(committedTheme));
+  writeStorage();
+}
+
+const relativeLuminance = (rgb) => {
+  const [r, g, b] = rgb.split(",").map((part) => {
+    const v = Number(part) / 255;
+    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+
+/** WCAG contrast ratio of two "r, g, b" colors. */
+export function contrastRatio(a, b) {
+  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+const MIN_TEXT_CONTRAST = 4.5;
+
+/**
+ * The contrast contract: a theme declares the text color it wants on a colored
+ * surface, and gets it while it stays readable (WCAG AA). When the surface
+ * makes it unreadable, as a user-picked accent can, the better of white and
+ * near-black wins.
+ */
+export function readableOn(surfaceHex, preferredRgb) {
+  const surface = hexToRgb(surfaceHex);
+  if (contrastRatio(surface, preferredRgb) >= MIN_TEXT_CONTRAST) return preferredRgb;
+  return ["255, 255, 255", "16, 16, 20"].sort((a, b) => contrastRatio(surface, b) - contrastRatio(surface, a))[0];
 }
 
 export function newColorSeed() {
@@ -566,7 +628,7 @@ export function normalizeTheme(raw) {
     if (typeof raw.avatarColor === "boolean") theme.avatarColor = raw.avatarColor;
     theme.palette = normalizeMap(raw.palette, base.palette, PALETTE_SLOTS, (v) => normalizeHex(v) !== null);
     for (const slot of PALETTE_SLOTS) theme.palette[slot] = normalizeHex(theme.palette[slot]);
-    theme.tintMap = normalizeMap(raw.tintMap, base.tintMap, TINT_TARGETS, (v) => PALETTE_SLOTS.includes(v));
+    theme.tintMap = normalizeTintMap(raw.tintMap, base.tintMap);
     if (MOTION_PROFILE_IDS.has(raw.motionProfile)) theme.motionProfile = raw.motionProfile;
     if (typeof raw.id === "string" && ID_RE.test(raw.id)) theme.id = raw.id;
     if (typeof raw.name === "string" && raw.name.trim()) {
@@ -592,10 +654,11 @@ export function normalizeTheme(raw) {
  */
 const TOKEN_DEFS = [
   {
-    fields: ["accent"],
+    fields: ["accent", "onAccentRgb"],
     vars: (t) => ({
       "--theme-accent": t.accent,
       "--theme-accent-rgb": t.accentRgb,
+      "--on-accent-rgb": readableOn(t.accent, t.onAccentRgb),
     }),
   },
   {
@@ -677,10 +740,12 @@ const TOKEN_DEFS = [
         out[`--palette-${slot}`] = t.palette[slot];
         out[`--ink-${slot}`] = ink[slot];
       }
-      for (const target of TINT_TARGETS) {
-        const key = target.replace(".", "-");
-        out[`--tint-${key}`] = t.palette[t.tintMap[target]];
-        out[`--ink-tint-${key}`] = ink[t.tintMap[target]];
+      const stored = Object.keys(t.tintMap).filter((key) => !key.startsWith("role:"));
+      for (const target of new Set([...tintRegistry.keys(), ...stored])) {
+        const key = tintVarKey(target);
+        const slot = tintSlot(t, target);
+        out[`--tint-${key}`] = t.palette[slot];
+        out[`--ink-tint-${key}`] = ink[slot];
       }
       return out;
     },

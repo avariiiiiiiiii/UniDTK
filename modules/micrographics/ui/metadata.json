@@ -8,5 +8,125 @@
     "module": "widget.js",
     "function": "renderMicrographics",
     "sandbox": "<div class=\"widget-body\"></div>"
-  }
+  },
+  "tints": [
+    {
+      "id": "mg.date",
+      "label": "Дата",
+      "default": "blue",
+      "role": "calendar"
+    },
+    {
+      "id": "mg.time",
+      "label": "Время",
+      "default": "blue",
+      "role": "calendar"
+    },
+    {
+      "id": "mg.freshness",
+      "label": "Устаревание",
+      "default": "aqua",
+      "role": "weather"
+    },
+    {
+      "id": "mg.temperature",
+      "label": "Температура",
+      "default": "aqua",
+      "role": "weather"
+    },
+    {
+      "id": "mg.condition",
+      "label": "Погода",
+      "default": "aqua",
+      "role": "weather"
+    },
+    {
+      "id": "mg.feels",
+      "label": "Ощущается",
+      "default": "aqua",
+      "role": "weather"
+    },
+    {
+      "id": "mg.wind",
+      "label": "Ветер",
+      "default": "mint",
+      "role": "sky"
+    },
+    {
+      "id": "mg.precipitation",
+      "label": "Осадки",
+      "default": "mint",
+      "role": "sky"
+    },
+    {
+      "id": "mg.precipitation-amount",
+      "label": "Объём осадков",
+      "default": "mint",
+      "role": "sky"
+    },
+    {
+      "id": "mg.sunrise",
+      "label": "Восход",
+      "default": "mint",
+      "role": "sky"
+    },
+    {
+      "id": "mg.sunset",
+      "label": "Закат",
+      "default": "mint",
+      "role": "sky"
+    },
+    {
+      "id": "mg.daylight",
+      "label": "Световой день",
+      "default": "mint",
+      "role": "sky"
+    },
+    {
+      "id": "mg.geolocation",
+      "label": "Геолокация",
+      "default": "blue",
+      "role": "calendar"
+    },
+    {
+      "id": "mg.location",
+      "label": "Место",
+      "default": "blue",
+      "role": "calendar"
+    },
+    {
+      "id": "mg.ip-location",
+      "label": "Место по IP",
+      "default": "blue",
+      "role": "calendar"
+    },
+    {
+      "id": "mg.network",
+      "label": "Сеть",
+      "default": "blue",
+      "role": "calendar"
+    },
+    {
+      "id": "mg.volume",
+      "label": "Громкость",
+      "default": "blue",
+      "role": "calendar"
+    }
+  ],
+  "lookOptions": [
+    {
+      "field": "mgLayout",
+      "label": "Микрографика",
+      "options": [
+        [
+          "panel",
+          "Одной панелью"
+        ],
+        [
+          "pills",
+          "Пилюлями"
+        ]
+      ]
+    }
+  ]
 }

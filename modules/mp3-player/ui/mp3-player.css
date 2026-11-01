@@ -936,3 +936,6 @@
   box-shadow: inset 0 1px 0 rgba(var(--jelly-hi-rgb), 1),
     calc(var(--theme-shadow-offset) * 0.3) calc(var(--theme-shadow-offset) * 0.5) calc(var(--theme-shadow-offset) * 1.2) rgba(var(--fg-rgb), calc(var(--theme-glass-shadow) * 0.3));
 }
+
+/* Portaled popups do not inherit the card tint. */
+:root[data-material="jelly"] [data-surface-tint="mp3-player"] { --card-tint: var(--tint-mp3-player); --fg-rgb: var(--ink-tint-mp3-player); }

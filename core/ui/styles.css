@@ -51,6 +51,7 @@
      "Derived Theme Tokens" block below. */
   --theme-accent: #d71921;
   --theme-accent-rgb: 215, 25, 33;
+  --on-accent-rgb: 255, 255, 255;
   --theme-bg-base: 15, 18, 30;
   --theme-glass-opacity: 0.78;
   --fg-rgb: 255, 255, 255;
@@ -100,10 +101,6 @@
   --palette-coral: #f7a38c;
   --tint-panel: var(--palette-neutral);
   --tint-folder: var(--palette-mint);
-  --tint-clock: var(--palette-lilac);
-  --tint-telegram: var(--palette-peach);
-  --tint-mp3-player: var(--palette-magenta);
-  --tint-glyph-bar: var(--palette-neutral);
 
   /* Subsurface light diffusion gradient across the thickness of the glass */
   --theme-glass-computed-gradient: linear-gradient(
@@ -308,11 +305,8 @@ body.no-widgets .debug-message {
    Text and icons take the tint's deep ink through --fg-rgb, so every widget
    that paints with rgb(var(--fg-rgb)) follows without per-widget rules.
    Classic (flat) never matches anything here. */
-:root[data-material="jelly"] .widget-card { --card-tint: var(--tint-folder); --fg-rgb: var(--ink-tint-folder); }
-:root[data-material="jelly"] .widget-card.clock-widget { --card-tint: var(--tint-clock); --fg-rgb: var(--ink-tint-clock); }
-:root[data-material="jelly"] .widget-card.telegram-widget { --card-tint: var(--tint-telegram); --fg-rgb: var(--ink-tint-telegram); }
-:root[data-material="jelly"] .widget-card.music-widget { --card-tint: var(--tint-mp3-player); --fg-rgb: var(--ink-tint-mp3-player); }
-:root[data-material="jelly"] .widget-card.glyph-bar-widget { --card-tint: var(--tint-glyph-bar); --fg-rgb: var(--ink-tint-glyph-bar); }
+/* --own-tint / --own-ink come from the module's `tints` contract; folders use the default. */
+:root[data-material="jelly"] .widget-card { --card-tint: var(--own-tint, var(--tint-folder)); --fg-rgb: var(--own-ink, var(--ink-tint-folder)); }
 
 :root[data-material="jelly"] .widget-card,
 :root[data-material="jelly"] .jelly,
@@ -411,8 +405,6 @@ body.no-widgets .debug-message {
    colour transition here would re-raster the layer on every morph frame.
    Popups portaled out of their card carry data-surface-tint=<owner>. */
 :root[data-material="jelly"] { --card-tint: var(--tint-panel); }
-:root[data-material="jelly"] [data-surface-tint="telegram"] { --card-tint: var(--tint-telegram); --fg-rgb: var(--ink-tint-telegram); }
-:root[data-material="jelly"] [data-surface-tint="mp3-player"] { --card-tint: var(--tint-mp3-player); --fg-rgb: var(--ink-tint-mp3-player); }
 :root[data-material="jelly"] :is(.widget-card.expanded, .music-popup, .music-context-menu,
   .tg-context-menu, .tg-forward-modal, .tg-mention-pop, .tg-account-dropdown, .vpn-server-menu,
   .widget-add-popover, .explorer-widget .context-menu, .explorer-widget .search-results) {
@@ -840,7 +832,7 @@ body.edit-mode .widgets-canvas {
 .arrange-btn-primary {
   background: var(--theme-accent);
   border-color: var(--theme-accent);
-  color: #fff;
+  color: rgb(var(--on-accent-rgb));
 }
 
 .arrange-btn:focus-visible { outline: 2px solid var(--theme-accent); outline-offset: 2px; }

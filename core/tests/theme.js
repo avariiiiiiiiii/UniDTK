@@ -2,6 +2,7 @@
 import {
   normalizeTheme, computeThemeVars, computeThemeAttrs, BUILTIN_PRESETS, SCHEMA_VERSION,
   rollColors, withColorOverrides, loadColorOverrides, inkFor, PALETTE_SLOTS,
+  registerThemeContracts, tintSlot, getTintTargets, getLookOptions, readableOn, contrastRatio,
 } from "../ui/theme.js";
 
 // Nothing Classic primitives as shipped before schema v4: the Classic
@@ -19,9 +20,20 @@ const CLASSIC_V3_VARS = {
   "--font-accent": "'Ndot', monospace", "--font-base": "'Geist', sans-serif", "--font-mono": "'Consolas', 'Courier New', monospace",
 };
 
+// A stand-in for what modules declare in metadata.json.
+const tint = (id, role) => ({ id, label: id, default: "lilac", role });
+const MODULE_CONTRACTS = [
+  { tints: [tint("clock", "calm")] }, { tints: [tint("telegram", "social")] },
+  { tints: [tint("mp3-player", "player"), tint("glyph-bar", "player")] },
+  { tints: [tint("mg.date", "calendar"), tint("mg.ip-location", "calendar"), tint("mg.temperature", "weather"),
+    tint("mg.feels", "weather"), tint("mg.wind", "sky"), tint("mg.sunset", "sky")],
+  lookOptions: [{ field: "mgLayout", label: "Layout", options: [["panel", "Panel"]] }] },
+];
+
 export function runThemeDiagnostics() {
   let checks = 0;
   const assert = (ok, message) => { checks++; if (!ok) throw new Error(message); };
+  registerThemeContracts(MODULE_CONTRACTS);
   const classic = BUILTIN_PRESETS.find((p) => p.id === "nothing-dark");
   const sea = BUILTIN_PRESETS.find((p) => p.id === "sea-glass");
   assert(SCHEMA_VERSION === 4, "schema is v4");
@@ -61,8 +73,8 @@ export function runThemeDiagnostics() {
   assert(broken.palette.blue === sea.palette.blue, "bad palette hex falls back");
   assert(!("bogus" in broken.palette), "unknown palette slot dropped");
   assert(broken.tintMap.clock === sea.tintMap.clock, "bad tint slot falls back");
-  assert(broken.tintMap["mg.date"] === sea.tintMap["mg.date"], "non-string tint falls back");
-  assert(!("bogus" in broken.tintMap), "unknown tint target dropped");
+  assert(!("mg.date" in broken.tintMap), "non-string tint dropped");
+  assert(normalizeTheme({ ...sea, tintMap: { "bad key!": "blue" } }).tintMap["bad key!"] === undefined, "malformed tint key dropped");
   assert(broken.tintMap.telegram === "coral", "valid tint override kept");
   const enums = normalizeTheme({ ...sea, material: "lava", mgLayout: "grid", avatarColor: "yes" });
   assert(enums.material === "jelly" && enums.mgLayout === sea.mgLayout && enums.avatarColor === sea.avatarColor, "bad enums fall back");
@@ -95,7 +107,23 @@ export function runThemeDiagnostics() {
     const contrast = (lum(hexTriple(sea.palette[slot])) + 0.05) / (lum(parse(ink)) + 0.05);
     assert(contrast >= 7, `ink on ${slot} contrast ${contrast.toFixed(2)} >= 7`);
   }
-  assert(seaVars["--ink-tint-clock"] === seaVars[`--ink-${sea.tintMap.clock}`], "per-target ink follows its slot");
+  assert(seaVars["--ink-tint-clock"] === seaVars[`--ink-${tintSlot(sea, "clock")}`], "per-target ink follows its slot");
+  assert(seaVars["--tint-mg-date"] === sea.palette.lilac, "module default tint applies");
+
+  // The contract: modules declare tints and options, a late target finds its role's color.
+  assert(getTintTargets().some((t) => t.id === "mg.date") && getTintTargets().some((t) => t.id === "panel"), "registry holds core and modules");
+  assert(getLookOptions()[0].field === "mgLayout", "look options come from modules");
+  const rolled = normalizeTheme({ ...sea, ...rollColors(3) });
+  registerThemeContracts([{ tints: [tint("late-module", "weather")] }]);
+  assert(tintSlot(rolled, "late-module") === rolled.tintMap["role:weather"], "late target takes its role color");
+
+  // Contrast: a theme's choice stands while readable, otherwise it is replaced.
+  assert(readableOn("#d71921", "255, 255, 255") === "255, 255, 255", "declared on-accent kept");
+  assert(contrastRatio(readableOn("#ffee00", "255, 255, 255"), "255, 238, 0") >= 4.5, "unreadable on-accent replaced");
+  for (const preset of BUILTIN_PRESETS) {
+    const vars = computeThemeVars(normalizeTheme(preset));
+    assert(contrastRatio(vars["--on-accent-rgb"], vars["--theme-accent-rgb"]) >= 4.5, `${preset.id} accent text is readable`);
+  }
   const deeper = computeThemeVars(normalizeTheme({ ...sea, inkDepth: 0.2 }));
   assert(lum(parse(deeper["--ink-blue"])) < lum(parse(seaVars["--ink-blue"])), "inkDepth darkens ink");
   // The ink slider cannot leave AAA: 0.38 is its ceiling.

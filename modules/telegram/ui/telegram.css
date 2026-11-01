@@ -3708,3 +3708,6 @@ textarea.tg-input {
 /* Id-qualified: #shell-portals > * turns pointer events back on for portal children. */
 #shell-portals > .tg-avatar-flight { position: fixed; inset: 0; z-index: 2600; pointer-events: none; }
 .tg-avatar-flight > * { will-change: transform; }
+
+/* Portaled popups do not inherit the card tint. */
+:root[data-material="jelly"] [data-surface-tint="telegram"] { --card-tint: var(--tint-telegram); --fg-rgb: var(--ink-tint-telegram); }

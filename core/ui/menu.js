@@ -22,7 +22,9 @@ import {
   deleteCustomPreset,
   resetSizesToPreset,
   PALETTE_SLOTS,
-  TINT_TARGETS,
+  getTintTargets,
+  getLookOptions,
+  tintSlot,
   shuffleColors,
   restorePreviousColors,
 } from "./theme.js";
@@ -667,16 +669,6 @@ const SLOT_LABELS = {
   lilac: "Цвет 4", peach: "Цвет 5", magenta: "Цвет 6", coral: "Коралловый",
 };
 
-const TINT_LABELS = {
-  panel: "Панели: меню, проводник", folder: "Папки", clock: "Часы", telegram: "Telegram",
-  "mp3-player": "Плеер", "glyph-bar": "Громкость",
-  "mg.date": "Дата", "mg.time": "Время", "mg.freshness": "Устаревание", "mg.temperature": "Температура",
-  "mg.condition": "Погода", "mg.feels": "Ощущается", "mg.wind": "Ветер", "mg.precipitation": "Осадки",
-  "mg.precipitation-amount": "Объём осадков", "mg.sunrise": "Восход", "mg.sunset": "Закат",
-  "mg.daylight": "Световой день", "mg.geolocation": "Геолокация", "mg.location": "Место",
-  "mg.ip-location": "Место по IP", "mg.network": "Сеть", "mg.volume": "Громкость",
-};
-
 // `material` limits a control to the material where it has an effect: jelly
 // cards draw text in ink derived from their tint, flat cards ignore the palette.
 const PALETTE_FIELDS = [
@@ -718,8 +710,6 @@ const CHOICES = [
   // Must stay in sync with FONT_BODY_OPTIONS in theme.js (exact strings).
   { field: "fontBody", label: "Шрифт текста", options: [["'Geist', sans-serif", "Geist"], ["'Segoe UI', 'Geist', sans-serif", "Segoe UI"], ["system-ui, sans-serif", "Системный"], ["'Ndot', monospace", "Ndot"]] },
   { field: "material", label: "Материал карточек", options: [["flat", "Плоское стекло"], ["jelly", "Морское стекло"]] },
-  { field: "mgLayout", label: "Микрографика", options: [["panel", "Одной панелью"], ["pills", "Пилюлями"]] },
-  { field: "avatarColor", label: "Аватары Telegram", options: [[false, "Чёрно-белые"], [true, "Цветные"]] },
 ];
 
 let fineOpen = false;
@@ -777,12 +767,12 @@ function renderLook() {
 
     <details class="menu-details" id="lookFine" ${fineOpen ? "open" : ""}>
       <summary>Тонкая настройка</summary>
-      ${CHOICES.map((c) => `
+      ${[...CHOICES, ...getLookOptions()].map((c) => `
         <div class="menu-field">
           <span class="menu-field-label">${c.label}</span>
           <div class="menu-pills" role="radiogroup" aria-label="${c.label}">
             ${c.options.map(([value, label]) => `
-              <button type="button" class="menu-pill" role="radio" data-choice="${c.field}" data-value="${escapeHtml(String(value))}"
+              <button type="button" class="menu-pill" role="radio" data-choice="${c.field}" data-value="${escapeHtml(JSON.stringify(value))}"
                 aria-checked="${String(t[c.field] ?? "") === String(value)}">${label}</button>
             `).join("")}
           </div>
@@ -808,13 +798,13 @@ function renderLook() {
 
       <span class="menu-field-label">Каким цветом окрашено</span>
       <div class="menu-tints">
-        ${TINT_TARGETS.map((target) => `
+        ${getTintTargets().map(({ id: target, label }) => `
           <div class="menu-tint">
-            <span>${TINT_LABELS[target] || target}</span>
-            <div class="menu-tint-dots" role="radiogroup" aria-label="${TINT_LABELS[target] || target}">
+            <span>${escapeHtml(label)}</span>
+            <div class="menu-tint-dots" role="radiogroup" aria-label="${escapeHtml(label)}">
               ${PALETTE_SLOTS.map((s) => `
                 <button type="button" class="menu-tint-dot" role="radio" data-target="${target}" data-slot="${s}"
-                  aria-checked="${t.tintMap?.[target] === s}" aria-label="${SLOT_LABELS[s]}"
+                  aria-checked="${tintSlot(t, target) === s}" aria-label="${SLOT_LABELS[s]}"
                   style="background: ${safeColor(t.palette?.[s])};"></button>
               `).join("")}
             </div>
@@ -886,9 +876,7 @@ function renderLook() {
 
   pane.querySelectorAll("[data-choice]").forEach((pill) => {
     pill.addEventListener("click", () => {
-      const field = pill.dataset.choice;
-      const raw = pill.dataset.value;
-      setLiveToken(field, field === "avatarColor" ? raw === "true" : raw);
+      setLiveToken(pill.dataset.choice, JSON.parse(pill.dataset.value));
       commitLiveChange();
       renderLook();
     });

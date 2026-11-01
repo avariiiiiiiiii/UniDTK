@@ -6,5 +6,29 @@
     "module": "widget.js",
     "function": "renderTelegramWidget",
     "sandbox": "<div class=\"widget-header\"></div><div class=\"widget-body\"></div>"
-  }
+  },
+  "tints": [
+    {
+      "id": "telegram",
+      "label": "Telegram",
+      "default": "peach",
+      "role": "social"
+    }
+  ],
+  "lookOptions": [
+    {
+      "field": "avatarColor",
+      "label": "Аватары Telegram",
+      "options": [
+        [
+          false,
+          "Чёрно-белые"
+        ],
+        [
+          true,
+          "Цветные"
+        ]
+      ]
+    }
+  ]
 }

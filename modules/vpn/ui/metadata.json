@@ -1,1 +1,18 @@
-{ "name": "VPN", "description": "Панель VPN", "specialType": "vpn", "simulate": { "module": "vpn-panel.js", "function": "initVpnPanel", "sandbox": "<div class=\"dash-vpn\"></div>" } }
+{
+  "name": "VPN",
+  "description": "Панель VPN",
+  "specialType": "vpn",
+  "simulate": {
+    "module": "vpn-panel.js",
+    "function": "initVpnPanel",
+    "sandbox": "<div class=\"dash-vpn\"></div>"
+  },
+  "tints": [
+    {
+      "id": "vpn",
+      "label": "VPN",
+      "default": "blue",
+      "role": "calm"
+    }
+  ]
+}
