@@ -1,6 +1,6 @@
 {
   "name": "Telegram",
-  "description": "Docked chat widget",
+  "description": "Чат, пристыкованный к краю стола",
   "specialType": "telegram",
   "simulate": {
     "module": "widget.js",

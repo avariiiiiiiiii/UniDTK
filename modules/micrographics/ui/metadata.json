@@ -1,6 +1,6 @@
 {
-  "name": "Micrographics",
-  "description": "Ambient glyph panel: date, time, weather, network",
+  "name": "Микрографика",
+  "description": "Дата, время, погода и сеть мелкими знаками",
   "type": "special",
   "specialType": "micrographics",
   "singleton": true,
