@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke, listen, openPath } from "@unidtk/bridge";
-import { getWidgets, getWidgetShortcuts, getWidgetConfig, saveWidgetConfig } from "./widgets-api.js";
+import { getWidgets, getWidgetShortcuts, getWidgetConfig, saveWidgetConfig, getDisabledModules } from "./widgets-api.js";
 import { initMotionSystem, animate, spring, staggerEnter, fadeTransition, setMotionScale, getDuration, EASINGS, DURATIONS, motionTimeline } from "./motion.js";
 import { initThemeSystem, applyTheme, getActiveTheme, getAllPresets, syncThemeIntoConfig, resolvePresetSize, registerThemeContracts, tintVarKey } from "./theme.js";
 import { canNest, effectiveNested, moveNested } from "./nesting.js";
@@ -211,7 +211,7 @@ function pinToNearestCorner(pos, card) {
 
 
 function closeWidgetAddPopover() {
-  widgetsCanvas.querySelector(".widget-add-popover")?.classList.remove("open");
+  document.querySelector("#arrangeBar .widget-add-popover")?.classList.remove("open");
 }
 
 /**
@@ -274,16 +274,13 @@ async function renderWidgetAddPopover(popover) {
 function ensureWidgetAddControls(widgetTypes) {
   cachedWidgetTypes = widgetTypes || cachedWidgetTypes;
   // Reconciles run on every menu change: the control is built once.
-  if (widgetsCanvas.querySelector(":scope > .widget-add")) return;
+  const bar = document.getElementById("arrangeBar");
+  if (bar.querySelector(".widget-add")) return;
 
   const controls = document.createElement("div");
   controls.className = "widget-add";
   controls.innerHTML = `
-    <button type="button" class="widget-add-btn" aria-label="Add widget">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 5v14" /><path d="M5 12h14" />
-      </svg>
-    </button>
+    <button type="button" class="menu-btn widget-add-btn">+ Виджет</button>
     <div class="widget-add-popover"></div>
   `;
 
@@ -300,7 +297,7 @@ function ensureWidgetAddControls(widgetTypes) {
     }
   });
 
-  widgetsCanvas.appendChild(controls);
+  bar.insertBefore(controls, bar.querySelector('[data-arrange="cancel"]'));
 }
 
 
@@ -384,6 +381,7 @@ async function fetchRenderableWidgets() {
     specialType: widget.specialType || builtinSpecialTypes[widget.id] || "",
   }));
   registerThemeContracts(widgets);
+  disabledModules = new Set(await getDisabledModules());
   return widgets;
 }
 
@@ -393,15 +391,16 @@ function desiredWidgets(widgets) {
   if (!config.instances) config.instances = [];
   const widgetByType = new Map(widgets.map((w) => [w.id, w]));
   const hiddenSet = new Set(config.hidden);
+  const isOff = (w) => w.backend && disabledModules.has(w.id);
   const renderWidgets = [
     ...widgets
-      .filter((w) => !hiddenSet.has(w.id))
+      .filter((w) => !hiddenSet.has(w.id) && !isOff(w))
       .map((w) => ({ ...w, widgetType: w.id, isInstance: false })),
     ...config.instances
       .filter((instance) => !hiddenSet.has(instance.widgetType))
       .map((instance) => {
         const base = widgetByType.get(instance.widgetType);
-        if (!base) return null;
+        if (!base || isOff(base)) return null;
         return {
           ...base,
           id: instance.instanceId,
@@ -418,6 +417,7 @@ function desiredWidgets(widgets) {
 }
 
 // Widgets on hand, and which of them sit inside which host right now.
+let disabledModules = new Set();
 let knownWidgets = new Map();
 let activeNested = {};
 
@@ -545,7 +545,7 @@ function buildWidgetCard(w, layout) {
         <div class="resize-handle bottom"></div>
         <div class="resize-handle corner"></div>
       ` : ""}
-      <button type="button" class="widget-instance-remove" aria-label="Remove widget">
+      <button type="button" class="widget-instance-remove" aria-label="Убрать виджет">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
           <path d="M18 6L6 18" /><path d="M6 6l12 12" />
         </svg>
@@ -1796,8 +1796,8 @@ listen("wallpaper-wheel", (event) => {
   }
 });
 
-window.addEventListener("error", (e) => showDebugMessage(`Error: ${e.message}`));
-window.addEventListener("unhandledrejection", (e) => showDebugMessage(`Promise: ${e.reason}`));
+window.addEventListener("error", (e) => showDebugMessage(`Ошибка: ${e.message}`));
+window.addEventListener("unhandledrejection", (e) => showDebugMessage(`Необработанный промис: ${e.reason}`));
 
 // в”Ђв”Ђв”Ђ System buttons в”Ђв”Ђв”Ђ
 
@@ -2566,6 +2566,7 @@ if (typeof window !== "undefined") {
 }
 
 export {
+  moveWidgetToHost,
   config, editMode, widgetsCanvas, placeOnCanvas, enterArrangeMode, leaveArrangeMode, rlog, logFrontend, escapeHtml, repairMojibake,
   displayText, showDebugMessage, refreshDomCaches, defaultWidgetPosition,
   loadConfig, saveConfig, closeWidgetAddPopover,

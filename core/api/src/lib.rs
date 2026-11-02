@@ -190,6 +190,8 @@ fn bus() -> &'static Mutex<Bus> {
     BUS.get_or_init(|| Mutex::new(Bus::default()))
 }
 
+static EMIT_ORDER: Mutex<()> = Mutex::new(());
+
 /// Установить транспорт событий (Tauri emit). Вызывает только ядро.
 pub fn set_emitter(f: impl Fn(&str, Value) + Send + Sync + 'static) {
     let _ = EMITTER.set(Box::new(f));
@@ -198,20 +200,25 @@ pub fn set_emitter(f: impl Fn(&str, Value) + Send + Sync + 'static) {
 /// Опубликовать событие: запомнить последнее значение, раздать подписчикам и
 /// отправить во фронтенд.
 pub fn emit(event: &str, payload: Value) {
+    // The stored value and the transports must agree on which emit came last, so
+    // concurrent emits pass through both in one order. Handlers run outside: they
+    // may emit themselves.
     let handlers = {
-        match bus().lock() {
+        let _order = EMIT_ORDER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let handlers = match bus().lock() {
             Ok(mut bus) => {
                 bus.last.insert(event.to_string(), payload.clone());
                 bus.handlers.get(event).cloned().unwrap_or_default()
             }
             Err(_) => Vec::new(),
+        };
+        if let Some(emitter) = EMITTER.get() {
+            emitter(event, payload.clone());
         }
+        handlers
     };
     for handler in handlers {
         handler(payload.clone());
-    }
-    if let Some(emitter) = EMITTER.get() {
-        emitter(event, payload);
     }
 }
 
@@ -689,6 +696,17 @@ pub trait Module: Send + Sync {
     /// Остановка с бюджетом времени: снять фоновые потоки, закрыть процессы модуля.
     fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Выключение пользователем на ходу: приложение продолжает работать, поэтому
+    /// глобальные защёлки выхода здесь ставить нельзя.
+    fn suspend(&self) -> Result<(), String> {
+        self.shutdown(std::time::Duration::from_millis(1500))
+    }
+
+    /// Включение на ходу, в том числе модуля, выключенного с прошлого запуска.
+    fn resume(&self, ctx: ModuleContext) -> Result<(), String> {
+        self.init(ctx)
     }
 }
 

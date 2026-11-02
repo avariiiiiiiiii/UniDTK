@@ -35,8 +35,8 @@ pub const GET_WIDGET_CONFIG: CommandSpec =
     CommandSpec::read_only("get_widget_config", "Widget layout configuration", "");
 pub const GET_DISABLED_MODULES: CommandSpec =
     CommandSpec::read_only("get_disabled_modules", "Which modules are disabled (backend off)", "");
-pub const SET_DISABLED_MODULES: CommandSpec =
-    CommandSpec::write("set_disabled_modules", "Set the disabled module list", "{ids}");
+pub const SET_MODULE_ENABLED: CommandSpec =
+    CommandSpec::write("set_module_enabled", "Turn a module on or off in the running app", "{id, enabled}");
 pub const COMMANDS: CommandSpec =
     CommandSpec::read_only_cli("commands", "List the command surface", "");
 
@@ -215,7 +215,7 @@ pub static ALL: &[&CommandSpec] = &[
     &LOG_DELTA,
     &GET_WIDGET_CONFIG,
     &GET_DISABLED_MODULES,
-    &SET_DISABLED_MODULES,
+    &SET_MODULE_ENABLED,
     &COMMANDS,
     &PLAYER_STATUS,
     &AI_DJ_STATUS,

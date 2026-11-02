@@ -30,5 +30,10 @@
         ]
       ]
     }
-  ]
+  ],
+  "pack": {
+    "id": "comm",
+    "label": "Связь"
+  },
+  "backend": true
 }

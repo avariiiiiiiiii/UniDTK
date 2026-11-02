@@ -550,6 +550,9 @@ pub struct TelegramRuntime {
 /// Process-wide handle so vpn.rs can re-sync the managed proxy on
 /// connect/disconnect without holding a Tauri State reference.
 static TELEGRAM_FOR_VPN: OnceLock<Arc<Mutex<TelegramInner>>> = OnceLock::new();
+static VPN_EVENTS_SUBSCRIBED: AtomicBool = AtomicBool::new(false);
+/// The user switched the module off; unlike `SHUTTING_DOWN` this one comes back.
+static SUSPENDED: AtomicBool = AtomicBool::new(false);
 
 /// Состояние VPN из контракта.
 ///
@@ -566,6 +569,9 @@ fn vpn_connected_from_contract() -> bool {
 ///
 /// Заменяет прежний обратный вызов `vpn -> telegram::on_vpn_state_changed()`.
 pub fn subscribe_vpn_events() {
+    if VPN_EVENTS_SUBSCRIBED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     unidtk_api::subscribe("vpn", |_payload| {
         on_vpn_state_changed();
     });
@@ -2853,7 +2859,7 @@ fn parse_added_proxy(value: &Value) -> Option<(i32, String)> {
 /// Manual proxy modes (socks5/http/none) are the user's explicit choice and
 /// are left untouched. Empty/missing proxyType defaults to "byedpi" (auto).
 fn sync_vpn_proxy(inner: &Arc<Mutex<TelegramInner>>) {
-    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst) || SUSPENDED.load(Ordering::SeqCst) {
         stop_managed_proxy();
         return;
     }
@@ -6228,6 +6234,23 @@ impl unidtk_api::Module for TelegramModule {
 
     fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> {
         begin_shutdown();
+        Ok(())
+    }
+
+    fn suspend(&self) -> Result<(), String> {
+        SUSPENDED.store(true, Ordering::SeqCst);
+        stop_managed_proxy();
+        if let Some(inner) = TELEGRAM_FOR_VPN.get() {
+            shutdown_client(inner);
+        }
+        Ok(())
+    }
+
+    /// The runtime stays registered with the host; the client restarts on the
+    /// widget's next call.
+    fn resume(&self, _ctx: unidtk_api::ModuleContext) -> Result<(), String> {
+        SUSPENDED.store(false, Ordering::SeqCst);
+        subscribe_vpn_events();
         Ok(())
     }
 }

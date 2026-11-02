@@ -612,3 +612,30 @@
 }
 
 .menu-tint-dot[aria-checked="true"] { border-color: rgb(var(--fg-rgb)); }
+
+/* Popup: settings of a pack or a folder. */
+.menu-popup {
+  width: min(380px, calc(100vw - 32px));
+  max-height: min(640px, calc(100vh - 64px));
+  padding: 0;
+  overflow: hidden;
+  flex-direction: column;
+  border: 1px solid rgba(var(--bg-elev-rgb), 0.12);
+  border-radius: var(--theme-radius-card);
+  background: rgb(var(--bg-surface-rgb));
+  color: rgb(var(--fg-rgb));
+}
+
+.menu-popup[open] { display: flex; }
+.menu-popup::backdrop { background: rgba(var(--scrim-rgb), 0.45); }
+
+.menu-popup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 8px 16px;
+}
+
+.menu-popup-title { margin: 0; font-size: 14px; font-weight: 600; }
+.menu-popup-body { padding: 0 16px 16px; overflow-y: auto; }
+.menu-popup .menu-row { flex-wrap: wrap; }

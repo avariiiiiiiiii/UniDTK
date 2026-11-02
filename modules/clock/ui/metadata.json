@@ -16,5 +16,9 @@
       "role": "calm"
     }
   ],
-  "container": true
+  "container": true,
+  "pack": {
+    "id": "desk",
+    "label": "Стол"
+  }
 }

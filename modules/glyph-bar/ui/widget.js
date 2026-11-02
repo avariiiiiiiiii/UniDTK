@@ -82,7 +82,7 @@ function renderGlyphBar(card, widgetId) {
   const segs = Array.from({ length: GB_SEGMENTS }, (_, i) => {
     const red = i === 0 ? " red" : "";
     const pct = i === 0 ? 0 : glyphBarVolumeForIndex(i);
-    return `<button type="button" class="gb-seg${red}" data-gb-index="${i}" aria-label="Volume ${pct}%"></button>`;
+    return `<button type="button" class="gb-seg${red}" data-gb-index="${i}" aria-label="Громкость ${pct}%"></button>`;
   }).join("");
 
   // Append, not `innerHTML +=`: re-parsing the card would replace the remove

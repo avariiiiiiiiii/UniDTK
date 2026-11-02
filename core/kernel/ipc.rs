@@ -248,8 +248,8 @@ static ROUTES: &[(&str, Handler)] = &[
         handle_get_disabled_modules,
     ),
     (
-        crate::command_inventory::SET_DISABLED_MODULES.name,
-        handle_set_disabled_modules,
+        crate::command_inventory::SET_MODULE_ENABLED.name,
+        handle_set_module_enabled,
     ),
     // Served on the UI door only, and still routed: the dispatcher is what the WebSocket
     // transport uses, so a command without a route here is unreachable on that door even
@@ -449,15 +449,13 @@ fn handle_get_disabled_modules(
     Ok(serde_json::json!(list))
 }
 
-fn handle_set_disabled_modules(
+fn handle_set_module_enabled(
     server: &IpcServer,
     args: &Args,
 ) -> Result<serde_json::Value, String> {
-    let ids: Vec<String> = args
-        .get("ids")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    server.db.set_disabled_modules(&ids)?;
+    let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
+    let enabled = args.get("enabled").and_then(|v| v.as_bool()).ok_or("missing enabled")?;
+    crate::apply_module_enabled(&server.app, &server.db, id, enabled)?;
     Ok(serde_json::json!({ "ok": true }))
 }
 

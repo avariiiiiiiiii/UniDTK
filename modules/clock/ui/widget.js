@@ -17,7 +17,7 @@ function renderClock(card, widgetId) {
   // Add switcher
   const switcher = document.createElement("div");
   switcher.className = "version-switcher";
-  switcher.setAttribute("aria-label", "Change Style");
+  switcher.setAttribute("aria-label", "Сменить стиль");
   switcher.innerHTML = `
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M21.5 2v6h-6M2.5 22v-6h6M2 12c0-4.4 3.6-8 8-8 2.2 0 4.2.9 5.7 2.3L21.5 8M22 12c0 4.4-3.6 8-8 8-2.2 0-4.2-.9-5.7-2.3L2.5 16" />
@@ -96,9 +96,9 @@ function updateClockFace(container, version) {
         <div class="hand hour" style="width: 4px; height: 28%; background: rgba(var(--fg-rgb), 0.2); border-radius: 2px; z-index: 8;"></div>
         <div class="hand minute" style="width: 2px; height: 38%; background: rgba(var(--fg-rgb), 0.33); border-radius: 1px; z-index: 7;"></div>
         <div class="dot-stats-overlay" style="bottom: 22%;">
-          SAT 23<br>
-          156 kcal<br>
-          6,240 steps
+          СБ 23<br>
+          156 ккал<br>
+          6 240 шагов
         </div>
       </div>
     `;
@@ -250,7 +250,7 @@ function updateClockTime() {
 async function renderClockDashboard(body, widgetId) {
   const version = config.positions[widgetId]?.version || "digital";
   const now = new Date();
-  const days = ["S", "M", "T", "W", "T", "F", "S"];
+  const days = ["В", "П", "В", "С", "Ч", "П", "С"];
   const currentDay = now.getDate();
   const currentMonth = now.getMonth();
   const currentYear = now.getFullYear();
@@ -286,7 +286,7 @@ async function renderClockDashboard(body, widgetId) {
               <path d="M5 12.55a11 11 0 0 1 14.08 0" /><path d="M1.42 9a16 16 0 0 1 21.16 0" /><path d="M8.53 16.11a6 6 0 0 1 6.95 0" /><line x1="12" y1="20" x2="12.01" y2="20" />
             </svg>
           </div>
-          <div class="net-status">${isOnline ? 'Connected' : 'Offline'}</div>
+          <div class="net-status">${isOnline ? 'В сети' : 'Нет сети'}</div>
         </div>
       </div>
     </div>

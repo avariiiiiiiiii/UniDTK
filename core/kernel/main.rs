@@ -158,6 +158,7 @@ pub(crate) fn app_shutdown(app: &tauri::AppHandle, wait_for_vpn: bool) {
     if let Some(module) = app.try_state::<micrographics::MicrographicsModule>() {
         let _ = unidtk_api::Module::shutdown(&*module, Duration::from_millis(1500));
     }
+    hotkeys::shutdown();
     let _ = wallpaper::reset();
     // Drain queued log lines into unidtk_logs.redb / unidtk.log.
     crate::logging::flush();
@@ -172,6 +173,40 @@ pub(crate) fn is_shutting_down() -> bool {
 /// Контекст модуля: собственный срез базы + AppHandle как host-состояние.
 /// Если redb не открылась, модуль получает пустую заглушку — модули, которым
 /// база не нужна, обязаны подниматься и в деградированном режиме.
+/// Build mp3-player on its own thread: the library load is slow, and the module
+/// must be off the startup path.
+fn start_music_module(handle: tauri::AppHandle) {
+    let shared = shared_db(&handle);
+    thread::spawn(move || {
+        if shared.is_none() {
+            log_line("setup: qbc music core skipped (no redb)");
+            return;
+        }
+        let ctx = module_context(&handle, "mp3-player", true);
+        let module = commands::Mp3PlayerModule::new();
+        match unidtk_api::Module::init(&module, ctx) {
+            Ok(()) => {
+                if is_shutting_down() {
+                    // Вышли, пока модуль поднимался: останавливаем то,
+                    // что уже успело запуститься, и не управляем им.
+                    let _ = unidtk_api::Module::shutdown(&module, Duration::from_millis(1500));
+                    log_line("setup: music core finished after shutdown; stopped");
+                    return;
+                }
+                match module.state() {
+                    Some(state) => {
+                        handle.manage(state);
+                        handle.manage(module);
+                        log_line("setup: qbc music core ready (deferred, auto-sync armed)");
+                    }
+                    None => log_line("setup: qbc music core produced no state"),
+                }
+            }
+            Err(error) => log_line(format!("setup: qbc music core bootstrap failed: {error}")),
+        }
+    });
+}
+
 fn module_context(app: &tauri::AppHandle, id: &str, enabled: bool) -> unidtk_api::ModuleContext {
     let module_id = unidtk_api::ModuleId::new(id);
     let db: Arc<dyn unidtk_api::ModuleDb> = match shared_db(app) {
@@ -246,33 +281,7 @@ fn detach_wallpaper(app: tauri::AppHandle, hwnd: isize) -> Result<(), String> {
 /// menu) go through this command instead.
 #[tauri::command(async)]
 fn set_clipboard_text(text: String) -> Result<(), String> {
-    use windows::Win32::{
-        Foundation::{HANDLE, HWND},
-        System::{
-            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
-            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
-        },
-    };
-    unsafe {
-        OpenClipboard(HWND::default()).map_err(|e| e.to_string())?;
-        let result = (|| {
-            EmptyClipboard().map_err(|e| e.to_string())?;
-            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-            let hmem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).map_err(|e| e.to_string())?;
-            let ptr = GlobalLock(hmem);
-            if ptr.is_null() {
-                return Err("GlobalLock failed".to_string());
-            }
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
-            let _ = GlobalUnlock(hmem);
-            // On success the clipboard owns `hmem` (no GlobalFree).
-            // 13 = CF_UNICODETEXT.
-            SetClipboardData(13, HANDLE(hmem.0)).map_err(|e| e.to_string())?;
-            Ok(())
-        })();
-        let _ = CloseClipboard();
-        result
-    }
+    explorer::clipboard::copy_text_to_clipboard(&text)
 }
 
 #[tauri::command(async)]
@@ -349,43 +358,6 @@ fn clipboard_shortcut_targets() -> Result<ClipboardShortcuts, String> {
         .collect();
     let text = if files.is_empty() { explorer::clipboard::paste_text_from_clipboard()? } else { None };
     Ok(ClipboardShortcuts { files, text })
-}
-
-/// Restart to apply module switches. The new process waits for this one to be
-/// gone (`--after-exit`), otherwise the single-instance guard would hand its
-/// arguments to us and quit.
-#[tauri::command(async)]
-fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    std::process::Command::new(exe)
-        .args(["--after-exit", &std::process::id().to_string()])
-        .spawn()
-        .map_err(|e| format!("restart: {e}"))?;
-    log_line("restart: relaunch spawned, quitting");
-    quit_app(app)
-}
-
-/// `--after-exit <pid>`: a restart started us; wait (bounded) for the old
-/// instance to exit before anything claims the single-instance slot.
-fn wait_for_previous_instance() {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
-    let args: Vec<String> = std::env::args().collect();
-    let Some(pid) = args
-        .iter()
-        .position(|a| a == "--after-exit")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|p| p.parse::<u32>().ok())
-    else {
-        return;
-    };
-    unsafe {
-        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
-            let _ = WaitForSingleObject(handle, 20_000);
-            let _ = CloseHandle(handle);
-        }
-    }
-    log_line(format!("main: previous instance {pid} gone, starting"));
 }
 
 #[tauri::command(async)]
@@ -599,12 +571,53 @@ fn get_disabled_modules(state: tauri::State<Arc<UniDtkDatabase>>) -> Result<Vec<
     state.get_disabled_modules()
 }
 
+/// Switches are one read-modify-write of the stored list plus a module restart.
+static MODULE_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn switch_module<M: unidtk_api::Module + 'static>(app: &tauri::AppHandle, id: &str, enabled: bool) -> Result<(), String> {
+    let Some(module) = app.try_state::<M>() else {
+        return Ok(());
+    };
+    if enabled {
+        module.resume(module_context(app, id, true))
+    } else {
+        module.suspend()
+    }
+}
+
+/// Turn a module on or off in the running app and remember the choice. The
+/// stored list changes only after the module did, so a failure leaves both as
+/// they were.
+pub(crate) fn apply_module_enabled(app: &tauri::AppHandle, db: &UniDtkDatabase, id: &str, enabled: bool) -> Result<(), String> {
+    let _switch = MODULE_SWITCH.lock().map_err(|_| "module switch lock poisoned".to_string())?;
+    match id {
+        "glyph-bar" => switch_module::<glyph_bar::GlyphBarModule>(app, id, enabled)?,
+        "vpn" => switch_module::<vpn::VpnModule>(app, id, enabled)?,
+        "telegram" => switch_module::<telegram::TelegramModule>(app, id, enabled)?,
+        "micrographics" => switch_module::<micrographics::MicrographicsModule>(app, id, enabled)?,
+        // Off since startup: the module was never built, so it starts from scratch.
+        "mp3-player" if enabled && app.try_state::<commands::Mp3PlayerModule>().is_none() => start_music_module(app.clone()),
+        "mp3-player" => switch_module::<commands::Mp3PlayerModule>(app, id, enabled)?,
+        _ => return Err(format!("unknown module: {id}")),
+    }
+    let mut disabled = db.get_disabled_modules()?;
+    disabled.retain(|m| m != id);
+    if !enabled {
+        disabled.push(id.to_string());
+    }
+    db.set_disabled_modules(&disabled)?;
+    log_line(format!("module {id}: {}", if enabled { "on" } else { "off" }));
+    Ok(())
+}
+
 #[tauri::command(async)]
-fn set_disabled_modules(
+fn set_module_enabled(
+    app: tauri::AppHandle,
     state: tauri::State<Arc<UniDtkDatabase>>,
-    ids: Vec<String>,
+    id: String,
+    enabled: bool,
 ) -> Result<(), String> {
-    state.set_disabled_modules(&ids)
+    apply_module_enabled(&app, &state, &id, enabled)
 }
 
 #[tauri::command(async)]
@@ -1095,12 +1108,8 @@ fn search_files(
 }
 
 #[tauri::command(async)]
-fn add_to_search_index(
-    state: tauri::State<'_, explorer::commands::SharedSearch>,
-    path: String,
-    is_dir: bool,
-) {
-    explorer::commands::add_to_search_index(&state, path, is_dir)
+fn build_search_index(state: tauri::State<'_, explorer::commands::SharedSearch>, root: String) {
+    explorer::commands::build_search_index(&state, root)
 }
 
 #[tauri::command(async)]
@@ -2057,7 +2066,6 @@ fn main() {
     unidtk_api::set_logger(|message| log_line(message));
     load_env_into_process();
     log_line("main: start");
-    wait_for_previous_instance();
     let startup_started = std::time::Instant::now();
     // Open files while Tauri creates WebView2. Setup still waits for the result
     // before registering state, so commands never observe temporary defaults.
@@ -2159,7 +2167,6 @@ fn main() {
             attach_main_window,
             detach_main_window,
             quit_app,
-            restart_app,
             start_menu_list,
             shortcut_icon,
             describe_shortcut_target,
@@ -2179,7 +2186,7 @@ fn main() {
             get_default_widget_config,
             save_widget_config,
             get_disabled_modules,
-            set_disabled_modules,
+            set_module_enabled,
             refresh_display_layout,
             vpn_list_servers,
             vpn_refresh_servers,
@@ -2305,7 +2312,7 @@ fn main() {
             get_folder_size,
             sort_files,
             search_files,
-            add_to_search_index,
+            build_search_index,
             remove_from_search_index,
             clear_search_index,
             get_search_suggestions,
@@ -2415,44 +2422,12 @@ fn main() {
             // The library lives behind the module contract: the kernel hands
             // mp3-player its own key slice of unidtk.redb and never exposes the raw
             // engine (library_migration.rs moved the old tables there once).
-            let handle_for_music = app.handle().clone();
-            let shared_db_for_music = shared_db(app.handle());
             let disabled_mods = disabled_module_set(app.handle());
-            let music_disabled = disabled_mods.contains("mp3-player");
-            thread::spawn(move || {
-                if shared_db_for_music.is_none() {
-                    log_line("setup: qbc music core skipped (no redb)");
-                    return;
-                }
-                if music_disabled {
-                    log_line("setup: qbc music core skipped (module disabled)");
-                    return;
-                }
-                let ctx = module_context(&handle_for_music, "mp3-player", true);
-                let module = commands::Mp3PlayerModule::new();
-                match unidtk_api::Module::init(&module, ctx) {
-                    Ok(()) => {
-                        if is_shutting_down() {
-                            // Вышли, пока модуль поднимался: останавливаем то,
-                            // что уже успело запуститься, и не управляем им.
-                            let _ = unidtk_api::Module::shutdown(&module, Duration::from_millis(1500));
-                            log_line("setup: music core finished after shutdown; stopped");
-                            return;
-                        }
-                        match module.state() {
-                            Some(state) => {
-                                handle_for_music.manage(state);
-                                handle_for_music.manage(module);
-                                log_line("setup: qbc music core ready (deferred, auto-sync armed)");
-                            }
-                            None => log_line("setup: qbc music core produced no state"),
-                        }
-                    }
-                    Err(error) => {
-                        log_line(format!("setup: qbc music core bootstrap failed: {error}"))
-                    }
-                }
-            });
+            if disabled_mods.contains("mp3-player") {
+                log_line("setup: qbc music core skipped (module disabled)");
+            } else {
+                start_music_module(app.handle().clone());
+            }
 
             let show = MenuItemBuilder::with_id("show", "Показать виджеты").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Выход").build(app)?;

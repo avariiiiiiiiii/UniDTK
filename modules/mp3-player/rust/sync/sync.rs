@@ -763,7 +763,7 @@ pub async fn spawn_auto_playlist_sync(
 
     loop {
         let cfg = config.get();
-        if cfg.auto_sync_enabled {
+        if cfg.auto_sync_enabled && !crate::commands::is_suspended() {
             let max_age_secs = (cfg.auto_sync_interval_hours * 3600.0).round() as i64;
             match sync.start_stale(max_age_secs.max(1)) {
                 Ok(ids) if !ids.is_empty() => {

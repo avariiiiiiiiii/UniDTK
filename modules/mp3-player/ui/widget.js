@@ -49,7 +49,7 @@ function showMusicVolumeToast(card, vol) {
     card._cachedTitleBeforeVolume = titleEl.textContent;
     card._volumeToastActive = true;
   }
-  titleEl.textContent = `VOL: ${Math.round(vol)}%`;
+  titleEl.textContent = `ГРОМК: ${Math.round(vol)}%`;
   clearTimeout(musicVolumeToastTimer);
   musicVolumeToastTimer = setTimeout(() => {
     card._volumeToastActive = false;
@@ -86,7 +86,7 @@ async function runMusicCommand(command, args = {}) {
   try {
     return await invoke(command, args);
   } catch (err) {
-    showDebugMessage(`Music: ${err.message || err}`);
+    showDebugMessage(`Музыка: ${err.message || err}`);
     return null;
   }
 }
@@ -97,7 +97,7 @@ function isYoutubeId(id) {
 
 function formatMusicTitle(track) {
   const title = track?.title || "---";
-  return title.length > 20 ? title.slice(0, 20) + "..." : title;
+  return title.length > 20 ? title.slice(0, 20) + "…" : title;
 }
 
 function musicCoverUrl(track) {
@@ -269,7 +269,7 @@ function openMusicMenu(card, menu) {
 function syncTaskLabel(task) {
   const progress = Number.isFinite(task?.progress_pct) ? ` ${Math.round(task.progress_pct)}%` : "";
   const status = task?.status || "queued";
-  const label = task?.label || "Sync";
+  const label = task?.label || "Синхронизация";
   return `${label}: ${status}${progress}`;
 }
 
@@ -287,14 +287,14 @@ async function renderMusicMenu(body, musicId) {
 
   body.innerHTML = `
     <div class="music-mode-selector">
-      <button type="button" class="music-mode-btn ${activeMode === 'normal' ? 'active' : ''}" data-mode="normal">NORMAL</button>
-      <button type="button" class="music-mode-btn ${activeMode === 'shuffle' ? 'active' : ''}" data-mode="shuffle">SHUFFLE</button>
+      <button type="button" class="music-mode-btn ${activeMode === 'normal' ? 'active' : ''}" data-mode="normal">ОБЫЧНЫЙ</button>
+      <button type="button" class="music-mode-btn ${activeMode === 'shuffle' ? 'active' : ''}" data-mode="shuffle">ПЕРЕМЕШАТЬ</button>
       <button type="button" class="music-mode-btn ${activeMode === 'ai_dj' ? 'active' : ''}" data-mode="ai_dj">AI DJ</button>
     </div>
     <div class="music-ai-panel">
       <div class="music-ai-status-bar">
-        <span class="music-ai-count">Ready: 0 / 0</span>
-        <button type="button" class="music-ai-graph-btn">Graph</button>
+        <span class="music-ai-count">Готово: 0 / 0</span>
+        <button type="button" class="music-ai-graph-btn">Граф</button>
       </div>
       <div class="ai-dj-graph-container" style="display: none; position: relative; width: 100%; height: 230px; margin-top: 8px; border-radius: 12px; background: rgb(var(--bg-surface-deep-rgb)); border: 1px solid rgba(var(--bg-elev-rgb), 0.08); overflow: hidden; user-select: none; touch-action: none;">
         <canvas class="ai-dj-graph-canvas" style="width: 100%; height: 100%; display: block; cursor: grab;"></canvas>
@@ -303,16 +303,16 @@ async function renderMusicMenu(body, musicId) {
           <div class="ai-dj-tooltip-meta" style="font-size: 10px; color: rgba(var(--fg-rgb), 0.55); margin-top: 2px;"></div>
         </div>
         <div class="ai-dj-graph-hint" style="position: absolute; bottom: 6px; left: 8px; font-size: 9px; color: rgba(var(--fg-rgb), 0.3); pointer-events: none; font-family: var(--font-mono,monospace);">
-          Drag to Pan • Wheel to Zoom • Click to Play
+          Перетаскивание — сдвиг • колесо — масштаб • клик — воспроизведение
         </div>
         <div class="ai-dj-graph-loading" style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(var(--scrim-rgb), 0.85); color: rgba(var(--bg-elev-rgb), 0.85); font-size: 11px; font-family: var(--font-mono,monospace);">
-          Computing Graph...
+          Построение графа…
         </div>
       </div>
-      <button type="button" class="music-ai-index-btn">Index Library</button>
+      <button type="button" class="music-ai-index-btn">Индексировать библиотеку</button>
       <div class="music-ai-progress-wrap" style="display: none;">
         <div class="music-ai-progress-info">
-          <span class="music-ai-progress-track">Analyzing...</span>
+          <span class="music-ai-progress-track">Анализ…</span>
           <span class="music-ai-progress-pct">0%</span>
         </div>
         <div class="music-ai-progress-bar">
@@ -450,7 +450,7 @@ async function renderMusicMenu(body, musicId) {
       const analyzed = typeof status?.analyzed_count === "number" ? status.analyzed_count : 0;
 
       if (countEl) {
-        countEl.textContent = reachable > 0 ? `Ready: ${analyzed} / ${reachable}` : "0 tracks";
+        countEl.textContent = reachable > 0 ? `Готово: ${analyzed} / ${reachable}` : "0 tracks";
       }
 
       // Update indicator on widget if available
@@ -461,7 +461,7 @@ async function renderMusicMenu(body, musicId) {
       if (status?.is_analyzing) {
         if (indexBtn) {
           indexBtn.disabled = true;
-          indexBtn.textContent = "Analyzing...";
+          indexBtn.textContent = "Анализ…";
         }
         if (progressWrap && (!graphContainer || graphContainer.style.display === "none")) {
           progressWrap.style.display = "flex";
@@ -491,9 +491,9 @@ async function renderMusicMenu(body, musicId) {
         if (indexBtn) {
           indexBtn.disabled = false;
           if (reachable > 0 && analyzed >= reachable) {
-            indexBtn.textContent = "Re-analyze Library";
+            indexBtn.textContent = "Повторный анализ библиотеки";
           } else {
-            indexBtn.textContent = "Index Library";
+            indexBtn.textContent = "Индексировать библиотеку";
           }
         }
         if (modelState !== "hidden") {
@@ -576,16 +576,16 @@ async function renderMusicMenu(body, musicId) {
     const reachable = (lastStatus && typeof lastStatus.reachable_count === "number") ? lastStatus.reachable_count : (lastStatus?.track_count || 0);
     const isFullReanalysis = reachable > 0 && (lastStatus?.analyzed_count || 0) >= reachable;
     indexBtn.disabled = true;
-    indexBtn.textContent = "Analyzing...";
+    indexBtn.textContent = "Анализ…";
     if (progressWrap) progressWrap.style.display = "flex";
-    if (progressTrack) progressTrack.textContent = isFullReanalysis ? "Re-analyzing library..." : "Scanning library...";
+    if (progressTrack) progressTrack.textContent = isFullReanalysis ? "Повторный анализ библиотеки…" : "Сканирование библиотеки…";
     if (progressPct) progressPct.textContent = "0%";
     if (progressFill) progressFill.style.width = "0%";
 
     try {
       const command = isFullReanalysis ? "reanalyze_tracks" : "analyze_tracks";
       const analyzed = await invoke(command);
-      if (progressTrack) progressTrack.textContent = `Completed (${analyzed} tracks)`;
+      if (progressTrack) progressTrack.textContent = `Готово (треков: ${analyzed})`;
       if (progressPct) progressPct.textContent = "100%";
       if (progressFill) progressFill.style.width = "100%";
       await updateAiDjStatus();
@@ -596,9 +596,9 @@ async function renderMusicMenu(body, musicId) {
       }, 2500);
     } catch (err) {
       console.error("Analysis command failed:", err);
-      if (progressTrack) progressTrack.textContent = `Error: ${err.message || err}`;
+      if (progressTrack) progressTrack.textContent = `Ошибка: ${err.message || err}`;
       indexBtn.disabled = false;
-      indexBtn.textContent = "Retry Index";
+      indexBtn.textContent = "Повторить индексацию";
       setTimeout(() => {
         if (progressWrap && body.isConnected) {
           progressWrap.style.display = "none";
@@ -620,16 +620,16 @@ async function renderMusicMenu(body, musicId) {
       const pct = Math.min(100, Math.round((current / total) * 100));
       if (progressPct) progressPct.textContent = `${pct}%`;
       if (progressFill) progressFill.style.width = `${pct}%`;
-      if (countEl) countEl.textContent = `Ready: ${current} / ${total}`;
+      if (countEl) countEl.textContent = `Готово: ${current} / ${total}`;
     }
     if (indexBtn && !indexBtn.disabled) {
       indexBtn.disabled = true;
-      indexBtn.textContent = "Analyzing...";
+      indexBtn.textContent = "Анализ…";
     }
     if (current >= total && total > 0) {
       if (indexBtn) {
         indexBtn.disabled = false;
-        indexBtn.textContent = "Re-analyze Library";
+        indexBtn.textContent = "Повторный анализ библиотеки";
       }
       setTimeout(() => {
         if (progressWrap && body.isConnected) progressWrap.style.display = "none";
@@ -881,7 +881,7 @@ async function renderMusicMenu(body, musicId) {
         return;
       }
       if (!data || !data.nodes || data.nodes.length === 0) {
-        if (loadingOverlay) loadingOverlay.textContent = "No analyzed tracks yet";
+        if (loadingOverlay) loadingOverlay.textContent = "Проанализированных треков пока нет";
         return;
       }
       graphData = data;
@@ -1055,7 +1055,7 @@ async function renderMusicMenu(body, musicId) {
       simAnimId = requestAnimationFrame(step);
     } catch (err) {
       console.error("Failed to load AI DJ graph:", err);
-      if (loadingOverlay) loadingOverlay.textContent = "Failed to load graph";
+      if (loadingOverlay) loadingOverlay.textContent = "Не удалось загрузить граф";
     }
   };
 
@@ -1094,7 +1094,7 @@ async function renderMusicMenu(body, musicId) {
         canvas.style.cursor = "pointer";
         if (tooltip && tooltipTitle && tooltipMeta) {
           tooltipTitle.textContent = hoveredNode.title || hoveredNode.id;
-          const artist = hoveredNode.artist || "Unknown Artist";
+          const artist = hoveredNode.artist || "Неизвестный исполнитель";
           const bpm = hoveredNode.bpm ? ` · ${Math.round(hoveredNode.bpm)} BPM` : "";
           const key = hoveredNode.key ? ` · ${hoveredNode.key}` : "";
           tooltipMeta.textContent = `${artist}${bpm}${key}`;
@@ -1290,7 +1290,7 @@ function renderMusicPlayer(card, widgetId) {
     <div class="music-popup music-library-popup">
       <div class="music-popup-header">
         <div class="music-popup-info">
-          <div class="music-popup-title">LIBRARY</div>
+          <div class="music-popup-title">БИБЛИОТЕКА</div>
           <div class="music-popup-desc">Ваши плейлисты</div>
         </div>
         <button type="button" class="music-popup-close" aria-label="Закрыть">
@@ -1305,7 +1305,7 @@ function renderMusicPlayer(card, widgetId) {
     <div class="music-popup music-settings-popup">
       <div class="music-popup-header">
         <div class="music-popup-info">
-          <div class="music-popup-title">SETTINGS</div>
+          <div class="music-popup-title">НАСТРОЙКИ</div>
           <div class="music-popup-desc">Параметры воспроизведения</div>
         </div>
         <button type="button" class="music-popup-close" aria-label="Закрыть">
@@ -1569,8 +1569,8 @@ async function startMusicMetadataLoop(card) {
     if (playerError) {
       playing = false;
       card._isPlaying = false;
-      if (titleEl) titleEl.textContent = "mpv error";
-      showDebugMessage(`Music: ${playerError}`);
+      if (titleEl) titleEl.textContent = "Ошибка mpv";
+      showDebugMessage(`Музыка: ${playerError}`);
       if (errorEl) {
         errorEl.textContent = playerError;
         errorEl.style.display = "block";
@@ -1707,7 +1707,7 @@ async function renderMusicDashboard(body, widgetId, options = {}) {
                 <path d="M12 5v14M5 12h14"/>
               </svg>
             </div>
-            <span class="shortcut-name">Add</span>
+            <span class="shortcut-name">Добавить</span>
           </button>
           ${playlists.map((p, i) => `
             <button class="shortcut-item music-playlist-item" data-idx="${i}" data-id="${p.id}" style="width: auto; height: auto; background: none; border: none; padding: 0; cursor: pointer;">
@@ -1730,16 +1730,16 @@ async function renderMusicDashboard(body, widgetId, options = {}) {
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
           </svg>
-          <span>Back</span>
+          <span>Назад</span>
         </button>
-        <span class="music-add-title">Add Playlist</span>
+        <span class="music-add-title">Добавить плейлист</span>
       </div>
       <form class="music-add-form">
         <div class="music-add-input-wrap">
           <input class="music-sync-url" type="text" placeholder="YouTube Music URL" autocomplete="off" spellcheck="false" data-prevent-escape-surface-close="true" />
-          <button class="music-sync-submit" type="submit">Sync</button>
+          <button class="music-sync-submit" type="submit">Синхронизировать</button>
         </div>
-        <div class="music-sync-hint">Paste YouTube Music playlist URL to sync offline tracks</div>
+        <div class="music-sync-hint">Вставьте ссылку на плейлист YouTube Music, чтобы синхронизировать треки для офлайн-прослушивания</div>
       </form>
       <div class="music-sync-tasks" style="display: none;"></div>
     </div>
@@ -1847,7 +1847,7 @@ async function renderMusicDashboard(body, widgetId, options = {}) {
     if (!url) return;
     if (syncBtn) {
       syncBtn.disabled = true;
-      syncBtn.textContent = "...";
+      syncBtn.textContent = "…";
     }
     try {
       await invoke("sync_url", { url, name: null });
@@ -1856,14 +1856,14 @@ async function renderMusicDashboard(body, widgetId, options = {}) {
       musicTrackCacheMissRetried = false;
       didQueueSync = true;
       if (urlInput) urlInput.value = "";
-      showDebugMessage("Sync queued");
+      showDebugMessage("Синхронизация поставлена в очередь");
       await renderTasks();
     } catch (err) {
-      showDebugMessage(`Sync: ${err.message || err}`);
+      showDebugMessage(`Синхронизация: ${err.message || err}`);
     } finally {
       if (syncBtn) {
         syncBtn.disabled = false;
-        syncBtn.textContent = "Sync";
+        syncBtn.textContent = "Синхронизировать";
       }
     }
   });
@@ -2145,10 +2145,10 @@ function musicPlaylistName(playlist, index) {
     const url = new URL(source);
     const listId = url.searchParams.get("list");
     const videoId = url.searchParams.get("v");
-    if (listId) return `Playlist ${suffix}`;
-    if (videoId) return `Track ${index + 1}`;
+    if (listId) return `Плейлист ${suffix}`;
+    if (videoId) return `Трек ${index + 1}`;
   } catch {}
-  return `Playlist ${index + 1}`;
+  return `Плейлист ${index + 1}`;
 }
 
 function resetMusicIntervals() {

@@ -14,5 +14,10 @@
       "default": "aqua",
       "role": "player"
     }
-  ]
+  ],
+  "pack": {
+    "id": "media",
+    "label": "Медиа"
+  },
+  "backend": true
 }

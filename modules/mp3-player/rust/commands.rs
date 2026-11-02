@@ -222,6 +222,25 @@ impl unidtk_api::Module for Mp3PlayerModule {
         }
         Ok(())
     }
+
+    /// `begin_shutdown` is one-way, so the switch stops the work by hand and
+    /// keeps the state the host already manages.
+    fn suspend(&self) -> Result<(), String> {
+        SUSPENDED.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(state) = self.state() {
+            state.set_visualizer_enabled(false)?;
+            let _ = state.player.set_pause(true);
+        }
+        Ok(())
+    }
+
+    fn resume(&self, _ctx: unidtk_api::ModuleContext) -> Result<(), String> {
+        SUSPENDED.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(state) = self.state() {
+            state.set_visualizer_enabled(state.config.get().visualizer_enabled)?;
+        }
+        Ok(())
+    }
 }
 
 // --- Config -----------------------------------------------------------------
@@ -862,6 +881,12 @@ pub async fn check_track_finished(state: &AppState) -> Result<bool, String> {
 static IS_ANALYZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 static IS_SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The user switched the module off: background jobs skip their work.
+pub fn is_suspended() -> bool {
+    SUSPENDED.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// Латч выхода: останавливает цикл анализа, не дожидаясь его (никаких join'ов —
 /// выход должен укладываться в бюджет завершения Windows).

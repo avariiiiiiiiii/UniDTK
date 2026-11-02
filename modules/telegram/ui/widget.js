@@ -726,13 +726,13 @@ function telegramEventMessage(payload) {
 function telegramPreviewFromMessage(message) {
   if (!message) return "";
   if (message.text) return String(message.text);
-  if (message.sticker) return "Sticker";
+  if (message.sticker) return "Стикер";
   const kind = message.attachmentKind;
-  if (kind === "photo") return message.attachment || "Photo";
+  if (kind === "photo") return message.attachment || "Фото";
   if (kind === "animation") return message.attachment || "GIF";
-  if (kind === "video") return message.attachment || "Video";
-  if (kind === "audio") return message.attachment || "Audio";
-  if (kind === "voice") return "Voice message";
+  if (kind === "video") return message.attachment || "Видео";
+  if (kind === "audio") return message.attachment || "Аудио";
+  if (kind === "voice") return "Голосовое сообщение";
   if (message.attachment) return String(message.attachment);
   if (kind) return String(kind);
   return "";
@@ -1311,7 +1311,7 @@ function wireTelegramMessageRow(card, widgetId, row, chat) {
         return true;
       })();
       if (opened === false && chat?.id) {
-        telegramRuntime.messagesError.set(telegramMessageCacheKey(chat.id), "Could not open file (blocked by app permissions)");
+        telegramRuntime.messagesError.set(telegramMessageCacheKey(chat.id), "Не удалось открыть файл (заблокировано правами приложения)");
         updateTelegramWidget(card, widgetId);
       }
     });
@@ -1328,7 +1328,7 @@ function wireTelegramAnimationControls(root) {
     const key = wrap.dataset.animationKey || "";
     video._tgUserPaused = telegramRuntime.pausedAnimations.has(key);
     const setButtonState = (paused) => {
-      button.setAttribute("aria-label", paused ? "Play animation" : "Pause animation");
+      button.setAttribute("aria-label", paused ? "Воспроизвести анимацию" : "Пауза анимации");
       button.innerHTML = paused
         ? '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'
         : '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>';
@@ -1462,7 +1462,7 @@ function markTelegramMessageFailedDom(card, chatId, messageId, error) {
   if (!row.querySelector(".tg-send-failed")) {
     const tip = document.createElement("span");
     tip.className = "tg-send-failed";
-    tip.textContent = error ? `failed to send: ${error}` : "failed to send";
+    tip.textContent = error ? `не отправлено: ${error}` : "не отправлено";
     row.appendChild(tip);
   }
   if (card._tgSectionCache) card._tgSectionCache.thread = null;
@@ -1835,15 +1835,15 @@ function setupTelegramListeners(card, widgetId) {
 function telegramConnectionText(state) {
   switch (state) {
     case "waiting_for_network":
-      return "No network";
+      return "Нет сети";
     case "connecting_to_proxy":
-      return "Connecting via proxy…";
+      return "Подключение через прокси…";
     case "connecting":
-      return "Connecting…";
+      return "Подключение…";
     case "updating":
-      return "Syncing…";
+      return "Синхронизация…";
     default:
-      return "Connecting…";
+      return "Подключение…";
   }
 }
 
@@ -1870,26 +1870,26 @@ function updateTelegramConnectionStrip(card, state) {
 function telegramChatListState(chats) {
   if (telegramRuntime.chatListView === "archive") {
     if (telegramRuntime.archivedChatsError) {
-      return `<div class="tg-state">Archive failed<br><small>${escapeHtml(telegramRuntime.archivedChatsError)}</small></div>`;
+      return `<div class="tg-state">Не удалось загрузить архив<br><small>${escapeHtml(telegramRuntime.archivedChatsError)}</small></div>`;
     }
     if (telegramRuntime.loadingArchivedChats && !telegramRuntime.archivedChatsLoaded) {
-      return `<div class="tg-state loading">Loading archive</div>`;
+      return `<div class="tg-state loading">Загрузка архива</div>`;
     }
     if (telegramRuntime.archivedChatsLoaded && !chats.length) {
-      return `<div class="tg-state">Archive is empty</div>`;
+      return `<div class="tg-state">Архив пуст</div>`;
     }
   }
   if (telegramRuntime.statusLoaded && !telegramRuntime.status?.authorized) {
-    return `<div class="tg-state">Sign in to load chats</div>`;
+    return `<div class="tg-state">Войдите, чтобы загрузить чаты</div>`;
   }
   if (telegramRuntime.chatsError) {
-    return `<div class="tg-state">Chat sync failed<br><small>${escapeHtml(telegramRuntime.chatsError)}</small></div>`;
+    return `<div class="tg-state">Не удалось синхронизировать чаты<br><small>${escapeHtml(telegramRuntime.chatsError)}</small></div>`;
   }
   if (telegramRuntime.loadingChats && !telegramRuntime.chatsLoaded) {
     return telegramSkeletonRows(10);
   }
   if (telegramRuntime.chatsLoaded && !chats.length) {
-    return `<div class="tg-state">No chats yet</div>`;
+    return `<div class="tg-state">Чатов пока нет</div>`;
   }
   return "";
 }
@@ -1897,10 +1897,10 @@ function telegramChatListState(chats) {
 function buildAccountSwitcherHtml(accounts, activeAccountId) {
   if (!accounts || !accounts.length) return "";
   const active = accounts.find((a) => a.id === activeAccountId) || accounts[0];
-  const name = active?.name || "Account";
+  const name = active?.name || "Аккаунт";
   return `
     <div class="tg-account-switcher">
-      <button type="button" class="tg-account-btn" aria-label="Switch account">
+      <button type="button" class="tg-account-btn" aria-label="Сменить аккаунт">
         <span class="tg-account-btn-name">${escapeHtml(name)}</span>
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M6 9l6 6 6-6"/>
@@ -1915,7 +1915,7 @@ function buildAccountSwitcherHtml(accounts, activeAccountId) {
                 ${acc.phone ? `<small class="tg-account-item-sub">${escapeHtml(acc.phone)}</small>` : acc.username ? `<small class="tg-account-item-sub">@${escapeHtml(acc.username)}</small>` : ""}
               </div>
               ${acc.id === activeAccountId ? '<span class="tg-account-check">✓</span>' : `
-                <button type="button" class="tg-account-remove-btn" data-acc-id="${escapeHtml(acc.id)}" aria-label="Remove account">&times;</button>
+                <button type="button" class="tg-account-remove-btn" data-acc-id="${escapeHtml(acc.id)}" aria-label="Удалить аккаунт">&times;</button>
               `}
             </div>
           `).join("")}
@@ -1925,7 +1925,7 @@ function buildAccountSwitcherHtml(accounts, activeAccountId) {
             <line x1="12" y1="5" x2="12" y2="19"></line>
             <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
-          Add Account
+          Добавить аккаунт
         </button>
       </div>
     </div>
@@ -1943,7 +1943,7 @@ function buildRailHtml(chats, activeId) {
           </button>
         `).join("")}
         ${showRailStatus ? `
-          <button type="button" class="tg-rail-status" aria-label="Telegram: sign in required">
+          <button type="button" class="tg-rail-status" aria-label="Telegram: требуется вход">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 4L3 11.5l7 2.4L13 20l3-14-7.2 6.8"/>
             </svg>
@@ -1975,8 +1975,8 @@ function buildChatListToolsHtml() {
   const isArchive = telegramRuntime.chatListView === "archive";
   return `
     <div class="tg-chat-tools">
-      <input class="tg-chat-search" type="text" aria-label="Поиск чатов" placeholder="Search" value="${escapeHtml(telegramRuntime.chatFilter || "")}" />
-      <button type="button" class="tg-archive-toggle${isArchive ? " active" : ""}" data-tg-action="toggle-archive" aria-label="${isArchive ? "Back to chats" : "Open archive"}" aria-pressed="${isArchive}">
+      <input class="tg-chat-search" type="text" aria-label="Поиск чатов" placeholder="Поиск" value="${escapeHtml(telegramRuntime.chatFilter || "")}" />
+      <button type="button" class="tg-archive-toggle${isArchive ? " active" : ""}" data-tg-action="toggle-archive" aria-label="${isArchive ? "Назад к чатам" : "Открыть архив"}" aria-pressed="${isArchive}">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           ${isArchive
             ? '<path d="M19 12H5M12 19l-7-7 7-7"/>'
@@ -2010,7 +2010,7 @@ function buildForumTopicsListHtml(chat) {
   `;
 
   if (loading && topics.length === 0) {
-    return headHtml + `<div class="tg-state loading">Загрузка тем...</div>`;
+    return headHtml + `<div class="tg-state loading">Загрузка тем…</div>`;
   }
   if (topics.length === 0) {
     return headHtml + `<div class="tg-state">Нет тем</div>`;
@@ -2020,7 +2020,7 @@ function buildForumTopicsListHtml(chat) {
       || (topic.subchatId && String(topic.subchatId) === String(activeChatId));
     return `
       <button type="button" class="tg-topic-row${isActive ? " active" : ""}"
-        aria-label="${escapeHtml(topic.title || "Topic")}"
+        aria-label="${escapeHtml(topic.title || "Тема")}"
         aria-pressed="${!!isActive}"
         data-chat-id="${escapeHtml(chat.id)}"
         data-topic-id="${escapeHtml(topic.id)}"
@@ -2033,7 +2033,7 @@ function buildForumTopicsListHtml(chat) {
         </span>
         <span class="tg-row-main">
           <span class="tg-row-title">
-            <span class="tg-row-title-text">${escapeHtml(topic.title || "Topic")}</span>
+            <span class="tg-row-title-text">${escapeHtml(topic.title || "Тема")}</span>
           </span>
           <span class="tg-row-preview">${escapeHtml(topic.lastMessage || "")}</span>
         </span>
@@ -2284,7 +2284,7 @@ function telegramMessageRowHtml(chat, message, prevMessage, messageMap, isAlbumM
           ${message.text ? `<span class="tg-text${bigEmoji ? " tg-big-emoji" : ""}"${bigEmoji ? ` data-count="${emojiCount}"` : ""}>${tgBuildFormattedHtml(message.text, message.entities)}</span>` : ""}
           ${telegramAttachmentHtml(message, chat?.id)}
           ${message.sticker ? `<b class="tg-sticker">${escapeHtml(message.sticker)}</b>` : ""}
-          ${failed ? `<span class="tg-send-failed">${escapeHtml(message.sendError ? `failed to send: ${message.sendError}` : "failed to send")}</span>` : ""}
+          ${failed ? `<span class="tg-send-failed">${escapeHtml(message.sendError ? `не отправлено: ${message.sendError}` : "не отправлено")}</span>` : ""}
           ${reactionsHtml}
           <small>${escapeHtml(formatTelegramTime(message.time))}</small>
           ${inlineKbHtml}
@@ -2352,7 +2352,7 @@ function buildMessagesInnerHtml(chat, messages) {
     !(historyExhausted && historyExhausted.has(stateKey));
   const messageMap = new Map(listToRender.map((m) => [String(m.id), m]));
   return `
-      ${showLoadEarlier ? `<button type="button" class="tg-load-earlier">Earlier messages</button>` : ""}
+      ${showLoadEarlier ? `<button type="button" class="tg-load-earlier">Более ранние сообщения</button>` : ""}
       ${messageState || renderTelegramMessageRows(chat, listToRender, messageMap)}
     `;
 }
@@ -2385,13 +2385,13 @@ function telegramMessageState(chat, messages) {
   const stateKey = telegramMessageCacheKey(chat.id);
   const error = telegramRuntime.messagesError.get(stateKey);
   if (error) {
-    return `<div class="tg-state">Messages failed<br><small>${escapeHtml(error)}</small></div>`;
+    return `<div class="tg-state">Не удалось загрузить сообщения<br><small>${escapeHtml(error)}</small></div>`;
   }
   if (telegramRuntime.loadingMessages.has(stateKey) && !telegramRuntime.messagesLoaded.has(stateKey)) {
-    return `<div class="tg-state loading">Loading messages</div>`;
+    return `<div class="tg-state loading">Загрузка сообщений</div>`;
   }
   if (telegramRuntime.messagesLoaded.has(stateKey) && !messages.length) {
-    return `<div class="tg-state">No messages here</div>`;
+    return `<div class="tg-state">Сообщений нет</div>`;
   }
   return "";
 }
@@ -2552,7 +2552,7 @@ function telegramSetActiveChat(card, widgetId, chatId, originEl = null) {
   const canMorph = isExpanded && panelEl && oldThread && (originEl instanceof HTMLElement) && oldThread.offsetWidth > 0;
 
   const chats = telegramVisibleChats();
-  const active = chats.find((c) => c.id === chatId) || { id: chatId, title: "Chat", initials: "?" };
+  const active = chats.find((c) => c.id === chatId) || { id: chatId, title: "Чат", initials: "?" };
   const msgKey = telegramMessageCacheKey(chatId);
   refreshTelegramMessages(card, widgetId, chatId, true);
   const activeMessages = telegramRuntime.messages.get(msgKey) || [];
@@ -2840,7 +2840,7 @@ function loadForumTopics(chatId) {
       const info = t.info || {};
       const subchatId = info.subchat_id || t.subchat_id;
       const threadId = info.forum_topic_id || info.message_thread_id || t.forum_topic_id || t.message_thread_id || t.id || subchatId;
-      const title = info.name || t.name || t.title || "General";
+      const title = info.name || t.name || t.title || "Общая";
       let lastText = "";
       if (t.last_message) {
         lastText = t.last_message.content?.text?.text || t.last_message.content?.caption?.text || "";
@@ -3426,10 +3426,10 @@ function updateTelegramComposerBars(card, widgetId, body, active) {
     }
     replyEl.innerHTML = `
       <div class="tg-reply-bar-content">
-        <span class="tg-reply-bar-author">${escapeHtml(replyMsg.from || "Message")}</span>
-        <span class="tg-reply-bar-text">${escapeHtml(replyMsg.text || "...")}</span>
+        <span class="tg-reply-bar-author">${escapeHtml(replyMsg.from || "Сообщение")}</span>
+        <span class="tg-reply-bar-text">${escapeHtml(replyMsg.text || "…")}</span>
       </div>
-      <button type="button" class="tg-reply-bar-close" aria-label="Cancel reply">×</button>
+      <button type="button" class="tg-reply-bar-close" aria-label="Отменить ответ">×</button>
     `;
   } else if (replyEl) {
     replyEl.remove();
@@ -3447,10 +3447,10 @@ function updateTelegramComposerBars(card, widgetId, body, active) {
     }
     editEl.innerHTML = `
       <div class="tg-reply-bar-content">
-        <span class="tg-reply-bar-author">Editing</span>
-        <span class="tg-reply-bar-text">${escapeHtml(editMsg.text || "...")}</span>
+        <span class="tg-reply-bar-author">Редактирование</span>
+        <span class="tg-reply-bar-text">${escapeHtml(editMsg.text || "…")}</span>
       </div>
-      <button type="button" class="tg-edit-bar-close" aria-label="Cancel edit">×</button>
+      <button type="button" class="tg-edit-bar-close" aria-label="Отменить редактирование">×</button>
     `;
   } else if (editEl) {
     editEl.remove();
@@ -3466,7 +3466,7 @@ function updateTelegramComposerBars(card, widgetId, body, active) {
       pendingEl.dataset.path = pendingFile;
       pendingEl.innerHTML = `
         <span class="tg-pending-file-name" aria-label="${escapeHtml(pendingFile)}">${escapeHtml(pendingFileName)}</span>
-        <button type="button" class="tg-pending-file-remove" aria-label="Remove attached file">×</button>
+        <button type="button" class="tg-pending-file-remove" aria-label="Убрать вложение">×</button>
       `;
       const row = composer.querySelector(".tg-composer-row");
       if (row) composer.insertBefore(pendingEl, row);
@@ -3486,7 +3486,7 @@ function updateTelegramComposerBars(card, widgetId, body, active) {
   // 4. Placeholder
   const input = composer.querySelector(".tg-input");
   if (input) {
-    const desiredPlaceholder = pendingFile ? "Add a caption..." : editMsg ? "Edit message..." : "Message";
+    const desiredPlaceholder = pendingFile ? "Добавьте подпись…" : editMsg ? "Редактировать сообщение…" : "Сообщение";
     if (input.placeholder !== desiredPlaceholder) {
       input.placeholder = desiredPlaceholder;
     }
@@ -3584,7 +3584,7 @@ function updateTelegramWidget(card, widgetId) {
   // Forum chat with no topic selected: never show the general chat in the
   // thread — show a hint instead (topics live in the topics column).
   const showTopicHint = !showAuth && showForumTopics && active?.id === forumChat?.id && !telegramForumThreadId(forumChat.id);
-  const effectiveThreadHtml = showTopicHint ? '<div class="tg-state">Select a topic</div>' : threadHtml;
+  const effectiveThreadHtml = showTopicHint ? '<div class="tg-state">Выберите тему</div>' : threadHtml;
   const cache = card._tgSectionCache || (card._tgSectionCache = { rail: null, list: null, thread: null, topics: null, topicsChatId: null });
 
   const railEl = body.querySelector(".tg-rail");
@@ -3680,7 +3680,7 @@ async function openTelegramLightbox(src, originEl = null) {
     <div class="tg-lightbox-content">
       <img src="${escapeHtml(src)}" alt="" class="tg-lightbox-img" draggable="false">
     </div>
-    <button type="button" class="tg-lightbox-close" aria-label="Close">
+    <button type="button" class="tg-lightbox-close" aria-label="Закрыть">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <line x1="18" y1="6" x2="6" y2="18"></line>
         <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -3743,7 +3743,7 @@ function openTelegramForwardPicker(card, widgetId, fromChatId, messageId, previe
   overlay.innerHTML = `
     <div class="tg-forward-modal">
       <div class="tg-forward-header">
-        <strong>Forward message</strong>
+        <strong>Переслать сообщение</strong>
         <small>${escapeHtml(previewText.slice(0, 60))}</small>
       </div>
       <div class="tg-forward-list">
@@ -3754,7 +3754,7 @@ function openTelegramForwardPicker(card, widgetId, fromChatId, messageId, previe
           </button>
         `).join("")}
       </div>
-      <button type="button" class="tg-forward-close">Cancel</button>
+      <button type="button" class="tg-forward-close">Отмена</button>
     </div>
   `;
   const modal = overlay.querySelector(".tg-forward-modal");
@@ -3819,7 +3819,7 @@ function openTelegramSendFilePicker(card, widgetId, filePath) {
   overlay.innerHTML = `
     <div class="tg-forward-modal">
       <div class="tg-forward-header">
-        <strong>Send file to...</strong>
+        <strong>Отправить файл в…</strong>
         <small>${escapeHtml(fileName)}</small>
       </div>
       <div class="tg-forward-list">
@@ -3830,7 +3830,7 @@ function openTelegramSendFilePicker(card, widgetId, filePath) {
           </button>
         `).join("")}
       </div>
-      <button type="button" class="tg-forward-close">Cancel</button>
+      <button type="button" class="tg-forward-close">Отмена</button>
     </div>
   `;
   const modal = overlay.querySelector(".tg-forward-modal");
@@ -3968,14 +3968,14 @@ function openTelegramMessageMenu(card, widgetId, body, msgEl, x, y) {
 
   // Reply action
   items.push({
-    label: "Reply",
+    label: "Ответить",
     onClick: () => {
       if (!chatId) return;
       if (!telegramRuntime.replyMessage) telegramRuntime.replyMessage = new Map();
       telegramRuntime.replyMessage.set(chatId, {
         id: msgId,
-        text: fullText || messageObj?.attachment || "Message",
-        from: messageObj?.from || "User",
+        text: fullText || messageObj?.attachment || "Сообщение",
+        from: messageObj?.from || "Пользователь",
       });
       updateTelegramWidget(card, widgetId);
       const composer = body.querySelector(".tg-input");
@@ -3986,7 +3986,7 @@ function openTelegramMessageMenu(card, widgetId, body, msgEl, x, y) {
   // Edit action (only for user's own text messages)
   if (isMine && fullText) {
     items.push({
-      label: "Edit",
+      label: "Редактировать",
       onClick: () => {
         if (!chatId) return;
         if (!telegramRuntime.editMessage) telegramRuntime.editMessage = new Map();
@@ -4004,10 +4004,10 @@ function openTelegramMessageMenu(card, widgetId, body, msgEl, x, y) {
 
   // Copy actions
   if (selectedText) {
-    items.push({ label: "Copy selection", onClick: () => copyTelegramText(selectedText) });
+    items.push({ label: "Копировать выделенное", onClick: () => copyTelegramText(selectedText) });
   }
   if (fullText && fullText !== selectedText) {
-    items.push({ label: "Copy text", onClick: () => copyTelegramText(fullText) });
+    items.push({ label: "Копировать текст", onClick: () => copyTelegramText(fullText) });
   }
 
   // Pin / Unpin action
@@ -4020,7 +4020,7 @@ function openTelegramMessageMenu(card, widgetId, body, msgEl, x, y) {
 
   if (isCurrentlyPinned) {
     items.push({
-      label: "Unpin message",
+      label: "Открепить сообщение",
       onClick: async () => {
         if (!chatId || !msgId) return;
         await handleUnpinTelegramMessage(card, widgetId, chatId, msgId);
@@ -4029,7 +4029,7 @@ function openTelegramMessageMenu(card, widgetId, body, msgEl, x, y) {
     });
   } else {
     items.push({
-      label: "Pin message",
+      label: "Закрепить сообщение",
       onClick: async () => {
         if (!chatId || !msgId) return;
         try {
@@ -4053,15 +4053,15 @@ function openTelegramMessageMenu(card, widgetId, body, msgEl, x, y) {
 
   // Forward action
   items.push({
-    label: "Forward",
+    label: "Переслать",
     onClick: () => {
-      openTelegramForwardPicker(card, widgetId, chatId, msgId, fullText || messageObj?.attachment || "Message");
+      openTelegramForwardPicker(card, widgetId, chatId, msgId, fullText || messageObj?.attachment || "Сообщение");
     },
   });
 
   // Delete action
   items.push({
-    label: "Delete message",
+    label: "Удалить сообщение",
     danger: true,
     onClick: async () => {
       if (!chatId || !msgId) return;
@@ -4097,18 +4097,18 @@ function openTelegramChatMenu(card, widgetId, chatId, x, y) {
   const archived = telegramRuntime.chatListView === "archive";
   openTelegramContextMenu(x, y, [
     {
-      label: "Open",
+      label: "Открыть",
       onClick: () => {
         telegramSetActiveChat(card, widgetId, chatId);
         if (!card.classList.contains("expanded")) toggleTelegramWidget(card, widgetId);
       },
     },
     {
-      label: archived ? "Unarchive" : "Archive",
+      label: archived ? "Вернуть из архива" : "В архив",
       onClick: () => setTelegramChatArchived(card, widgetId, chatId, !archived),
     },
     {
-      label: "Mark as read",
+      label: "Отметить как прочитанное",
       onClick: () => {
         try {
           telegramRuntime.lastMarkedRead.delete(chatId);
@@ -4126,7 +4126,7 @@ function openTelegramChatMenu(card, widgetId, chatId, x, y) {
       },
     },
     {
-      label: "Clear history",
+      label: "Очистить историю",
       danger: true,
       onClick: async () => {
         try {
@@ -4139,7 +4139,7 @@ function openTelegramChatMenu(card, widgetId, chatId, x, y) {
       },
     },
     {
-      label: "Delete chat",
+      label: "Удалить чат",
       danger: true,
       onClick: async () => {
         try {
@@ -4461,7 +4461,7 @@ function wireTelegramComposer(card, widgetId, body, active, capturedComposer = {
     const threadId = boundThreadId;
     const generation = telegramRuntime.accountGeneration;
     
-    const path = await invoke("plugin:dialog|open", { options: { multiple: false, title: "Send file" } });
+    const path = await invoke("plugin:dialog|open", { options: { multiple: false, title: "Отправить файл" } });
     if (!path || !isCurrent()) return;
     const composer = body.querySelector(".tg-input");
     const draft = (composer?.value || "").trim();
@@ -4665,10 +4665,10 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
         <span class="tg-thread-avatar" data-initials="${escapeHtml(active.initials)}">${telegramAvatarInner(active)}</span>
         <div class="tg-thread-head-info"><strong>${escapeHtml(active.title)}</strong></div>
       </div>
-      <div class="tg-messages"><div class="tg-state">Select a topic</div></div>`
+      <div class="tg-messages"><div class="tg-state">Выберите тему</div></div>`
     : threadInnerHtml;
   const messagesInnerHtml = expanded && !showAuth
-    ? (showTopicHint ? '<div class="tg-state">Select a topic</div>' : buildMessagesInnerHtml(active, activeMessages)) : "";
+    ? (showTopicHint ? '<div class="tg-state">Выберите тему</div>' : buildMessagesInnerHtml(active, activeMessages)) : "";
   card._tgSectionCache = { rail: railHtml, list: listHtml, thread: messagesInnerHtml, topics: topicsHtml, topicsChatId: forumChat?.id || null };
 
   // Preserve composer draft/focus across full-widget rebuilds (polls, message sync).
@@ -4688,7 +4688,7 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
   const switcherHtml = buildAccountSwitcherHtml(accounts, activeAccountId);
 
   const collapsedMarkup = `
-    <button type="button" class="tg-rail-toggle" aria-label="Telegram widget">
+    <button type="button" class="tg-rail-toggle" aria-label="Виджет Telegram">
       <span></span>
     </button>
     <div class="tg-rail">${railHtml}</div>
@@ -4701,13 +4701,13 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
             ${switcherHtml}
           </div>
           <div class="tg-panel-header-actions">
-            <button type="button" class="tg-settings${pos.showSettings ? " active" : ""}" aria-label="Settings">
+            <button type="button" class="tg-settings${pos.showSettings ? " active" : ""}" aria-label="Настройки">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3"></circle>
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
               </svg>
             </button>
-            <button type="button" class="tg-collapse" aria-label="Collapse">
+            <button type="button" class="tg-collapse" aria-label="Свернуть">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M15 18l-6-6 6-6"/>
               </svg>
@@ -4909,9 +4909,9 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
     if (!link) return;
     try {
       await navigator.clipboard?.writeText?.(link);
-      e.currentTarget.textContent = "Copied";
+      e.currentTarget.textContent = "Скопировано";
       setTimeout(() => {
-        if (e.currentTarget.isConnected) e.currentTarget.textContent = "Copy link";
+        if (e.currentTarget.isConnected) e.currentTarget.textContent = "Копировать ссылку";
       }, 1500);
     } catch (_) { /* clipboard may be denied */ }
   });
@@ -4920,13 +4920,13 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
     const btn = e.currentTarget;
     if (!btn.classList.contains("confirming")) {
       btn.classList.add("confirming");
-      btn.textContent = "Log out?";
+      btn.textContent = "Выйти?";
       const token = Symbol("tg-logout-confirm");
       btn._tgLogoutConfirmToken = token;
       setTimeout(() => {
         if (btn._tgLogoutConfirmToken !== token) return;
         btn.classList.remove("confirming");
-        btn.textContent = "Log Out";
+        btn.textContent = "Выйти";
         delete btn._tgLogoutConfirmToken;
       }, 4000);
       return;
@@ -5193,7 +5193,7 @@ async function handleTelegramAttachmentDownload(card, widgetId, chatId, messageI
       if (openAfter) {
         const opened = await (async () => { try { await invoke("open_explorer", { path: path }); } catch { await openPath(path); } return true; })();
         if (opened === false) {
-          telegramRuntime.messagesError.set(telegramMessageCacheKey(chatId), "Could not open file (blocked by app permissions)");
+          telegramRuntime.messagesError.set(telegramMessageCacheKey(chatId), "Не удалось открыть файл (заблокировано правами приложения)");
           updateTelegramWidget(card, widgetId);
         }
       }
@@ -5269,7 +5269,7 @@ function applyTelegramAttachmentReady(payload) {
       e.stopPropagation();
       const opened = await (async () => { try { await invoke("open_explorer", { path: node.dataset.path }); } catch { await openPath(node.dataset.path); } return true; })();
       if (opened === false) {
-        telegramRuntime.messagesError.set(telegramMessageCacheKey(chatId), "Could not open file (blocked by app permissions)");
+        telegramRuntime.messagesError.set(telegramMessageCacheKey(chatId), "Не удалось открыть файл (заблокировано правами приложения)");
         updateTelegramWidget(card, widgetId);
       }
     });
@@ -5371,7 +5371,7 @@ async function runTelegramAuthStep(action, card, widgetId) {
   telegramRuntime.authSubmitting = true;
   try {
     if (false) {
-      throw new Error("Tauri backend is not available in live preview. Run the Tauri app for real Telegram login.");
+      throw new Error("Бэкенд Tauri недоступен в режиме предпросмотра. Запустите приложение Tauri, чтобы войти в Telegram.");
     }
     const status = await action();
     if (status) {
@@ -5594,22 +5594,22 @@ function tgBuildFormattedHtml(text, entities) {
 function renderTelegramSettingsForm(config, debug, tdjsonPath, proxyType, backendAvailable) {
   return `
         <input class="tg-auth-field" data-tg-config="apiId" type="text" placeholder="API ID" value="${escapeHtml(config.apiId)}" />
-        <input class="tg-auth-field" data-tg-config="apiHash" type="password" placeholder="${debug?.apiHashConfigured ? "API hash saved" : "API hash"}" value="${escapeHtml(config.apiHash)}" />
+        <input class="tg-auth-field" data-tg-config="apiHash" type="password" placeholder="${debug?.apiHashConfigured ? "API hash сохранён" : "API hash"}" value="${escapeHtml(config.apiHash)}" />
         <input class="tg-auth-field" data-tg-config="tdjsonPath" type="text" placeholder="C:\\path\\to\\tdjson.dll" value="${escapeHtml(tdjsonPath)}" />
         <div class="tg-auth-proxy">
           <select class="tg-auth-field" data-tg-config="proxyType">
-            <option value="byedpi" ${proxyType === "byedpi" ? "selected" : ""}>ByeDPI desync (managed)</option>
-            <option value="none" ${proxyType === "none" ? "selected" : ""}>No proxy</option>
-            <option value="socks5" ${proxyType === "socks5" ? "selected" : ""}>SOCKS5 proxy</option>
-            <option value="http" ${proxyType === "http" ? "selected" : ""}>HTTP proxy</option>
+            <option value="byedpi" ${proxyType === "byedpi" ? "selected" : ""}>ByeDPI (управляемый)</option>
+            <option value="none" ${proxyType === "none" ? "selected" : ""}>Без прокси</option>
+            <option value="socks5" ${proxyType === "socks5" ? "selected" : ""}>SOCKS5-прокси</option>
+            <option value="http" ${proxyType === "http" ? "selected" : ""}>HTTP-прокси</option>
           </select>
-          <input class="tg-auth-field" data-tg-config="proxyHost" type="text" placeholder="Proxy host" value="${escapeHtml(config.proxyHost)}" ${proxyType === "byedpi" ? "disabled" : ""} />
-          <input class="tg-auth-field" data-tg-config="proxyPort" type="number" min="1" max="65535" placeholder="Proxy port" value="${escapeHtml(config.proxyPort || "")}" ${proxyType === "byedpi" ? "disabled" : ""} />
-          <input class="tg-auth-field" data-tg-config="proxyUsername" type="text" placeholder="Proxy user" value="${escapeHtml(config.proxyUsername)}" ${proxyType === "byedpi" ? "disabled" : ""} />
-          <input class="tg-auth-field" data-tg-config="proxyPassword" type="password" placeholder="Proxy password" value="${escapeHtml(config.proxyPassword)}" ${proxyType === "byedpi" ? "disabled" : ""} />
+          <input class="tg-auth-field" data-tg-config="proxyHost" type="text" placeholder="Адрес прокси" value="${escapeHtml(config.proxyHost)}" ${proxyType === "byedpi" ? "disabled" : ""} />
+          <input class="tg-auth-field" data-tg-config="proxyPort" type="number" min="1" max="65535" placeholder="Порт прокси" value="${escapeHtml(config.proxyPort || "")}" ${proxyType === "byedpi" ? "disabled" : ""} />
+          <input class="tg-auth-field" data-tg-config="proxyUsername" type="text" placeholder="Пользователь прокси" value="${escapeHtml(config.proxyUsername)}" ${proxyType === "byedpi" ? "disabled" : ""} />
+          <input class="tg-auth-field" data-tg-config="proxyPassword" type="password" placeholder="Пароль прокси" value="${escapeHtml(config.proxyPassword)}" ${proxyType === "byedpi" ? "disabled" : ""} />
         </div>
-        <button type="button" class="tg-auth-action tg-auth-save-config" ${backendAvailable ? "" : "disabled"}>Save settings</button>
-        ${backendAvailable ? `<button type="button" class="tg-auth-action tg-auth-restart">Restart TDLib</button>` : ""}
+        <button type="button" class="tg-auth-action tg-auth-save-config" ${backendAvailable ? "" : "disabled"}>Сохранить настройки</button>
+        ${backendAvailable ? `<button type="button" class="tg-auth-action tg-auth-restart">Перезапустить TDLib</button>` : ""}
   `;
 }
 
@@ -5621,7 +5621,7 @@ function renderTelegramAccountsSection(status) {
     <div class="tg-settings-accounts">
       <div class="tg-settings-accounts-header">
         <strong>Accounts (${accounts.length})</strong>
-        <button type="button" class="tg-settings-account-add-btn">+ Add</button>
+        <button type="button" class="tg-settings-account-add-btn">+ Добавить</button>
       </div>
       <div class="tg-settings-accounts-list">
         ${accounts.map((a) => `
@@ -5631,9 +5631,9 @@ function renderTelegramAccountsSection(status) {
               ${a.phone ? `<small class="tg-settings-account-sub">${escapeHtml(a.phone)}</small>` : a.username ? `<small class="tg-settings-account-sub">@${escapeHtml(a.username)}</small>` : ""}
             </div>
             <div class="tg-settings-account-actions">
-              ${a.id === activeId ? '<span class="tg-settings-account-active-badge">Active</span>' : `
-                <button type="button" class="tg-settings-account-switch" data-acc-id="${escapeHtml(a.id)}">Switch</button>
-                <button type="button" class="tg-settings-account-remove" data-acc-id="${escapeHtml(a.id)}" aria-label="Remove account">&times;</button>
+              ${a.id === activeId ? '<span class="tg-settings-account-active-badge">Активен</span>' : `
+                <button type="button" class="tg-settings-account-switch" data-acc-id="${escapeHtml(a.id)}">Переключить</button>
+                <button type="button" class="tg-settings-account-remove" data-acc-id="${escapeHtml(a.id)}" aria-label="Удалить аккаунт">&times;</button>
               `}
             </div>
           </div>
@@ -5647,8 +5647,8 @@ function renderTelegramAuth(status, showSettings = false) {
   const backendAvailable = !!invoke("telegram_status");
   const state = backendAvailable ? (status?.authState || "mock") : "backend_unavailable";
   const hint = backendAvailable
-    ? (status?.authHint || "TDLib is not connected yet.")
-    : "Live preview can show the widget UI only. Real Telegram login needs the Tauri backend.";
+    ? (status?.authHint || "TDLib пока не подключён.")
+    : "В режиме предпросмотра показывается только интерфейс виджета. Для входа в Telegram нужен бэкенд Tauri.";
   const config = telegramRuntime.config || {};
   const debug = telegramRuntime.debug;
   const tdjsonPath = config.tdjsonPath || TELEGRAM_DEFAULT_TDJSON_PATH;
@@ -5667,13 +5667,13 @@ function renderTelegramAuth(status, showSettings = false) {
             <path d="M21 4L3 11.5l7 2.4L13 20l3-14-7.2 6.8"/>
           </svg>
         </div>
-        <strong>${status?.authorized ? "Telegram Settings" : "Telegram API setup"}</strong>
-        <small>${status?.authorized ? "You are logged in." : escapeHtml(hint)}</small>
+        <strong>${status?.authorized ? "Настройки Telegram" : "Настройка Telegram API"}</strong>
+        <small>${status?.authorized ? "Вы вошли в аккаунт." : escapeHtml(hint)}</small>
         ${renderTelegramAccountsSection(status)}
         ${renderTelegramSettingsForm(config, debug, tdjsonPath, proxyType, backendAvailable)}
         ${status?.authorized ? `
           <button type="button" class="tg-auth-action tg-auth-logout" style="background: rgba(var(--status-error-rgb), 0.2); color: var(--status-error); border-color: rgba(var(--status-error-rgb), 0.3);">
-            Log Out
+            Выйти
           </button>
         ` : ""}
       </div>
@@ -5687,7 +5687,7 @@ function renderTelegramAuth(status, showSettings = false) {
             <path d="M21 4L3 11.5l7 2.4L13 20l3-14-7.2 6.8"/>
           </svg>
         </div>
-        <strong>Telegram API setup</strong>
+        <strong>Настройка Telegram API</strong>
         <small>${escapeHtml(hint)}</small>
         ${debug ? `
           <div class="tg-auth-debug">
@@ -5710,12 +5710,12 @@ function renderTelegramAuth(status, showSettings = false) {
             <path d="M21 4L3 11.5l7 2.4L13 20l3-14-7.2 6.8"/>
           </svg>
         </div>
-        <strong>Telegram Settings</strong>
-        <small>You are logged in.</small>
+        <strong>Настройки Telegram</strong>
+        <small>Вы вошли в аккаунт.</small>
         ${renderTelegramAccountsSection(status)}
         ${renderTelegramSettingsForm(config, debug, tdjsonPath, proxyType, backendAvailable)}
         <button type="button" class="tg-auth-action tg-auth-logout" style="background: rgba(var(--status-error-rgb), 0.2); color: var(--status-error); border-color: rgba(var(--status-error-rgb), 0.3);">
-          Log Out
+          Выйти
         </button>
       </div>
     `;
@@ -5731,14 +5731,14 @@ function renderTelegramAuth(status, showSettings = false) {
   const needsEncryptionKey = state === "WaitEncryptionKey";
 
   const authStateTitles = {
-    WaitPhoneNumber: "Enter phone number",
-    WaitCode: "Enter login code",
-    WaitPassword: "Enter 2FA password",
-    WaitEmailAddress: "Enter email address",
-    WaitEmailCode: "Enter email code",
-    WaitRegistration: "Create your account",
-    WaitOtherDeviceConfirmation: "Confirm on another device",
-    WaitEncryptionKey: "Setting up local storage…",
+    WaitPhoneNumber: "Введите номер телефона",
+    WaitCode: "Введите код входа",
+    WaitPassword: "Введите пароль 2FA",
+    WaitEmailAddress: "Введите адрес эл. почты",
+    WaitEmailCode: "Введите код из письма",
+    WaitRegistration: "Создайте аккаунт",
+    WaitOtherDeviceConfirmation: "Подтвердите на другом устройстве",
+    WaitEncryptionKey: "Настройка локального хранилища…",
   };
   const stateTitle = authStateTitles[state] || state;
 
@@ -5746,39 +5746,39 @@ function renderTelegramAuth(status, showSettings = false) {
   if (needsPhone) {
     bodyHtml = `
       <small>${escapeHtml(hint)}</small>
-      <input class="tg-auth-field" data-tg-auth="phone" type="text" placeholder="Phone number" autocomplete="tel" />
-      <button type="button" class="tg-auth-action tg-auth-phone">Continue</button>
+      <input class="tg-auth-field" data-tg-auth="phone" type="text" placeholder="Номер телефона" autocomplete="tel" />
+      <button type="button" class="tg-auth-action tg-auth-phone">Продолжить</button>
     `;
   } else if (needsCode) {
     bodyHtml = `
       <small>${escapeHtml(hint)}</small>
-      <input class="tg-auth-field" data-tg-auth="code" type="text" placeholder="Login code" inputmode="numeric" autocomplete="one-time-code" />
-      <button type="button" class="tg-auth-action tg-auth-code">Continue</button>
+      <input class="tg-auth-field" data-tg-auth="code" type="text" placeholder="Код входа" inputmode="numeric" autocomplete="one-time-code" />
+      <button type="button" class="tg-auth-action tg-auth-code">Продолжить</button>
     `;
   } else if (needsPassword) {
     bodyHtml = `
       <small>${escapeHtml(hint)}</small>
-      <input class="tg-auth-field" data-tg-auth="password" type="password" placeholder="Password" autocomplete="current-password" />
-      <button type="button" class="tg-auth-action tg-auth-password">Continue</button>
+      <input class="tg-auth-field" data-tg-auth="password" type="password" placeholder="Пароль" autocomplete="current-password" />
+      <button type="button" class="tg-auth-action tg-auth-password">Продолжить</button>
     `;
   } else if (needsEmail) {
     bodyHtml = `
       <small>${escapeHtml(hint)}</small>
-      <input class="tg-auth-field" data-tg-auth="email" type="email" placeholder="Email address" autocomplete="email" />
-      <button type="button" class="tg-auth-action tg-auth-email">Continue</button>
+      <input class="tg-auth-field" data-tg-auth="email" type="email" placeholder="Адрес эл. почты" autocomplete="email" />
+      <button type="button" class="tg-auth-action tg-auth-email">Продолжить</button>
     `;
   } else if (needsEmailCode) {
     bodyHtml = `
       <small>${escapeHtml(hint)}</small>
-      <input class="tg-auth-field" data-tg-auth="emailCode" type="text" placeholder="Email code" inputmode="numeric" autocomplete="one-time-code" />
-      <button type="button" class="tg-auth-action tg-auth-email-code">Continue</button>
+      <input class="tg-auth-field" data-tg-auth="emailCode" type="text" placeholder="Код из письма" inputmode="numeric" autocomplete="one-time-code" />
+      <button type="button" class="tg-auth-action tg-auth-email-code">Продолжить</button>
     `;
   } else if (needsRegistration) {
     bodyHtml = `
       <small>${escapeHtml(hint)}</small>
-      <input class="tg-auth-field" data-tg-auth="firstName" type="text" placeholder="First name" autocomplete="given-name" />
-      <input class="tg-auth-field" data-tg-auth="lastName" type="text" placeholder="Last name (optional)" autocomplete="family-name" />
-      <button type="button" class="tg-auth-action tg-auth-register">Register</button>
+      <input class="tg-auth-field" data-tg-auth="firstName" type="text" placeholder="Имя" autocomplete="given-name" />
+      <input class="tg-auth-field" data-tg-auth="lastName" type="text" placeholder="Фамилия (необязательно)" autocomplete="family-name" />
+      <button type="button" class="tg-auth-action tg-auth-register">Зарегистрироваться</button>
     `;
   } else if (needsOtherDevice) {
     // auth_hint carries the tg:// QR login link when the backend exposes it.
@@ -5787,21 +5787,21 @@ function renderTelegramAuth(status, showSettings = false) {
     if (isLink) {
       const safeHref = tgSafeHref(link);
       bodyHtml = `
-      <small>Scan this link with Telegram on another logged-in device, or open/copy it below.</small>
+      <small>Отсканируйте эту ссылку в Telegram на другом устройстве, где выполнен вход, или откройте либо скопируйте её ниже.</small>
       <code class="tg-auth-qr-link">${escapeHtml(link)}</code>
-      <button type="button" class="tg-auth-action tg-auth-copy-link" data-link="${escapeHtml(link)}">Copy link</button>
-      ${safeHref ? `<a class="tg-auth-action" href="${safeHref}" target="_blank" rel="noopener noreferrer">Open link</a>` : ""}
+      <button type="button" class="tg-auth-action tg-auth-copy-link" data-link="${escapeHtml(link)}">Копировать ссылку</button>
+      ${safeHref ? `<a class="tg-auth-action" href="${safeHref}" target="_blank" rel="noopener noreferrer">Открыть ссылку</a>` : ""}
     `;
     } else {
-      bodyHtml = `<small>${escapeHtml(link || "Confirm this login on another device.")}</small>`;
+      bodyHtml = `<small>${escapeHtml(link || "Подтвердите вход на другом устройстве.")}</small>`;
     }
   } else if (needsEncryptionKey) {
     // Transitional TDLib state — not stuck; no input or dead "Waiting" button.
-    bodyHtml = `<small>Setting up local storage…</small>`;
+    bodyHtml = `<small>Настройка локального хранилища…</small>`;
   } else {
     bodyHtml = `
       <small>${escapeHtml(hint)}</small>
-      <button type="button" class="tg-auth-action" disabled>Waiting for TDLib</button>
+      <button type="button" class="tg-auth-action" disabled>Ожидание TDLib</button>
     `;
   }
 
@@ -6169,7 +6169,7 @@ function telegramAttachmentHtml(message, chatId) {
       return kind === "animation"
         ? `<div class="tg-animation-wrap" data-animation-key="${escapeHtml(`${chatId}::${message.id || ""}`)}">
             <video class="tg-media tg-animation" ${ratio} src="${src}" preload="none" loop muted playsinline></video>
-            <button type="button" class="tg-animation-toggle" aria-label="Pause animation">
+            <button type="button" class="tg-animation-toggle" aria-label="Пауза анимации">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
             </button>
           </div>`
@@ -6198,7 +6198,7 @@ function telegramAttachmentHtml(message, chatId) {
       return `
         <div class="tg-video-wrap" ${ratio} data-path="${escapeHtml(path)}" data-chat-id="${escapeHtml(chatId)}" data-message-id="${escapeHtml(message.id || "")}">
           <video class="tg-media tg-media-video-player" ${ratio} src="${src}" preload="none" playsinline></video>
-          <button type="button" class="tg-video-play-overlay" aria-label="Play">
+          <button type="button" class="tg-video-play-overlay" aria-label="Воспроизвести">
             <svg class="tg-video-icon-play" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
             <svg class="tg-video-icon-pause" viewBox="0 0 24 24" width="22" height="22" fill="currentColor" style="display:none;"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
           </button>
@@ -6212,7 +6212,7 @@ function telegramAttachmentHtml(message, chatId) {
             </div>
             <div class="tg-video-controls-row">
               <div class="tg-video-ctrls-left">
-                <button type="button" class="tg-video-ctrl-btn tg-video-btn-toggle" aria-label="Play/Pause">
+                <button type="button" class="tg-video-ctrl-btn tg-video-btn-toggle" aria-label="Воспроизведение/пауза">
                   <svg class="tg-video-icon-play" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                   <svg class="tg-video-icon-pause" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" style="display:none;"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
                 </button>
@@ -6223,11 +6223,11 @@ function telegramAttachmentHtml(message, chatId) {
                 </span>
               </div>
               <div class="tg-video-ctrls-right">
-                <button type="button" class="tg-video-ctrl-btn tg-video-btn-mute" aria-label="Mute/Unmute">
+                <button type="button" class="tg-video-ctrl-btn tg-video-btn-mute" aria-label="Звук вкл./выкл.">
                   <svg class="tg-video-icon-vol-on" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
                   <svg class="tg-video-icon-vol-muted" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" style="display:none;"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
                 </button>
-                <button type="button" class="tg-video-ctrl-btn tg-video-btn-fullscreen" aria-label="Fullscreen">
+                <button type="button" class="tg-video-ctrl-btn tg-video-btn-fullscreen" aria-label="Полноэкранный режим">
                   <svg class="tg-video-icon-fs-enter" viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
                   <svg class="tg-video-icon-fs-exit" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" style="display:none;"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
                 </button>
@@ -6273,7 +6273,7 @@ function telegramAttachmentHtml(message, chatId) {
             <circle class="ring-bg" cx="85" cy="85" r="83.5"></circle>
             <circle class="ring-progress" cx="85" cy="85" r="83.5"></circle>
           </svg>
-          <button type="button" class="tg-video-note-overlay" aria-label="Play with sound">
+          <button type="button" class="tg-video-note-overlay" aria-label="Воспроизвести со звуком">
             <svg class="icon-play" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
             <svg class="icon-pause" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="display:none;"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
             <svg class="icon-replay" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="display:none;"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>
@@ -6530,7 +6530,7 @@ function renderTelegramThread(chat, messages) {
     const pendingFileHtml = pendingFile ? `
       <div class="tg-pending-file" data-path="${escapeHtml(pendingFile)}">
         <span class="tg-pending-file-name" aria-label="${escapeHtml(pendingFile)}">${escapeHtml(pendingFileName)}</span>
-        <button type="button" class="tg-pending-file-remove" aria-label="Remove attached file">×</button>
+        <button type="button" class="tg-pending-file-remove" aria-label="Убрать вложение">×</button>
       </div>
     ` : "";
     return `
@@ -6538,23 +6538,23 @@ function renderTelegramThread(chat, messages) {
         <span class="tg-thread-avatar">?</span>
         <div class="tg-thread-head-info">
           <strong>Telegram</strong>
-          <small class="tg-status-line">Select a chat</small>
+          <small class="tg-status-line">Выберите чат</small>
         </div>
       </div>
       <div class="tg-messages" data-chat-id="">
-        <div class="tg-state">${telegramRuntime.loadingChats ? "Loading chats..." : "Select a chat to view messages"}</div>
+        <div class="tg-state">${telegramRuntime.loadingChats ? "Загрузка чатов…" : "Выберите чат, чтобы посмотреть сообщения"}</div>
       </div>
       <div class="tg-composer">
         <div class="tg-mention-pop"></div>
         ${pendingFileHtml}
         <div class="tg-composer-row">
-          <button type="button" class="tg-attach" aria-label="Attach" disabled>
+          <button type="button" class="tg-attach" aria-label="Прикрепить" disabled>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21.4 11.6l-8.7 8.7a6 6 0 01-8.5-8.5l9.2-9.2a4 4 0 015.7 5.7l-9.2 9.2a2 2 0 01-2.8-2.8l8.7-8.7"/>
             </svg>
           </button>
-          <textarea class="tg-input" rows="1" placeholder="${pendingFile ? "Add a caption..." : "Message"}" disabled></textarea>
-          <button type="button" class="tg-send" aria-label="Send" disabled>
+          <textarea class="tg-input" rows="1" placeholder="${pendingFile ? "Добавьте подпись…" : "Сообщение"}" disabled></textarea>
+          <button type="button" class="tg-send" aria-label="Отправить" disabled>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
               <path d="M22 2L11 13"/>
               <path d="M22 2l-7 20-4-9-9-4 20-7z"/>
@@ -6569,7 +6569,7 @@ function renderTelegramThread(chat, messages) {
   const pendingFileHtml = pendingFile ? `
     <div class="tg-pending-file" data-path="${escapeHtml(pendingFile)}">
       <span class="tg-pending-file-name" aria-label="${escapeHtml(pendingFile)}">${escapeHtml(pendingFileName)}</span>
-      <button type="button" class="tg-pending-file-remove" aria-label="Remove attached file">×</button>
+      <button type="button" class="tg-pending-file-remove" aria-label="Убрать вложение">×</button>
     </div>
   ` : "";
 
@@ -6577,10 +6577,10 @@ function renderTelegramThread(chat, messages) {
   const replyBarHtml = replyMsg ? `
     <div class="tg-reply-bar">
       <div class="tg-reply-bar-content">
-        <span class="tg-reply-bar-author">${escapeHtml(replyMsg.from || "Message")}</span>
-        <span class="tg-reply-bar-text">${escapeHtml(replyMsg.text || "...")}</span>
+        <span class="tg-reply-bar-author">${escapeHtml(replyMsg.from || "Сообщение")}</span>
+        <span class="tg-reply-bar-text">${escapeHtml(replyMsg.text || "…")}</span>
       </div>
-      <button type="button" class="tg-reply-bar-close" aria-label="Cancel reply">×</button>
+      <button type="button" class="tg-reply-bar-close" aria-label="Отменить ответ">×</button>
     </div>
   ` : "";
 
@@ -6588,10 +6588,10 @@ function renderTelegramThread(chat, messages) {
   const editBarHtml = editMsg ? `
     <div class="tg-reply-bar tg-edit-bar">
       <div class="tg-reply-bar-content">
-        <span class="tg-reply-bar-author">Editing</span>
-        <span class="tg-reply-bar-text">${escapeHtml(editMsg.text || "...")}</span>
+        <span class="tg-reply-bar-author">Редактирование</span>
+        <span class="tg-reply-bar-text">${escapeHtml(editMsg.text || "…")}</span>
       </div>
-      <button type="button" class="tg-edit-bar-close" aria-label="Cancel edit">×</button>
+      <button type="button" class="tg-edit-bar-close" aria-label="Отменить редактирование">×</button>
     </div>
   ` : "";
 
@@ -6610,9 +6610,9 @@ function renderTelegramThread(chat, messages) {
       ${telegramForumThreadId(chat.id) ? `
         <button type="button" class="tg-topic-back-btn" data-action="back-to-topics">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-          <span>Topics</span>
+          <span>Темы</span>
         </button>
-        <span class="tg-topics-chat-title">${escapeHtml(selectedTopic?.title || 'Topic')}</span>
+        <span class="tg-topics-chat-title">${escapeHtml(selectedTopic?.title || 'Тема')}</span>
       ` : ""}
     </div>
   ` : "";
@@ -6622,7 +6622,7 @@ function renderTelegramThread(chat, messages) {
   // lives in its own column next to the thread).
   const showTopicHint = chat.isForum && !telegramForumThreadId(chat.id);
   const messagesInner = showTopicHint
-    ? `<div class="tg-state">Select a topic</div>`
+    ? `<div class="tg-state">Выберите тему</div>`
     : buildMessagesInnerHtml(chat, messages);
 
   const threadId = telegramForumThreadId(chat.id);
@@ -6711,13 +6711,13 @@ function renderTelegramThread(chat, messages) {
       ${editBarHtml}
       ${pendingFileHtml}
       <div class="tg-composer-row">
-        <button type="button" class="tg-attach" aria-label="Attach">
+        <button type="button" class="tg-attach" aria-label="Прикрепить">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21.4 11.6l-8.7 8.7a6 6 0 01-8.5-8.5l9.2-9.2a4 4 0 015.7 5.7l-9.2 9.2a2 2 0 01-2.8-2.8l8.7-8.7"/>
           </svg>
         </button>
-        <textarea class="tg-input" rows="1" placeholder="${pendingFile ? "Add a caption..." : editMsg ? "Edit message..." : "Message"}"></textarea>
-        <button type="button" class="tg-send" aria-label="Send">
+        <textarea class="tg-input" rows="1" placeholder="${pendingFile ? "Добавьте подпись…" : editMsg ? "Редактировать сообщение…" : "Сообщение"}"></textarea>
+        <button type="button" class="tg-send" aria-label="Отправить">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 2L11 13"/>
             <path d="M22 2l-7 20-4-9-9-4 20-7z"/>
@@ -6756,7 +6756,7 @@ function renderTelegramDock(card, widgetId) {
   const railHtml = buildRailHtml(chats, activeId);
   card._tgSectionCache = { rail: railHtml, list: null, thread: null, topics: null, topicsChatId: null };
   body.innerHTML = `<div class="tg-shell">
-    <button type="button" class="tg-rail-toggle" aria-label="Telegram widget"><span></span></button>
+    <button type="button" class="tg-rail-toggle" aria-label="Виджет Telegram"><span></span></button>
     <div class="tg-rail">${railHtml}</div>
   </div>`;
   wireTelegramRailSection(card, widgetId, body);

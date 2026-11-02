@@ -297,14 +297,9 @@ export async function getDisabledModules() {
   }
 }
 
-export async function setDisabledModules(ids) {
-  try {
-    await invoke("set_disabled_modules", { ids });
-    return true;
-  } catch (e) {
-    console.error("set_disabled_modules failed:", e);
-    return false;
-  }
+/** Turn a module on or off in the running app. Throws when it fails. */
+export function setModuleEnabled(id, enabled) {
+  return invoke("set_module_enabled", { id, enabled });
 }
 
 // ─── Shortcut opening ────────────────────────────────────────────────────────

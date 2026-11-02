@@ -303,6 +303,51 @@ fn lint_ui_imports() {
     }
 }
 
+/// The module contracts in `metadata.json` are read by the UI at runtime, where
+/// a mistake silently degrades a widget. Fail the build instead.
+fn lint_module_contracts() {
+    const SLOTS: &[&str] = &["neutral", "blue", "aqua", "mint", "lilac", "peach", "magenta", "coral"];
+    let Ok(entries) = std::fs::read_dir("../modules") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let ui = entry.path().join("ui");
+        let meta = ui.join("metadata.json");
+        let Ok(text) = std::fs::read_to_string(&meta) else {
+            continue;
+        };
+        println!("cargo:rerun-if-changed={}", meta.display());
+        let fail = |what: String| -> ! { panic!("{}: {what}", meta.display()) };
+        let value: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|e| fail(format!("invalid JSON: {e}")));
+        if let Some(embeddable) = value.get("embeddable") {
+            let module = embeddable["module"].as_str().unwrap_or_else(|| fail("embeddable.module missing".into()));
+            let render = embeddable["render"].as_str().unwrap_or_else(|| fail("embeddable.render missing".into()));
+            let source = std::fs::read_to_string(ui.join(module))
+                .unwrap_or_else(|e| fail(format!("embeddable.module {module}: {e}")));
+            if !source.contains(render) {
+                fail(format!("embeddable.render {render} is not in {module}"));
+            }
+            if value.get("container").is_some() {
+                fail("a container cannot be embeddable: nesting is one level deep".into());
+            }
+        }
+        for tint in value["tints"].as_array().into_iter().flatten() {
+            if tint["id"].as_str().is_none() || tint["label"].as_str().is_none() {
+                fail(format!("tint needs id and label: {tint}"));
+            }
+            if !tint["default"].as_str().is_some_and(|slot| SLOTS.contains(&slot)) {
+                fail(format!("tint default is not a palette slot: {tint}"));
+            }
+        }
+        if let Some(pack) = value.get("pack") {
+            if pack["id"].as_str().is_none() || pack["label"].as_str().is_none() {
+                fail(format!("pack needs id and label: {pack}"));
+            }
+        }
+    }
+}
+
 /// Doctor's `simulate` probes must come from data, not from literals.
 ///
 /// Two sources are checked. First, every `metadata.json` under `modules/*/ui`
@@ -478,6 +523,7 @@ fn main() {
     lint_modules_integrity();
     lint_ui_imports();
     lint_simulate_metadata();
+    lint_module_contracts();
     embed_dotenv();
     println!("cargo:rerun-if-changed=../opt/tdlib-native/win32-x64");
     println!("cargo:rerun-if-changed=../opt/libmpv");

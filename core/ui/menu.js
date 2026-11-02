@@ -2,7 +2,7 @@
  * UniDTK — customization panel (menu.js)
  *
  * A side panel on the right of the live desktop, inside the wallpaper window:
- *   1. «Стол»  — which widgets show, arranging them on the desk, backend modules
+ *   1. «Стол»  — module packs, arranging widgets on the desk
  *   2. «Папки» — desktop folders and their shortcuts, added from Start, a system
  *               dialog or the clipboard — never by typing a path
  *   3. «Вид»   — theme, colours, everything else folded into «Тонкая настройка»
@@ -10,8 +10,9 @@
  */
 
 import { invoke } from "@unidtk/bridge";
-import { getWidgets, getDefaultWidgetConfig, getDisabledModules, setDisabledModules } from "./widgets-api.js";
-import { config, saveConfig, syncWidgets, relayoutWidgets, escapeHtml, enterArrangeMode } from "./unidtk-core.js";
+import { getWidgets, getDefaultWidgetConfig, getDisabledModules, setModuleEnabled } from "./widgets-api.js";
+import { config, saveConfig, syncWidgets, relayoutWidgets, escapeHtml, enterArrangeMode, moveWidgetToHost } from "./unidtk-core.js";
+import { openPopup } from "./popup.js";
 import {
   getActiveTheme,
   getAllPresets,
@@ -55,22 +56,6 @@ const TABS = [
   { id: "look", label: "Вид" },
 ];
 
-// Modules with a Rust half, so the user can switch the background work off.
-// `clock` is absent on purpose: it has no crate, there is nothing to stop.
-const BACKEND_MODULES = [
-  { id: "mp3-player", label: "Плеер" },
-  { id: "telegram", label: "Telegram" },
-  { id: "glyph-bar", label: "Громкость (Glyph Bar)" },
-  { id: "micrographics", label: "Микрографика" },
-  { id: "vpn", label: "VPN" },
-  { id: "explorer", label: "Проводник" },
-];
-
-let panel = null;
-let opener = null;
-let currentView = "desk";
-// A module switch flipped this session: it applies on the next start.
-let modulesPending = false;
 
 export function initMenu() {
   panel = document.getElementById("menuContainer");
@@ -210,6 +195,99 @@ function clearHighlight() {
   document.querySelectorAll(".widget-card.menu-highlight").forEach((c) => c.classList.remove("menu-highlight"));
 }
 
+const STATE_LABELS = { off: "Выключен", background: "В фоне", desk: "На столе" };
+
+// One state per module. `off` stops a module with a backend; hiding the card
+// leaves it working, which is `background`. Without a backend there is nothing
+// left to run, so a hidden module is simply off.
+function moduleState(w, disabled) {
+  if (w.backend && disabled.has(w.id)) return "off";
+  if (!(config.hidden || []).includes(w.id)) return "desk";
+  return w.backend ? "background" : "off";
+}
+
+async function setModuleState(w, disabled, next) {
+  const off = next === "off";
+  if (w.backend && off !== disabled.has(w.id)) {
+    await setModuleEnabled(w.id, !off);
+    if (off) disabled.add(w.id);
+    else disabled.delete(w.id);
+  }
+  // Switching off keeps the desk choice, so switching on restores it.
+  if (!w.backend || !off) {
+    const hidden = new Set(config.hidden || []);
+    if (next === "desk") hidden.delete(w.id);
+    else hidden.add(w.id);
+    config.hidden = [...hidden];
+    await saveConfig();
+  }
+  await syncWidgets();
+}
+
+function groupPacks(modules) {
+  const packs = new Map();
+  for (const w of modules) {
+    const { id, label } = w.pack || { id: "other", label: "Другое" };
+    if (!packs.has(id)) packs.set(id, { id, label, modules: [] });
+    packs.get(id).modules.push(w);
+  }
+  return [...packs.values()];
+}
+
+function nestingHost(id, widgets) {
+  const hostId = Object.keys(config.nested || {}).find((host) => config.nested[host].includes(id));
+  return hostId ? widgets.find((w) => w.id === hostId) : null;
+}
+
+function openPackPopup(pack, widgets, disabled) {
+  const popup = openPopup(panel, pack.label, (body) => {
+    body.innerHTML = `<ul class="menu-list">${pack.modules.map((w) => {
+      const state = moduleState(w, disabled);
+      const states = w.backend ? ["off", "background", "desk"] : ["off", "desk"];
+      const host = nestingHost(w.id, widgets);
+      return `
+        <li class="menu-row" data-widget-id="${escapeHtml(w.id)}">
+          <span class="menu-row-icon" aria-hidden="true">${w.iconSvg || ""}</span>
+          <span class="menu-row-text">
+            <span class="menu-row-name">${escapeHtml(w.name)}</span>
+            ${host ? `<span class="menu-row-sub">Внутри «${escapeHtml(host.name)}»</span>` : ""}
+          </span>
+          <div class="menu-pills" role="radiogroup" aria-label="${escapeHtml(w.name)}">
+            ${states.map((value) => `
+              <button type="button" class="menu-pill" role="radio" data-state="${value}" aria-checked="${value === state}">${STATE_LABELS[value]}</button>
+            `).join("")}
+          </div>
+          ${host ? `<button type="button" class="menu-btn" data-eject>Вынуть на стол</button>` : ""}
+          ${w.settingsView ? `<button type="button" class="menu-btn" data-settings>Настроить…</button>` : ""}
+        </li>`;
+    }).join("")}</ul>`;
+
+    body.querySelectorAll(".menu-row").forEach((li) => {
+      const w = pack.modules.find((m) => m.id === li.dataset.widgetId);
+      li.addEventListener("mouseenter", () => highlight(w.id));
+      li.addEventListener("mouseleave", clearHighlight);
+      li.querySelectorAll("[data-state]").forEach((pill) => {
+        pill.addEventListener("click", () => runOnce(pill, async () => {
+          await setModuleState(w, disabled, pill.dataset.state);
+          popup.refresh();
+        }));
+      });
+      const eject = li.querySelector("[data-eject]");
+      eject?.addEventListener("click", () => runOnce(eject, async () => {
+        await moveWidgetToHost(w.id, null);
+        popup.refresh();
+      }));
+      li.querySelector("[data-settings]")?.addEventListener("click", () => {
+        popup.close();
+        showView(w.settingsView);
+      });
+    });
+  }, () => {
+    clearHighlight();
+    renderDesk();
+  });
+}
+
 async function renderDesk() {
   const pane = panel.querySelector("#pane-desk");
   pane.innerHTML = `<div class="menu-empty">Загрузка…</div>`;
@@ -227,24 +305,8 @@ async function renderDesk() {
     pane.querySelector("[data-retry]").addEventListener("click", renderDesk);
     return;
   }
-  const hidden = new Set(config.hidden || []);
-  const disabledSet = new Set(disabled);
-  const modules = widgets.filter((w) => !w.isFolder);
-  const folders = widgets.filter((w) => w.isFolder);
-
-  const row = (w) => `
-    <li class="menu-row" data-widget-id="${escapeHtml(w.id)}">
-      <span class="menu-row-icon" aria-hidden="true">${w.iconSvg || ""}</span>
-      <span class="menu-row-text">
-        <span class="menu-row-name">${escapeHtml(w.name)}</span>
-        ${w.isFolder ? `<span class="menu-row-sub">${shortcutCount((w.items || []).length)}</span>` : ""}
-      </span>
-      <label class="menu-switch" title="Показывать на столе">
-        <input type="checkbox" class="widget-vis-toggle" data-id="${escapeHtml(w.id)}" ${hidden.has(w.id) ? "" : "checked"}
-          aria-label="Показывать «${escapeHtml(w.name)}»">
-        <span class="menu-slider" aria-hidden="true"></span>
-      </label>
-    </li>`;
+  disabled = new Set(disabled);
+  const packs = groupPacks(widgets.filter((w) => !w.isFolder));
 
   pane.innerHTML = `
     <div class="menu-actions">
@@ -252,88 +314,38 @@ async function renderDesk() {
       <button type="button" class="menu-btn" id="btnResetPositions">Исходная раскладка</button>
     </div>
 
-    <h3 class="menu-heading">Виджеты</h3>
-    <ul class="menu-list">${modules.map(row).join("")}</ul>
-
-    ${folders.length ? `
-      <h3 class="menu-heading">Папки</h3>
-      <ul class="menu-list">${folders.map(row).join("")}</ul>
-    ` : ""}
-
+    <h3 class="menu-heading">Пакеты</h3>
+    <p class="menu-note">Выключенный модуль сразу останавливается и не тратит ресурсы.</p>
     <ul class="menu-list">
-      <li class="menu-row">
-        <span class="menu-row-text">
-          <span class="menu-row-name">VPN</span>
-          <span class="menu-row-sub">Подписка, автоподключение, домашний сервер</span>
-        </span>
-        <button type="button" class="menu-btn" id="btnVpnSettings">Настроить…</button>
-      </li>
+      ${packs.map((pack) => {
+        const on = pack.modules.filter((w) => moduleState(w, disabled) !== "off");
+        return `
+          <li class="menu-row" data-pack="${escapeHtml(pack.id)}">
+            <span class="menu-row-text">
+              <span class="menu-row-name">${escapeHtml(pack.label)}</span>
+              <span class="menu-row-sub">${pack.modules.map((w) => escapeHtml(w.name)).join(", ")}</span>
+            </span>
+            <button type="button" class="menu-btn" data-pack-open>Настроить…</button>
+            <label class="menu-switch">
+              <input type="checkbox" class="pack-toggle" ${on.length ? "checked" : ""} aria-label="Пакет «${escapeHtml(pack.label)}» включён">
+              <span class="menu-slider" aria-hidden="true"></span>
+            </label>
+          </li>`;
+      }).join("")}
     </ul>
-
-    <h3 class="menu-heading">Модули</h3>
-    <p class="menu-note">Выключенный модуль не тратит ресурсы: его фоновая работа не запускается. Изменение вступает в силу после перезапуска.</p>
-    <ul class="menu-list">
-      ${BACKEND_MODULES.map((m) => `
-        <li class="menu-row">
-          <span class="menu-row-text"><span class="menu-row-name">${m.label}</span></span>
-          <label class="menu-switch">
-            <input type="checkbox" class="mod-toggle" data-id="${m.id}" ${disabledSet.has(m.id) ? "" : "checked"} aria-label="Модуль «${m.label}» включён">
-            <span class="menu-slider" aria-hidden="true"></span>
-          </label>
-        </li>
-      `).join("")}
-    </ul>
-    <div class="menu-restart" ${modulesPending ? "" : "hidden"}>
-      <p class="menu-note">Плеер и Telegram перезапустятся, музыка остановится.</p>
-      <button type="button" class="menu-btn menu-btn-primary" id="btnRestart">Перезапустить сейчас</button>
-    </div>
   `;
 
-  pane.querySelectorAll(".menu-row[data-widget-id]").forEach((li) => {
-    li.addEventListener("mouseenter", () => highlight(li.dataset.widgetId));
-    li.addEventListener("mouseleave", clearHighlight);
-  });
-
-  pane.querySelectorAll(".widget-vis-toggle").forEach((toggle) => {
+  pane.querySelectorAll("[data-pack]").forEach((li) => {
+    const pack = packs.find((p) => p.id === li.dataset.pack);
+    li.querySelector("[data-pack-open]").addEventListener("click", () => openPackPopup(pack, widgets, disabled));
+    const toggle = li.querySelector(".pack-toggle");
     toggle.addEventListener("change", () => runOnce(toggle, async () => {
-      const id = toggle.dataset.id;
-      const previous = [...(config.hidden || [])];
-      config.hidden = toggle.checked ? previous.filter((h) => h !== id) : [...new Set([...previous, id])];
-      if (!(await saveConfig())) {
-        config.hidden = previous;
-        toggle.checked = !toggle.checked;
-        return;
+      for (const w of pack.modules) {
+        const hidden = (config.hidden || []).includes(w.id);
+        await setModuleState(w, disabled, !toggle.checked ? "off" : w.backend && hidden ? "background" : "desk");
       }
-      await syncWidgets();
-      if (toggle.checked) highlight(id);
     }));
   });
-
-  // Read-modify-write of one stored list: chained so a second switch reads the
-  // first one's result instead of the same stale list.
-  let chain = Promise.resolve();
-  pane.querySelectorAll(".mod-toggle").forEach((tgl) => {
-    tgl.addEventListener("change", () => {
-      const { id } = tgl.dataset;
-      const on = tgl.checked;
-      chain = chain.then(async () => {
-        const current = new Set(await getDisabledModules());
-        if (on) current.delete(id);
-        else current.add(id);
-        if (!(await setDisabledModules([...current]))) throw new Error("список модулей не сохранён");
-        modulesPending = true;
-        pane.querySelector(".menu-restart").hidden = false;
-      }).catch((err) => {
-        tgl.checked = !on;
-        showToast(`Не получилось: ${err?.message || err}`, { tone: "error" });
-      });
-    });
-  });
-
-  const restart = pane.querySelector("#btnRestart");
-  restart.addEventListener("click", () => runOnce(restart, () => invoke("restart_app")));
-
-  pane.querySelector("#btnVpnSettings").addEventListener("click", () => showView("vpn"));
 
   pane.querySelector("#btnArrange").addEventListener("click", () => {
     closeMenu({ restoreFocus: false });
@@ -433,13 +445,43 @@ async function renderFolders() {
       </div>
     </form>
 
-    ${folders.length ? folders.map((f) => folderCard(f, missing)).join("") : `
+    ${folders.length ? `<ul class="menu-list">${folders.map(folderRow).join("")}</ul>` : `
       <div class="menu-empty">Папок пока нет. Папка — это значок на столе, внутри которого лежат ваши программы, файлы и сайты.</div>
     `}
   `;
 
-  hydrateShortcutIcons(pane);
-  bindFolderEvents(pane, folders);
+  bindFolderList(pane, folders);
+}
+
+function folderRow(f) {
+  const hidden = (config.hidden || []).includes(f.id);
+  return `
+    <li class="menu-row" data-folder-id="${escapeHtml(f.id)}">
+      <span class="menu-row-icon" aria-hidden="true">${f.icon_svg || FOLDER_ICONS.folder}</span>
+      <span class="menu-row-text">
+        <span class="menu-row-name">${escapeHtml(f.name)}</span>
+        <span class="menu-row-sub">${shortcutCount((f.items || []).length)}</span>
+      </span>
+      <button type="button" class="menu-btn" data-folder-open>Настроить…</button>
+      <label class="menu-switch" title="Показывать на столе">
+        <input type="checkbox" class="folder-vis-toggle" ${hidden ? "" : "checked"} aria-label="Показывать «${escapeHtml(f.name)}»">
+        <span class="menu-slider" aria-hidden="true"></span>
+      </label>
+    </li>`;
+}
+
+function openFolderPopup(folderId) {
+  const popup = openPopup(panel, "Папка", async (body) => {
+    const folder = (await listFolders()).find((f) => f.id === folderId);
+    if (!folder) {
+      popup.close();
+      return;
+    }
+    const missing = await missingTargets(folder.items || []);
+    body.innerHTML = folderCard(folder, missing);
+    hydrateShortcutIcons(body);
+    bindFolderCard(body.querySelector(".menu-folder"), folder, () => (popup.isOpen() ? popup.refresh() : renderFolders()));
+  }, renderFolders);
 }
 
 function folderCard(f, missing) {
@@ -494,8 +536,7 @@ function folderCard(f, missing) {
     </article>`;
 }
 
-function bindFolderEvents(pane, folders) {
-  const byId = (id) => folders.find((f) => f.id === id);
+function bindFolderList(pane, folders) {
   const refresh = () => renderFolders();
 
   const form = pane.querySelector("#newFolderForm");
@@ -526,86 +567,96 @@ function bindFolderEvents(pane, folders) {
     });
   });
 
-  pane.querySelectorAll(".menu-folder").forEach((card) => {
-    const folder = byId(card.dataset.folderId);
-    if (!folder) return;
+  pane.querySelectorAll("[data-folder-id]").forEach((li) => {
+    li.querySelector("[data-folder-open]").addEventListener("click", () => openFolderPopup(li.dataset.folderId));
+    const toggle = li.querySelector(".folder-vis-toggle");
+    toggle.addEventListener("change", () => runOnce(toggle, async () => {
+      const hidden = new Set(config.hidden || []);
+      if (toggle.checked) hidden.delete(li.dataset.folderId);
+      else hidden.add(li.dataset.folderId);
+      config.hidden = [...hidden];
+      await saveConfig();
+      await syncWidgets();
+    }));
+  });
+}
 
-    const nameInput = card.querySelector(".menu-folder-name");
-    nameInput.addEventListener("change", () => {
-      const name = nameInput.value.trim();
-      if (!name) {
+function bindFolderCard(card, folder, refresh) {
+  const nameInput = card.querySelector(".menu-folder-name");
+  nameInput.addEventListener("change", () => {
+    const name = nameInput.value.trim();
+    if (!name) {
+      nameInput.value = folder.name;
+      return;
+    }
+    updateFolder(folder, { name }).then((next) => Object.assign(folder, next))
+      .catch((err) => {
         nameInput.value = folder.name;
-        return;
-      }
-      updateFolder(folder, { name }).then((next) => Object.assign(folder, next))
-        .catch((err) => {
-          nameInput.value = folder.name;
-          showToast(`Не переименовано: ${err?.message || err}`, { tone: "error" });
-        });
-    });
-    nameInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") nameInput.blur();
-    });
+        showToast(`Не переименовано: ${err?.message || err}`, { tone: "error" });
+      });
+  });
+  nameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") nameInput.blur();
+  });
 
-    const del = card.querySelector("[data-delete-folder]");
-    del.addEventListener("click", () => runOnce(del, async () => {
-      await deleteFolder(folder, refresh);
+  const del = card.querySelector("[data-delete-folder]");
+  del.addEventListener("click", () => runOnce(del, async () => {
+    await deleteFolder(folder, refresh);
+    await refresh();
+  }));
+
+  card.querySelectorAll(".menu-row[data-item-id]").forEach((li) => {
+    const itemId = li.dataset.itemId;
+    const input = li.querySelector(".menu-inline-input");
+    input.addEventListener("change", () => {
+      renameItem(folder, itemId, input.value).then((next) => Object.assign(folder, next))
+        .catch((err) => showToast(`Не переименовано: ${err?.message || err}`, { tone: "error" }));
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") input.blur();
+    });
+    const remove = li.querySelector("[data-remove-item]");
+    remove.addEventListener("click", () => runOnce(remove, async () => {
+      await removeItem(folder, itemId, refresh);
       await refresh();
     }));
-
-    card.querySelectorAll(".menu-row[data-item-id]").forEach((li) => {
-      const itemId = li.dataset.itemId;
-      const input = li.querySelector(".menu-inline-input");
-      input.addEventListener("change", () => {
-        renameItem(folder, itemId, input.value).then((next) => Object.assign(folder, next))
-          .catch((err) => showToast(`Не переименовано: ${err?.message || err}`, { tone: "error" }));
-      });
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") input.blur();
-      });
-      const remove = li.querySelector("[data-remove-item]");
-      remove.addEventListener("click", () => runOnce(remove, async () => {
-        await removeItem(folder, itemId, refresh);
-        await refresh();
-      }));
-      const relink = li.querySelector("[data-relink]");
-      relink?.addEventListener("click", () => runOnce(relink, async () => {
-        const item = folder.items.find((it) => it.id === itemId);
-        const draft = await pickTarget(item?.kind === "folder");
-        if (!draft) return;
-        await replaceItemTarget(folder, itemId, draft);
-        await refresh();
-      }));
-    });
-
-    const add = (drafts) => addItems(folder, drafts).then(refresh);
-    const pickFile = card.querySelector("[data-pick-file]");
-    pickFile.addEventListener("click", () => runOnce(pickFile, async () => {
-      const draft = await pickTarget(false);
-      if (draft) await add([draft]);
+    const relink = li.querySelector("[data-relink]");
+    relink?.addEventListener("click", () => runOnce(relink, async () => {
+      const item = folder.items.find((it) => it.id === itemId);
+      const draft = await pickTarget(item?.kind === "folder");
+      if (!draft) return;
+      await replaceItemTarget(folder, itemId, draft);
+      await refresh();
     }));
-    const pickFolder = card.querySelector("[data-pick-folder]");
-    pickFolder.addEventListener("click", () => runOnce(pickFolder, async () => {
-      const draft = await pickTarget(true);
-      if (draft) await add([draft]);
-    }));
-    const paste = card.querySelector("[data-paste]");
-    paste.addEventListener("click", () => runOnce(paste, async () => {
-      const drafts = await clipboardDrafts();
-      if (!drafts.length) {
-        showToast("В буфере обмена нет ни файлов, ни ссылки");
-        return;
-      }
-      await add(drafts);
-    }));
-
-    card.querySelector("[data-from-start]").addEventListener("click", () => {
-      startPickerFor = startPickerFor === folder.id ? null : folder.id;
-      refresh();
-    });
-    const picker = card.querySelector("[data-start-picker]");
-    if (picker) bindStartPicker(picker, (draft) => add([draft]));
   });
+
+  const add = (drafts) => addItems(folder, drafts).then(refresh);
+  const pickFile = card.querySelector("[data-pick-file]");
+  pickFile.addEventListener("click", () => runOnce(pickFile, async () => {
+    const draft = await pickTarget(false);
+    if (draft) await add([draft]);
+  }));
+  const pickFolder = card.querySelector("[data-pick-folder]");
+  pickFolder.addEventListener("click", () => runOnce(pickFolder, async () => {
+    const draft = await pickTarget(true);
+    if (draft) await add([draft]);
+  }));
+  const paste = card.querySelector("[data-paste]");
+  paste.addEventListener("click", () => runOnce(paste, async () => {
+    const drafts = await clipboardDrafts();
+    if (!drafts.length) {
+      showToast("В буфере обмена нет ни файлов, ни ссылки");
+      return;
+    }
+    await add(drafts);
+  }));
+
+  card.querySelector("[data-from-start]").addEventListener("click", () => {
+    startPickerFor = startPickerFor === folder.id ? null : folder.id;
+    refresh();
+  });
+  const picker = card.querySelector("[data-start-picker]");
+  if (picker) bindStartPicker(picker, (draft) => add([draft]));
 }
 
 async function bindStartPicker(picker, onPick) {

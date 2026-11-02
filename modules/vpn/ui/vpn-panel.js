@@ -18,7 +18,7 @@ const PANEL_HTML = `
       </svg>
     </div>
     <div class="vpn-info">
-      <div class="vpn-label">VPN: Off</div>
+      <div class="vpn-label">VPN: выключен</div>
       <div class="vpn-server-name">—</div>
     </div>
     <label class="vpn-toggle">
@@ -27,20 +27,20 @@ const PANEL_HTML = `
     </label>
   </div>
   <select class="vpn-server-select" disabled>
-    <option>Загрузка...</option>
+    <option>Загрузка…</option>
   </select>
   <div class="vpn-server-picker">
-    <button type="button" class="vpn-server-button" disabled>Loading...</button>
+    <button type="button" class="vpn-server-button" disabled>Загрузка…</button>
     <div class="vpn-server-menu">
       <div class="vpn-menu-head">
-        <span class="vpn-menu-title">SERVERS</span>
-        <button type="button" class="vpn-ping-btn">PING ALL</button>
+        <span class="vpn-menu-title">СЕРВЕРЫ</span>
+        <button type="button" class="vpn-ping-btn">ПРОВЕРИТЬ ВСЕ</button>
       </div>
       <div class="vpn-menu-list"></div>
     </div>
   </div>
   <div class="vpn-auto-row">
-    <span class="vpn-auto-label">AUTO</span>
+    <span class="vpn-auto-label">АВТО</span>
     <label class="vpn-toggle vpn-auto-toggle">
       <input type="checkbox" class="vpn-auto-toggle-input" />
       <span class="vpn-toggle-slider"></span>
@@ -114,7 +114,7 @@ async function initVpnPanel(body) {
 
   async function loadVpnServers() {
     if (serverButton) {
-      serverButton.textContent = "Loading...";
+      serverButton.textContent = "Загрузка…";
       serverButton.disabled = true;
       serverButton.dataset.error = "";
     }
@@ -139,10 +139,10 @@ async function initVpnPanel(body) {
     await loadVpnServers();
   } catch (e) {
     logFrontend(`vpn_list_servers error=${e.message || e}`);
-    select.innerHTML = `<option>Subscription error</option>`;
+    select.innerHTML = `<option>Ошибка подписки</option>`;
     select.disabled = true;
     if (serverButton) {
-      serverButton.textContent = "Subscription error · retry";
+      serverButton.textContent = "Ошибка подписки · повторить";
       serverButton.disabled = false;
       serverButton.dataset.error = "1";
     }
@@ -177,7 +177,7 @@ async function initVpnPanel(body) {
     if (btn) {
       btn.disabled = true;
       btn.classList.add("busy");
-      btn.textContent = "PINGING…";
+      btn.textContent = "ПРОВЕРКА…";
     }
     try {
       logFrontend("vpn_ping_all invoke");
@@ -190,20 +190,20 @@ async function initVpnPanel(body) {
         .sort((a, b) => a.latencyMs - b.latencyMs);
       if (working.length) {
         const best = working[0];
-        showDebugMessage(`⚡ ${displayText(best.tag)} · ${best.latencyMs} ms`);
+        showDebugMessage(`⚡ ${displayText(best.tag)} · ${best.latencyMs} мс`);
         await connectTo(best.tag);
       } else {
-        showDebugMessage("No working servers found");
+        showDebugMessage("Рабочих серверов не найдено");
       }
     } catch (e) {
       logFrontend(`vpn_ping_all error=${e.message || e}`);
-      showDebugMessage(`Ping: ${e.message || e}`);
+      showDebugMessage(`Проверка: ${e.message || e}`);
     } finally {
       vpnPinging = false;
       if (btn) {
         btn.disabled = false;
         btn.classList.remove("busy");
-        btn.textContent = "PING ALL";
+        btn.textContent = "ПРОВЕРИТЬ ВСЕ";
       }
     }
   }
@@ -215,7 +215,7 @@ async function initVpnPanel(body) {
     if (serverButton.dataset.error || !vpnServersCache?.length) {
       loadVpnServers().catch((error) => {
         logFrontend(`vpn_list_servers retry error=${error.message || error}`);
-        serverButton.textContent = "Subscription error · retry";
+        serverButton.textContent = "Ошибка подписки · повторить";
         serverButton.disabled = false;
         serverButton.dataset.error = "1";
       });
@@ -310,10 +310,10 @@ async function refreshVpnStatus() {
     if (icon) icon.classList.toggle("off", !status.connected);
     if (label) {
       label.textContent = status.connecting
-        ? "VPN: Подключение..."
+        ? "VPN: подключение…"
         : status.connected
-        ? "VPN: On"
-        : "VPN: Off";
+        ? "VPN: включён"
+        : "VPN: выключен";
     }
     if (serverName) serverName.textContent = formatSelectedVpnServer(status);
     if (toggleInput && !vpnBusy) toggleInput.checked = status.connected;
@@ -334,7 +334,7 @@ function renderVpnServerPicker(select, button, menu) {
   const selected = vpnServersCache.find((server) => server.tag === select.value) || vpnServersCache[0];
   if (selected && !select.value) select.value = selected.tag;
 
-  button.textContent = selected ? displayText(selected.tag) : "Select server";
+  button.textContent = selected ? displayText(selected.tag) : "Выберите сервер";
   button.disabled = select.disabled;
 
   const rank = (server) => {
@@ -357,9 +357,9 @@ function renderVpnServerPicker(select, button, menu) {
       let badge = `<span class="vpn-opt-ping ping-unknown"></span>`;
       if (r && r.ok && Number.isFinite(r.latencyMs)) {
         const cls = r.latencyMs < 300 ? "ping-good" : r.latencyMs < 700 ? "ping-mid" : "ping-slow";
-        badge = `<span class="vpn-opt-ping ${cls}">${r.latencyMs}<i>ms</i></span>`;
+        badge = `<span class="vpn-opt-ping ${cls}">${r.latencyMs}<i>мс</i></span>`;
       } else if (r) {
-        badge = `<span class="vpn-opt-ping ping-fail">fail</span>`;
+        badge = `<span class="vpn-opt-ping ping-fail">ошибка</span>`;
       }
       return `
       <button type="button"
@@ -378,14 +378,14 @@ function formatSelectedVpnServer(status) {
   const name = displayText(tag);
   let line = name;
   if (Number.isFinite(status.proxyLatencyMs)) {
-    line = `${name} · proxy: ${status.proxyLatencyMs} ms`;
+    line = `${name} · прокси: ${status.proxyLatencyMs} мс`;
   } else if (status.proxyError) {
-    line = `${name} · proxy: fail`;
+    line = `${name} · прокси: ошибка`;
   } else if (status.connecting) {
-    line = `${name} · proxy: ...`;
+    line = `${name} · прокси: …`;
   }
   if (status.connected && status.ipUnverified) {
-    line = `${line} · ip: ?`;
+    line = `${line} · IP: ?`;
   }
   return line;
 }
