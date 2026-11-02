@@ -56,6 +56,9 @@ const TABS = [
   { id: "look", label: "Вид" },
 ];
 
+let panel = null;
+let opener = null;
+let currentView = "desk";
 
 export function initMenu() {
   panel = document.getElementById("menuContainer");
