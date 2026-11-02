@@ -512,6 +512,20 @@ fn parse_trojan_line(line: &str) -> Option<VpnServer> {
     })
 }
 
+/// A subscription body is base64 of a link list, or the plain list itself.
+fn decode_subscription(raw: &str) -> Result<String, String> {
+    let body = raw.trim();
+    if body.lines().any(|l| l.trim_start().starts_with("vless://") || l.trim_start().starts_with("trojan://")) {
+        return Ok(body.to_string());
+    }
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(body))
+        .map_err(|e| format!("subscription decode failed: {e}"))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn fetch_servers(subscription_url: &str) -> Result<Vec<VpnServer>, String> {
     let response = ureq::get(subscription_url)
         .set("User-Agent", "v2box/1.0")
@@ -523,12 +537,7 @@ fn fetch_servers(subscription_url: &str) -> Result<Vec<VpnServer>, String> {
         .into_string()
         .map_err(|e| format!("subscription read failed: {e}"))?;
 
-    use base64::Engine;
-    let decoded_bytes = base64::engine::general_purpose::STANDARD
-        .decode(raw.trim())
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(raw.trim()))
-        .map_err(|e| format!("subscription decode failed: {e}"))?;
-    let decoded = String::from_utf8_lossy(&decoded_bytes);
+    let decoded = decode_subscription(&raw)?;
 
     let servers: Vec<VpnServer> = decoded
         .lines()
@@ -2207,3 +2216,25 @@ impl unidtk_api::Module for VpnModule {
     }
 }
 
+#[cfg(test)]
+mod subscription_tests {
+    use super::decode_subscription;
+    use base64::Engine;
+
+    #[test]
+    fn plain_text_subscription_is_taken_as_is() {
+        let body = "vless://a@h:1#x\ntrojan://b@h:2#y\n";
+        assert_eq!(decode_subscription(body).unwrap(), body.trim());
+    }
+
+    #[test]
+    fn base64_subscription_is_decoded() {
+        let body = base64::engine::general_purpose::STANDARD.encode("vless://a@h:1#x");
+        assert_eq!(decode_subscription(&body).unwrap(), "vless://a@h:1#x");
+    }
+
+    #[test]
+    fn garbage_is_an_error() {
+        assert!(decode_subscription("<html>not a subscription</html>").is_err());
+    }
+}
