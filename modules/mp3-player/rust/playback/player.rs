@@ -864,7 +864,7 @@ impl PlayerManager {
         // Simple random selection based on timestamp
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis();
         let idx = ts as usize % playable.len();
         let track = &playable[idx];
