@@ -104,11 +104,12 @@ function migrateWidgetConfig(config) {
     }
   }
 
-  // The VPN panel used to be part of the clock: keep it there, once, so that
-  // taking it out later stays final.
+  // The VPN panel used to be part of the clock, whatever `hidden` said about its
+  // empty desk card: keep it there, once, so that taking it out later stays final.
   if (!config.migrations?.vpnNested) {
     config.migrations = { ...config.migrations, vpnNested: true };
-    if (!config.hidden?.includes("vpn")) config.nested = { ...config.nested, clock: ["vpn"] };
+    config.nested = { ...config.nested, clock: ["vpn"] };
+    if (Array.isArray(config.hidden)) config.hidden = config.hidden.filter((id) => id !== "vpn");
     changed = true;
   }
 

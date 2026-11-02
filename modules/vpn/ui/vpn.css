@@ -67,7 +67,7 @@
   position: absolute;
   cursor: pointer;
   inset: 0;
-  background: rgba(var(--bg-elev-rgb), 0.15);
+  background: rgba(var(--fg-rgb), 0.22);
   border-radius: 20px;
   transition: background var(--dur-hover) ease;
 }
