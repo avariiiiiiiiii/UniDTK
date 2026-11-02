@@ -44,127 +44,79 @@
  ╚═════╝ ╚═╝  ╚═╝ ╚═╝╚═════╝    ╚═╝   ╚═╝  ╚═╝
 ```
 
-# UniDTK — Unified Desktop Täglich Kit
 
-> **UniDTK** (Unified Desktop Täglich Kit) — высокопроизводительная модульная интерактивная оболочка и платформа виджетов рабочего стола для Windows 10/11, построенная на базе **Rust**, **Tauri v2** и аппаратного ускорения **WebView2**.
->
-> 🤖 **Для ИИ-агентов:** Карта системы и главная точка входа — [`docs/00_master.md`](docs/00_master.md). Инженерный регламент и 10-ступенчатый протокол разработки — [`AGENTS.md`](AGENTS.md).
+# UniDTK: the book
 
----
+UniDTK turns the Windows desktop into a live surface: a window attached behind the
+icons, widgets on it, and a small kernel underneath. This file is the book. Every
+chapter below is a document in this repository, and each one explains the mechanism,
+step by step: what runs, on which thread, what it writes, and how it fails.
 
-## 🌟 Возможности
+Open it rendered, from anywhere, the way `rustup doc` opens the Rust documentation:
 
-- **Интеграция с рабочим столом (WorkerW/Progman):** Окно оболочки бесшовно встраивается в системную иерархию окон Windows позади ярлыков рабочего стола без рамок и мерцаний.
-- **Микроядерная архитектура:**
-  - Ядро (`unidtk`) — системный трей, диспетчер событий, IPC-сервер и защищённое хранилище `redb`.
-  - Модульный контракт (`unidtk-api`) — стандартизированный трейт `Module`, изоляция данных через `ModuleDb` и строгая шина событий.
-- **Встроенные модули (Vertical Slices):**
-  - 🎵 **MP3 Player & AI DJ:** Воспроизведение через `libmpv`, анализ темпа и тональности, ONNX нейросетевые эмбеддинги и алгоритмический AI DJ.
-  - 🛡️ **VPN (Sing-box):** Полнофункциональный VPN-клиент с TUN-интерфейсом и нативным повышенным хелпером `vpn-helper.exe`.
-  - 💬 **Telegram:** Интеграция с TDLib, кэширование диалогов, предпросмотр медиа и отправка файлов.
-  - 📁 **Explorer:** Полноэкранный файловый оверлей с предпросмотром, вычислением хэшей (MD5, SHA-256) и интеграцией с проводником.
-  - 🔊 **Glyph Bar:** Адаптивная световая панель Nothing Glyph, управление громкостью мастер-микшера Windows с визуализацией уровней.
-  - 🕒 **Clock:** Часы рабочего стола.
-- **Консольный мост `udtk`:**
-  - Мощный CLI-инструмент управления, мониторинга и сквозного тестирования (`udtk doctor`, `udtk status`, `udtk shot`, `udtk act`).
-  - **Автоматическое добавление в `PATH`:** При запуске приложение самостоятельно регистрирует каталог CLI (`%LOCALAPPDATA%\UniDTK\bin`) в переменной окружения `PATH` текущего пользователя (`HKCU\Environment`).
-- **Плавная миграция данных:**
-  - Автоматический перенос настроек, ярлыков и баз данных из устаревшего `%LOCALAPPDATA%\Shell` в `%LOCALAPPDATA%\UniDTK`.
-- **Чистый Rust без C-зависимостей базы данных:**
-  - `unidtk.redb` для данных и `unidtk_logs.redb` для асинхронного системного журнала.
-
----
-
-## 📂 Структура репозитория
-
-```
-core/
-├── api/                 # [unidtk-api] Контракт модулей (Module, ModuleDb, ModuleContext)
-├── kernel/              # Ядро UniDTK (main.rs, unidtk_db.rs, ipc.rs, wallpaper.rs)
-└── ui/                  # Фронтенд ядра (index.html, unidtk-core.js, menu.js, motion.js)
-modules/
-├── clock/               # Модуль системных часов
-├── explorer/            # [unidtk-mod-explorer] Файловый менеджер и оверлей
-├── glyph-bar/           # [unidtk-mod-glyph-bar] Индикатор + системная громкость
-├── mp3-player/          # [unidtk-mod-mp3-player] Аудиоплеер и AI DJ
-├── telegram/            # [unidtk-mod-telegram] Интеграция с Telegram (TDLib)
-└── vpn/                 # [unidtk-mod-vpn] VPN-клиент на базе Sing-box
-opt/
-├── cli/                 # [udtk] Нативный CLI-инструмент (127.0.0.1:26540 & CDP)
-└── vpn-helper/          # [vpn-helper] Повышенный хелпер для управления TUN/VPN
-scheduler-tasks/         # XML-манифесты для Windows Task Scheduler
-toolchain/               # Корневой крейт сборки Tauri (tauri.conf.json, build.rs)
+```text
+udtk doc
 ```
 
----
+That command renders this file and its chapters to HTML in
+`%LOCALAPPDATA%\UniDTK\cache\book` and opens the page in your default browser.
 
-## 🛠️ Сборка и запуск
+## Start here
 
-### Требования
-- **ОС:** Windows 10/11 x64
-- **Rust:** 1.77+ (`stable-x86_64-pc-windows-msvc`)
-- **Visual Studio C++ Build Tools**
-- **Microsoft Edge WebView2 Runtime**
+1. [Project map and current state](docs/00_master.md): what exists, what is active,
+   where to read next.
+2. [Architecture](docs/architecture.md): the rules of the kernel, the module contract,
+   storage, and the desktop window. This is the norm the other chapters explain.
+3. [Rules for agents](AGENTS.md): the working protocol for this repository.
 
-### Компиляция
+## The kernel and its tools
 
-```powershell
-# Проверка компиляции всех крейтов
-cargo check --workspace
+4. [The `udtk` command line](docs/cliudtk.md): the IPC socket, the two doors into the
+   kernel, and CDP control of the WebView.
+5. [Core and module fixes](docs/coremodfixes.md): how past failures in the core were
+   traced and closed.
+6. [Agent end-to-end testing and IPC](docs/agent-e2e-and-ipc-plan.md).
+7. [Registry and shell interception](docs/registry-shell-interception-fix.md).
+8. [Moving storage to redb](docs/redb-migration.md).
+9. [Logging](docs/tasks/logging.md).
 
-# Запуск тестов
-cargo test --workspace
+## The interface
 
-# Сборка релизных бинарников (unidtk, udtk, vpn-helper)
-cargo build --release --bins
+10. [Motion](docs/unicoremodmotion.md): curves, durations, and how a surface morphs.
+11. [Interface diagrams](docs/unidtkascii.md).
+12. [The native host: moving to GPUI](docs/gpui_transition.md).
+
+## Modules
+
+13. [VPN](docs/modules/vpn.md): sing-box, the TUN adapter, and the elevated helper.
+14. [Telegram: topics and communities](docs/telegram-topics-and-communities.md).
+15. [The player: libmpv](docs/tasks/libmpv.md).
+16. [AI DJ research](docs/ai-dj-research.md).
+
+## Plans and records
+
+17. [Customization menu audit](docs/tasks/menu-audit.md) and
+    [redesign](docs/tasks/menu-redesign.md).
+18. [Kanban](docs/kanban.md) and [architecture kanban](docs/architecture-kanban.md).
+19. [Session log](docs/sessions.md): every engineering session, newest first.
+
+## Build and run
+
+The one release command stops the app, builds the three binaries and the installer,
+installs into `C:\Program Files\UniDTK`, checks the install by SHA-256, restarts the
+app, and gates on live IPC:
+
+```text
+udtk build
 ```
 
-Собранные исполняемые файлы будут размещены в `target/release/`:
-- `unidtk.exe` — основное приложение оболочки
-- `udtk.exe` — консольный инструмент управления
-- `vpn-helper.exe` — нативный хелпер службы VPN
+Run the tests with one job, because two link-time-optimized builds at once run this
+machine out of memory:
 
----
-
-## 💻 Консольный инструмент `udtk`
-
-После первого запуска `unidtk.exe` утилита `udtk` становится доступна в терминале из любого каталога благодаря авторегистрации в `PATH`.
-
-Запуск без аргументов печатает сплэш: эмблема Уробороса слева, блочная надпись `UniDTK` справа и карта команд внизу (цветной вывод, тир подбирается по ширине **и** высоте терминала, тело змея несёт фото-текстуру исходной живописи). Подробная справка — `udtk help`.
-
-### Основные команды
-
-| Команда | Описание |
-| :--- | :--- |
-| `udtk doctor` | Комплексная диагностика системы, окружения, бинарников и состояния IPC |
-| `udtk ping` | Проверка связи с IPC-сервером оболочки |
-| `udtk status` | Сводный отчет о состоянии всех модулей, базы данных и плеера |
-| `udtk path status` | Проверка статуса наличия CLI в системном `PATH` |
-| `udtk path ensure` | Принудительное обновление и прописка каталога CLI в `PATH` |
-| `udtk tasks status` | Статус задач в планировщике Windows Task Scheduler |
-| `udtk tasks register` | Регистрация задач автозапуска (`UniDTK`, `UniDTKSingbox`, `UniDTKVpnStop`) |
-| `udtk logs` | Просмотр системных журналов ядра и фронтенда из базы `redb` |
-| `udtk dom` | Получение семантического дерева интерактивных элементов UI через CDP |
-| `udtk act <action> <target>` | Эмуляция действий пользователя (`click`, `type`, `press`) через CDP |
-| `udtk shot [path]` | Создание мгновенного скриншота окна оболочки |
-
----
-
-## ⏱️ Интеграция с Windows Task Scheduler
-
-Для работы в режиме системной оболочки и автозапуска без раздражающих окон UAC используются нативные задачи планировщика Windows:
-
-1. **`UniDTK`** — Автозапуск приложения при входе пользователя в систему с правами текущего пользователя (`InteractiveToken`).
-2. **`UniDTKSingbox`** — Запуск службы VPN Sing-box с наивысшими правами (`HighestAvailable`).
-3. **`UniDTKVpnStop`** — Мягкая остановка процесса VPN при выходе или завершении работы.
-
-Регистрация выполняется одной командой:
-```powershell
-udtk tasks register all
+```text
+cargo test --release --workspace -j 1
 ```
 
----
+## License
 
-## 📄 Лицензия
-
-Проект распространяется под лицензией MIT.
+The project is distributed under the MIT license.

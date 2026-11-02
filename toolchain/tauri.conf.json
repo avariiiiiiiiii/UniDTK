@@ -141,6 +141,9 @@
     "resources": {
       "dist/modules/": "modules",
       "dist/assets/fonts/": "fonts",
+      "../README.md": "book/README.md",
+      "../AGENTS.md": "book/AGENTS.md",
+      "../docs/": "book/docs",
       "../opt/tdlib-native/win32-x64/tdjson.dll": "tdjson.dll",
       "../opt/tdlib-native/win32-x64/libcrypto-3-x64.dll": "libcrypto-3-x64.dll",
       "../opt/tdlib-native/win32-x64/libssl-3-x64.dll": "libssl-3-x64.dll",
