@@ -1401,8 +1401,13 @@ fn build_cmd(args: &[String]) -> Result<String, String> {
     let release_dir = root.join("target/release");
     let _ = std::fs::create_dir_all(&release_dir);
     if dll_src.exists() {
-        std::fs::copy(&dll_src, release_dir.join("libmpv-2.dll"))
-            .map_err(|e| format!("cannot copy {}: {e}", dll_src.display()))?;
+        // A big DLL is often held for a moment by a scanner, so an unchanged copy stays.
+        let dll_dst = release_dir.join("libmpv-2.dll");
+        let unchanged = matches!((sha256_of(&dll_dst), sha256_of(&dll_src)), (Ok(a), Ok(b)) if a == b);
+        if !unchanged {
+            std::fs::copy(&dll_src, &dll_dst)
+                .map_err(|e| format!("cannot copy {}: {e}", dll_src.display()))?;
+        }
     } else if !release_dir.join("libmpv-2.dll").exists() {
         return Err(format!("{} is missing and target/release has no copy", dll_src.display()));
     }
