@@ -310,6 +310,7 @@ export function renderMicrographics(card, id) {
         pos.y = clamp(origin.y + dy, 8, Math.max(8, area.h - 40));
         card.style.left = `${origin.left + pos.x - origin.x}px`;
         card.style.top = `${origin.top + pos.y - origin.y}px`;
+        card._nestHover?.(ev.clientX, ev.clientY);
       }
     };
     const move = ev => {
@@ -321,6 +322,12 @@ export function renderMicrographics(card, id) {
       if (!gesture || ev.pointerId !== pointerId) return;
       if (moveFrame) cancelAnimationFrame(moveFrame);
       if (cancel) Object.assign(pos, { x: origin.x, y: origin.y, mgScale: origin.scale }); else apply(ev);
+      // Dropped on another widget: the core warns, and the panel goes back.
+      if (!cancel && !resizing && card._nestDrop?.(ev.clientX, ev.clientY)) {
+        Object.assign(pos, { x: origin.x, y: origin.y });
+        card.style.left = `${origin.left}px`;
+        card.style.top = `${origin.top}px`;
+      }
       document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up);
       document.removeEventListener("pointercancel", cancelled); capture.removeEventListener("lostpointercapture", lost);
       gesture = null; card.classList.remove("dragging");

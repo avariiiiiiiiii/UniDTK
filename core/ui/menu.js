@@ -2,17 +2,16 @@
  * UniDTK — customization panel (menu.js)
  *
  * A side panel on the right of the live desktop, inside the wallpaper window:
- *   1. «Стол»  — module packs, arranging widgets on the desk
- *   2. «Папки» — desktop folders and their shortcuts, added from Start, a system
- *               dialog or the clipboard — never by typing a path
- *   3. «Вид»   — theme, colours, everything else folded into «Тонкая настройка»
+ *   1. «Стол» — the «Виджеты» and «Папки» packs and arranging the desk; the
+ *              settings of one item open as a sheet over the menu
+ *   2. «Вид»  — theme, colours, everything else folded into «Тонкая настройка»
  * plus the VPN view, reached from «Стол» (the VPN widget may be hidden).
  */
 
 import { invoke } from "@unidtk/bridge";
 import { getWidgets, getDefaultWidgetConfig, getDisabledModules, setModuleEnabled } from "./widgets-api.js";
 import { config, saveConfig, syncWidgets, relayoutWidgets, escapeHtml, enterArrangeMode, moveWidgetToHost } from "./unidtk-core.js";
-import { openPopup } from "./popup.js";
+import { openSheet } from "./popup.js";
 import {
   getActiveTheme,
   getAllPresets,
@@ -52,7 +51,6 @@ async function runOnce(control, action) {
 
 const TABS = [
   { id: "desk", label: "Стол" },
-  { id: "folders", label: "Папки" },
   { id: "look", label: "Вид" },
 ];
 
@@ -136,7 +134,6 @@ function showView(view) {
   });
   panel.querySelector(".menu-tabs").hidden = view === "vpn";
   if (view === "desk") renderDesk();
-  else if (view === "folders") renderFolders();
   else if (view === "look") renderLook();
   else if (view === "vpn") renderVpn();
 }
@@ -198,11 +195,13 @@ function clearHighlight() {
   document.querySelectorAll(".widget-card.menu-highlight").forEach((c) => c.classList.remove("menu-highlight"));
 }
 
-const STATE_LABELS = { off: "Выключен", background: "В фоне", desk: "На столе" };
+// What the user does to a module, and what the row says afterwards.
+const STATE_ACTIONS = { desk: "Включить", background: "Скрыть", off: "Выключить" };
+const STATE_NOUNS = { desk: "на столе", background: "скрыт, работает", off: "выключен" };
 
 // One state per module. `off` stops a module with a backend; hiding the card
-// leaves it working, which is `background`. Without a backend there is nothing
-// left to run, so a hidden module is simply off.
+// leaves it working. Without a backend there is nothing left to run, so a
+// hidden module is simply off and gets two actions instead of three.
 function moduleState(w, disabled) {
   if (w.backend && disabled.has(w.id)) return "off";
   if (!(config.hidden || []).includes(w.id)) return "desk";
@@ -227,68 +226,57 @@ async function setModuleState(w, disabled, next) {
   await syncWidgets();
 }
 
-function groupPacks(modules) {
-  const packs = new Map();
-  for (const w of modules) {
-    const { id, label } = w.pack || { id: "other", label: "Другое" };
-    if (!packs.has(id)) packs.set(id, { id, label, modules: [] });
-    packs.get(id).modules.push(w);
-  }
-  return [...packs.values()];
-}
-
 function nestingHost(id, widgets) {
   const hostId = Object.keys(config.nested || {}).find((host) => config.nested[host].includes(id));
   return hostId ? widgets.find((w) => w.id === hostId) : null;
 }
 
-function openPackPopup(pack, widgets, disabled) {
-  const popup = openPopup(panel, pack.label, (body) => {
-    body.innerHTML = `<ul class="menu-list">${pack.modules.map((w) => {
-      const state = moduleState(w, disabled);
-      const states = w.backend ? ["off", "background", "desk"] : ["off", "desk"];
-      const host = nestingHost(w.id, widgets);
-      return `
-        <li class="menu-row" data-widget-id="${escapeHtml(w.id)}">
-          <span class="menu-row-icon" aria-hidden="true">${w.iconSvg || ""}</span>
-          <span class="menu-row-text">
-            <span class="menu-row-name">${escapeHtml(w.name)}</span>
-            ${host ? `<span class="menu-row-sub">Внутри «${escapeHtml(host.name)}»</span>` : ""}
-          </span>
-          <div class="menu-pills" role="radiogroup" aria-label="${escapeHtml(w.name)}">
-            ${states.map((value) => `
-              <button type="button" class="menu-pill" role="radio" data-state="${value}" aria-checked="${value === state}">${STATE_LABELS[value]}</button>
-            `).join("")}
-          </div>
-          ${host ? `<button type="button" class="menu-btn" data-eject>Вынуть на стол</button>` : ""}
-          ${w.settingsView ? `<button type="button" class="menu-btn" data-settings>Настроить…</button>` : ""}
-        </li>`;
-    }).join("")}</ul>`;
+// A module without a backend is never "off", only hidden.
+function stateNoun(w, state) {
+  return !w.backend && state === "off" ? "скрыт" : STATE_NOUNS[state];
+}
 
-    body.querySelectorAll(".menu-row").forEach((li) => {
-      const w = pack.modules.find((m) => m.id === li.dataset.widgetId);
-      li.addEventListener("mouseenter", () => highlight(w.id));
-      li.addEventListener("mouseleave", clearHighlight);
-      li.querySelectorAll("[data-state]").forEach((pill) => {
-        pill.addEventListener("click", () => runOnce(pill, async () => {
-          await setModuleState(w, disabled, pill.dataset.state);
-          popup.refresh();
-        }));
-      });
-      const eject = li.querySelector("[data-eject]");
-      eject?.addEventListener("click", () => runOnce(eject, async () => {
-        await moveWidgetToHost(w.id, null);
-        popup.refresh();
+function widgetStatus(w, widgets, disabled) {
+  const host = nestingHost(w.id, widgets);
+  return host ? `внутри «${host.name}»` : stateNoun(w, moduleState(w, disabled));
+}
+
+function openWidgetSheet(w, origin, widgets, disabled) {
+  openSheet(panel, origin, w.name, (body) => {
+    const state = moduleState(w, disabled);
+    const states = w.backend ? ["desk", "background", "off"] : ["desk", "off"];
+    const host = nestingHost(w.id, widgets);
+    body.innerHTML = `
+      <p class="menu-note">${escapeHtml(w.description || "")}</p>
+      <div class="menu-pills" role="radiogroup" aria-label="${escapeHtml(w.name)}">
+        ${states.map((value) => `
+          <button type="button" class="menu-pill" role="radio" data-state="${value}" aria-checked="${value === state}">${w.backend || value !== "off" ? STATE_ACTIONS[value] : "Скрыть"}</button>
+        `).join("")}
+      </div>
+      <p class="menu-note">${host ? `Сейчас внутри «${escapeHtml(host.name)}».` : `Сейчас ${stateNoun(w, state)}.`}</p>
+      <div class="menu-actions">
+        ${host ? `<button type="button" class="menu-btn" data-eject>Вынуть на стол</button>` : ""}
+        ${w.settingsView ? `<button type="button" class="menu-btn" data-settings>Настроить ${escapeHtml(w.name)}…</button>` : ""}
+      </div>`;
+    body.querySelectorAll("[data-state]").forEach((pill) => {
+      pill.addEventListener("click", () => runOnce(pill, async () => {
+        await setModuleState(w, disabled, pill.dataset.state);
+        openWidgetSheet.current?.refresh();
       }));
-      li.querySelector("[data-settings]")?.addEventListener("click", () => {
-        popup.close();
-        showView(w.settingsView);
-      });
+    });
+    const eject = body.querySelector("[data-eject]");
+    eject?.addEventListener("click", () => runOnce(eject, async () => {
+      await moveWidgetToHost(w.id, null);
+      openWidgetSheet.current?.refresh();
+    }));
+    body.querySelector("[data-settings]")?.addEventListener("click", () => {
+      openWidgetSheet.current?.close();
+      showView(w.settingsView);
     });
   }, () => {
-    clearHighlight();
+    openWidgetSheet.current = null;
     renderDesk();
-  });
+  }).then((sheet) => { openWidgetSheet.current = sheet; });
 }
 
 async function renderDesk() {
@@ -309,7 +297,7 @@ async function renderDesk() {
     return;
   }
   disabled = new Set(disabled);
-  const packs = groupPacks(widgets.filter((w) => !w.isFolder));
+  const modules = widgets.filter((w) => !w.isFolder);
 
   pane.innerHTML = `
     <div class="menu-actions">
@@ -317,38 +305,31 @@ async function renderDesk() {
       <button type="button" class="menu-btn" id="btnResetPositions">Исходная раскладка</button>
     </div>
 
-    <h3 class="menu-heading">Пакеты</h3>
-    <p class="menu-note">Выключенный модуль сразу останавливается и не тратит ресурсы.</p>
+    <h3 class="menu-heading">Виджеты</h3>
     <ul class="menu-list">
-      ${packs.map((pack) => {
-        const on = pack.modules.filter((w) => moduleState(w, disabled) !== "off");
-        return `
-          <li class="menu-row" data-pack="${escapeHtml(pack.id)}">
-            <span class="menu-row-text">
-              <span class="menu-row-name">${escapeHtml(pack.label)}</span>
-              <span class="menu-row-sub">${pack.modules.map((w) => escapeHtml(w.name)).join(", ")}</span>
-            </span>
-            <button type="button" class="menu-btn" data-pack-open>Настроить…</button>
-            <label class="menu-switch">
-              <input type="checkbox" class="pack-toggle" ${on.length ? "checked" : ""} aria-label="Пакет «${escapeHtml(pack.label)}» включён">
-              <span class="menu-slider" aria-hidden="true"></span>
-            </label>
-          </li>`;
-      }).join("")}
+      ${modules.map((w) => `
+        <li class="menu-row" data-widget-id="${escapeHtml(w.id)}">
+          <span class="menu-row-icon" aria-hidden="true">${w.iconSvg || ""}</span>
+          <span class="menu-row-text">
+            <span class="menu-row-name">${escapeHtml(w.name)}</span>
+            <span class="menu-row-sub">${escapeHtml(widgetStatus(w, widgets, disabled))}</span>
+          </span>
+          <button type="button" class="menu-btn" data-widget-open>Настроить…</button>
+        </li>`).join("")}
     </ul>
+
+    <h3 class="menu-heading">Папки</h3>
+    <div id="deskFolders"><div class="menu-empty">Загрузка…</div></div>
   `;
 
-  pane.querySelectorAll("[data-pack]").forEach((li) => {
-    const pack = packs.find((p) => p.id === li.dataset.pack);
-    li.querySelector("[data-pack-open]").addEventListener("click", () => openPackPopup(pack, widgets, disabled));
-    const toggle = li.querySelector(".pack-toggle");
-    toggle.addEventListener("change", () => runOnce(toggle, async () => {
-      for (const w of pack.modules) {
-        const hidden = (config.hidden || []).includes(w.id);
-        await setModuleState(w, disabled, !toggle.checked ? "off" : w.backend && hidden ? "background" : "desk");
-      }
-    }));
+  pane.querySelectorAll(".menu-row[data-widget-id]").forEach((li) => {
+    const w = modules.find((m) => m.id === li.dataset.widgetId);
+    li.addEventListener("mouseenter", () => highlight(w.id));
+    li.addEventListener("mouseleave", clearHighlight);
+    const open = li.querySelector("[data-widget-open]");
+    open.addEventListener("click", () => openWidgetSheet(w, open, widgets, disabled));
   });
+  renderFolders();
 
   pane.querySelector("#btnArrange").addEventListener("click", () => {
     closeMenu({ restoreFocus: false });
@@ -414,7 +395,8 @@ let startPickerFor = null;
 let creatingFolder = false;
 
 async function renderFolders() {
-  const pane = panel.querySelector("#pane-folders");
+  const pane = panel.querySelector("#deskFolders");
+  if (!pane) return;
   if (!pane.childElementCount) pane.innerHTML = `<div class="menu-empty">Загрузка…</div>`;
 
   let folders;
@@ -433,7 +415,7 @@ async function renderFolders() {
 
   pane.innerHTML = `
     <div class="menu-actions">
-      <button type="button" class="menu-btn menu-btn-primary" id="btnNewFolder" aria-expanded="${creatingFolder}">+ Папка</button>
+      <button type="button" class="menu-btn" id="btnNewFolder" aria-expanded="${creatingFolder}">+ Папка</button>
     </div>
     <form class="menu-new-folder" id="newFolderForm" ${creatingFolder ? "" : "hidden"}>
       <input type="text" class="menu-input" id="newFolderName" placeholder="Название, например «Игры»" maxlength="40" aria-label="Название папки">
@@ -473,18 +455,19 @@ function folderRow(f) {
     </li>`;
 }
 
-function openFolderPopup(folderId) {
-  const popup = openPopup(panel, "Папка", async (body) => {
+function openFolderSheet(folderId, origin) {
+  let sheet = null;
+  openSheet(panel, origin, "Папка", async (body) => {
     const folder = (await listFolders()).find((f) => f.id === folderId);
     if (!folder) {
-      popup.close();
+      sheet?.close();
       return;
     }
     const missing = await missingTargets(folder.items || []);
     body.innerHTML = folderCard(folder, missing);
     hydrateShortcutIcons(body);
-    bindFolderCard(body.querySelector(".menu-folder"), folder, () => (popup.isOpen() ? popup.refresh() : renderFolders()));
-  }, renderFolders);
+    bindFolderCard(body.querySelector(".menu-folder"), folder, () => (sheet?.isOpen() ? sheet.refresh() : renderFolders()));
+  }, renderFolders).then((opened) => { sheet = opened; });
 }
 
 function folderCard(f, missing) {
@@ -571,7 +554,8 @@ function bindFolderList(pane, folders) {
   });
 
   pane.querySelectorAll("[data-folder-id]").forEach((li) => {
-    li.querySelector("[data-folder-open]").addEventListener("click", () => openFolderPopup(li.dataset.folderId));
+    const open = li.querySelector("[data-folder-open]");
+    open.addEventListener("click", () => openFolderSheet(li.dataset.folderId, open));
     const toggle = li.querySelector(".folder-vis-toggle");
     toggle.addEventListener("change", () => runOnce(toggle, async () => {
       const hidden = new Set(config.hidden || []);

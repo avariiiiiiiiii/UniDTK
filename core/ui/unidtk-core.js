@@ -416,6 +416,11 @@ function desiredWidgets(widgets) {
   return renderWidgets.filter((w) => !nestedChildren.has(w.id));
 }
 
+let snapBypass = false;
+window.addEventListener("keydown", (e) => { if (e.key === "Alt") snapBypass = true; });
+window.addEventListener("keyup", (e) => { if (e.key === "Alt") snapBypass = false; });
+window.addEventListener("blur", () => { snapBypass = false; });
+
 // Widgets on hand, and which of them sit inside which host right now.
 let disabledModules = new Set();
 let knownWidgets = new Map();
@@ -639,6 +644,21 @@ function buildWidgetCard(w, layout) {
     // area on the desktop, so a click target on it would swallow clicks meant for
     // the desktop behind it and expand it as if it were a folder.
     card._afterBodyRender = (renderedBody) => mountNested(card, renderedBody);
+    // Cards with their own drag code report the pointer here, so they get the same
+    // highlight, warning and refusal. True means: the drop was refused, put it back.
+    card._nestHover = (x, y) => markNestTarget(card, x, y);
+    card._nestDrop = (x, y) => {
+      const host = nestHostAt(card, x, y);
+      clearNestMarks();
+      if (!host) return false;
+      const verdict = nestVerdict(card, host);
+      if (verdict.ok) {
+        moveWidgetToHost(card.dataset.id, host.dataset.id);
+        return false;
+      }
+      showToast(verdict.reason, { tone: "error" });
+      return true;
+    };
     if (w.specialType !== "mp3-player" && w.specialType !== "glyph-bar" && w.specialType !== "telegram" && w.specialType !== "micrographics") {
       const clickTarget = w.specialType ? card : header;
       clickTarget.addEventListener("click", (e) => {
@@ -1818,13 +1838,14 @@ document.addEventListener("visibilitychange", () => {
 
 
 
-const SNAP_GRID = 16;
 const SNAP_MAGNET = 10;
 const SNAP_GAP = 12;
 
 // Where a dragged card settles: the nearest screen edge or neighbour edge within
 // the magnet distance, otherwise the grid; never off the screen.
 function snapMove(card, rawX, rawY) {
+  // Alt places freely, without the magnet.
+  if (snapBypass) return { x: Math.round(rawX), y: Math.round(rawY) };
   const canvasW = widgetsCanvas.clientWidth || window.innerWidth;
   const canvasH = widgetsCanvas.clientHeight || window.innerHeight;
   const w = card.offsetWidth;
@@ -1842,7 +1863,7 @@ function snapMove(card, rawX, rawY) {
     ys.push(oy, oy + oh - h, oy + oh + SNAP_GAP, oy - SNAP_GAP - h);
   });
   const settle = (raw, lines) => {
-    let best = Math.round(raw / SNAP_GRID) * SNAP_GRID;
+    let best = raw;
     let bestDist = SNAP_MAGNET;
     for (const line of lines) {
       const dist = Math.abs(line - raw);
@@ -2028,17 +2049,16 @@ function setupDragReorder() {
       card.classList.remove("dragging");
 
       const host = isResize || cancelled ? null : nestHostAt(card, ev.clientX, ev.clientY);
-      clearNestMarks();
-      if (host) {
-        const verdict = nestVerdict(card, host);
-        if (verdict.ok) {
-          moveWidgetToHost(card.dataset.id, host.dataset.id);
-          return;
-        }
-        showToast(verdict.reason, { tone: "error" });
+      if (host && nestVerdict(card, host).ok) {
+        clearNestMarks();
+        moveWidgetToHost(card.dataset.id, host.dataset.id);
+        return;
+      }
+      if (host && card._nestDrop(ev.clientX, ev.clientY)) {
         card.style.left = startLeft + "px";
         card.style.top = startTop + "px";
       }
+      clearNestMarks();
       
       // Сохраняем ТОЛЬКО геометрию, не теряя пользовательских настроек
       // (authUser, autoShuffle, version и т.п.)

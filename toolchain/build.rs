@@ -340,11 +340,6 @@ fn lint_module_contracts() {
                 fail(format!("tint default is not a palette slot: {tint}"));
             }
         }
-        if let Some(pack) = value.get("pack") {
-            if pack["id"].as_str().is_none() || pack["label"].as_str().is_none() {
-                fail(format!("pack needs id and label: {pack}"));
-            }
-        }
     }
 }
 

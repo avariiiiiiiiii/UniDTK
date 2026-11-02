@@ -129,9 +129,5 @@
       ]
     }
   ],
-  "pack": {
-    "id": "desk",
-    "label": "Стол"
-  },
   "backend": true
 }

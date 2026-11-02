@@ -19,10 +19,6 @@
     "module": "vpn-panel.js",
     "render": "renderVpnPanel"
   },
-  "pack": {
-    "id": "comm",
-    "label": "Связь"
-  },
   "backend": true,
   "settingsView": "vpn"
 }
