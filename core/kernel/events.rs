@@ -79,6 +79,11 @@ pub fn is_state(event: &str) -> bool {
 /// events with the same numbering.
 pub fn publish(event: &str, payload: Value) {
     let broker = broker();
+    // The number is taken under the lock that orders the rings: taken before it, an
+    // older frame could land last and stay as the state a new client is given.
+    let Ok(mut rings) = broker.rings.lock() else {
+        return;
+    };
     let seq = broker.seq.fetch_add(1, Ordering::SeqCst) + 1;
     let frame = Frame {
         seq,
@@ -86,7 +91,7 @@ pub fn publish(event: &str, payload: Value) {
         payload,
     };
 
-    if let Ok(mut rings) = broker.rings.lock() {
+    {
         let ring = rings.entry(frame.event.clone()).or_default();
         if is_state_event(&frame.event) {
             // Only the newest value is worth remembering.
@@ -98,6 +103,7 @@ pub fn publish(event: &str, payload: Value) {
         }
     }
 
+    // Still under the rings lock, so subscribers see the same order. try_send never waits.
     if let Ok(subscribers) = broker.subscribers.lock() {
         for (_, sender) in subscribers.iter() {
             // A slow or dead client must never block the kernel: try_send drops instead.
