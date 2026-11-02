@@ -1,1173 +1,1103 @@
-# `udtk` — the UniDTK CLI bridge
+# The `udtk` book: the UniDTK CLI bridge
 
-Reference for the native CLI bridge of the **UniDTK** project (Unified Desktop Täglich Kit): its commands, flags, internals, the diagnostic loop, and the rules every module must follow.
+This is the book about `udtk`, the command-line bridge of **UniDTK** (Unified Desktop Täglich Kit). It teaches the mechanism step by step: what runs on the machine, which channel carries each request, which code decides whether a request is allowed, and why it is built that way. It follows the documentation principle in [architecture.md](architecture.md): English, low level, like the Rust Book. The entry point of the whole book is [README.md](../README.md). `udtk doc` renders that book and its linked pages into the browser.
 
-> Source of truth — `opt/cli/main.rs` (+ `opt/cli/splash.rs`, `opt/cli/splash_art.rs`). This document describes the state as of 18.09.2026 (after sessions 58–60).
+> **Source of truth.** The code. Every fact in this book was checked against the files named in it on 2026-11-02. Where the code and an older note disagree, this book follows the code and says so in [Chapter 18](#chapter-18-known-gaps-and-open-decisions). Session records and acceptance reports from the migration are kept, condensed, in [Part V: History](#part-v-history).
+
+## Contents
+
+**Part I. Foundations**
+
+1. [What `udtk` is](#chapter-1-what-udtk-is)
+2. [How a command travels](#chapter-2-how-a-command-travels)
+3. [The two doors, and why writes stay on the UI door](#chapter-3-the-two-doors-and-why-writes-stay-on-the-ui-door)
+4. [The WebSocket door](#chapter-4-the-websocket-door)
+5. [Controlling the WebView over CDP](#chapter-5-controlling-the-webview-over-cdp)
+6. [Design decisions](#chapter-6-design-decisions)
+
+**Part II. Commands**
+
+7. [The command map](#chapter-7-the-command-map)
+8. [`invoke` and `logs`](#chapter-8-invoke-and-logs)
+9. [`gui`: driving the page](#chapter-9-gui-driving-the-page)
+10. [`shot` and `cdp-list`](#chapter-10-shot-and-cdp-list)
+11. [`doctor`: the diagnostic loop](#chapter-11-doctor-the-diagnostic-loop)
+12. [`tasks`, `autostart`, and `path`](#chapter-12-tasks-autostart-and-path)
+13. [`run`, `stop`, `doc`, `help`, and the splash](#chapter-13-run-stop-doc-help-and-the-splash)
+14. [`build`, step by step](#chapter-14-build-step-by-step)
+
+**Part III. Rules for modules and the install**
+
+15. [How a module joins the bridge](#chapter-15-how-a-module-joins-the-bridge)
+16. [Install layout and data](#chapter-16-install-layout-and-data)
+
+**Part IV. Verification and open items**
+
+17. [How to verify a change](#chapter-17-how-to-verify-a-change)
+18. [Known gaps and open decisions](#chapter-18-known-gaps-and-open-decisions)
+
+**Part V. History**
+
+- [H1. Sessions 58 to 60 (17.09.2026)](#h1-sessions-58-to-60-17092026)
+- [H2. The plan and its critique (former 10.1 to 10.8)](#h2-the-plan-and-its-critique-former-101-to-108)
+- [H3. Slices S0 to S5 (former 10.9 to 10.22)](#h3-slices-s0-to-s5-former-109-to-1022)
+- [H4. Migration of the page to the new door (former 10.23 to 10.35)](#h4-migration-of-the-page-to-the-new-door-former-1023-to-1035)
+- [H5. Corrections made in the rewrite of 2026-11-02](#h5-corrections-made-in-the-rewrite-of-2026-11-02)
 
 ---
 
-## 1. What it is and where it lives
+## Part I. Foundations
 
-`udtk` is the second binary of the single Cargo project `toolchain/` (alongside `unidtk` and `vpn-helper`):
+## Chapter 1. What `udtk` is
+
+`udtk` is a small native program. It does not talk to the user's screen, and it does not contain the application's logic. It is a **client**. It asks the running UniDTK application questions over a local socket, and it drives the application's WebView through the browser debugging protocol (CDP). It also performs the operations that belong to the machine rather than to the app: building, installing, scheduled tasks, and the PATH.
+
+### 1.1 One project, three binaries
+
+The whole Rust side is one Cargo project in `toolchain/`. It declares three binaries in [toolchain/Cargo.toml](../toolchain/Cargo.toml):
 
 ```toml
-[[bin]] name = "unidtk"     path = "../core/kernel/main.rs"
-[[bin]] name = "udtk"       path = "../opt/cli/main.rs"
-[[bin]] name = "vpn-helper" path = "../modules/vpn/helper/main.rs"
+[[bin]]
+name = "unidtk"
+path = "../core/kernel/main.rs"
+
+[[bin]]
+name = "udtk"
+path = "../opt/cli/main.rs"
+
+[[bin]]
+name = "vpn-helper"
+path = "../modules/vpn/helper/main.rs"
 ```
 
-* Build: `cargo build --release --bins` from the repository root. Cargo places the artifacts into the single `target/release/` directory, which `.cargo/config.toml` sets.
-* In a shipped install, the CLI and the app sit **next to each other**: `C:\Program Files\UniDTK\{unidtk.exe, udtk.exe, vpn-helper.exe, sing-box.exe, …}`.
-* There are no external dependencies and no script wrappers. All work with the kernel and the frontend runs on native Rust.
+| Binary | Source | Role |
+|---|---|---|
+| `unidtk.exe` | [core/kernel/main.rs](../core/kernel/main.rs) | The application: kernel, WebView, IPC server, modules |
+| `udtk.exe` | [opt/cli/main.rs](../opt/cli/main.rs) | This CLI |
+| `vpn-helper.exe` | [modules/vpn/helper/main.rs](../modules/vpn/helper/main.rs) | A GUI-subsystem helper for the VPN, run as a scheduled task |
 
-### Transport
+Nothing else is needed at run time. There are no script wrappers, no Node.js, and no external runtime.
 
-| Channel | Address | Who starts it | What it provides |
+### 1.2 Where the binaries live
+
+`udtk` finds the application by looking **next to itself**. The function `install_dir()` in [core/api/src/paths.rs](../core/api/src/paths.rs) returns the directory of the running executable. In a shipped install that is `C:\Program Files\UniDTK`, where `unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, and `sing-box.exe` sit together. In a development run it is `target\release` of the checkout.
+
+Two commands use a different, fixed location on purpose. `udtk path` and `udtk tasks register` always point at `C:\Program Files\UniDTK`, even when the CLI runs from a checkout, so that a development build never registers itself in the PATH or in Task Scheduler. Section 12 explains this.
+
+### 1.3 Exit codes
+
+| Code | Meaning | Where it comes from |
+|---|---|---|
+| `0` | Success. For `doctor`: every check passed | `main()` prints the output and returns |
+| `1` | Execution error: the IPC socket is unreachable, the remote command failed, or `doctor` found a failure | Every command except the argument errors below |
+| `2` | Invalid arguments: an unknown command, or an unknown `doctor` flag | `main()` for an unknown command, `doctor_cmd` for a flag |
+
+An unknown command prints `error: unknown command: <name>` and then the help text to stderr. An unknown `doctor` flag is checked against the whitelist `ALLOWED_DOCTOR_FLAGS` in [opt/cli/main.rs](../opt/cli/main.rs), and anything not on it is rejected with exit 2. Nothing is silently ignored.
+
+### 1.4 Commands that were removed
+
+Removing a command is a change of contract, so the old names are rejected rather than redirected. None of these names is an alias any more.
+
+| Old name | What happens now | Use instead |
+|---|---|---|
+| `udtk ping`, `udtk status` | `unknown command`, exit 2 | `udtk doctor -ping` |
+| `udtk check` | `unknown command`, exit 2 | `udtk doctor -check` |
+| `udtk commands` | `unknown command`, exit 2 | `udtk help --json` |
+| `udtk dev` | `unknown command`, exit 2 (there is no arm for it in the dispatcher) | `cd toolchain && cargo tauri dev` |
+| `udtk run --debug`, `udtk run -d` | Refused with an error: CDP is always on in release builds | `udtk gui`, `udtk shot` |
+| `-h`, `--help` | Not recognised; `udtk -h` gives exit 2 | `udtk help` |
+| `-cargo`, `-sim`, `-app`, `-ipc` | Unrecognised `doctor` flags | `-check`, `-simulate`, `-ping` |
+
+---
+
+## Chapter 2. How a command travels
+
+Two channels connect `udtk` to the running app. Each has its own job, and this chapter follows the first one, the socket, from the first character typed to the printed answer.
+
+### 2.1 The two channels
+
+| Channel | Address | Who opens it | What it carries |
 |---|---|---|---|
-| IPC (TCP, JSON lines) | `127.0.0.1:26540` | `unidtk.exe` (kernel) | `invoke`, `logs`, `doctor -ping/-simulate`, baseline `log_max_id` |
-| CDP (HTTP + WebSocket) | the app picks the port (usually `127.0.0.1:9222`), published in the IPC `ping` reply → `cdpPort` | WebView2, always enabled | `gui`, `dom`, `eval`, `shot`, `cdp-list`, the CDP part of `doctor -simulate` |
+| Local socket (TCP, one JSON line per request) | `127.0.0.1:26540` | The kernel, in [core/kernel/ipc.rs](../core/kernel/ipc.rs) (`IPC_PORT`) | Every `udtk` command except the screenshots and the page control |
+| CDP (HTTP and WebSocket) | A port the app chooses. Usually `9222`, otherwise a free port. The app publishes it in the `ping` reply as `cdpPort` | WebView2, always enabled in release | `gui`, `shot`, `cdp-list`, `stop`, and the page probes of `doctor -simulate` |
 
-IPC timeouts: connect 500 ms, read/write 2500 ms. A request is one JSON line `{"cmd": …, "args": …}`. The reply is `{"ok": true, "result": …}` or `{"ok": false, "error": …}`.
+A third channel, the page's own WebSocket door, is used by the interface, not by `udtk`. [Chapter 4](#chapter-4-the-websocket-door) covers it.
 
-### Exit codes
+### 2.2 The journey of `udtk invoke vpn_status`
 
-| Code | Meaning |
+Take the simplest command that reaches a module. Each numbered step below names the function that does it.
+
+1. **The process starts.** `main()` in [opt/cli/main.rs](../opt/cli/main.rs) collects the arguments. With none, it prints the splash. With `invoke`, it calls `invoke_cmd`.
+2. **The request is built.** `invoke_cmd` takes `vpn_status` as the command and `{}` as the default arguments, and calls `ipc(json!({"cmd": ..., "args": ...}))`.
+3. **The envelope is numbered.** `ipc()` takes the next value of a process-wide counter (`AtomicU64`, starting at 1). It adds `"v": 1` (the protocol version) and `"id": <n>` to the request. The line is the JSON text followed by `\n`.
+4. **The socket opens.** `TcpStream::connect_timeout` connects to `127.0.0.1:26540` with a **500 ms** connect timeout. The read and write timeouts are **2500 ms**. If the connection is refused, the error is `IPC server not reachable at 127.0.0.1:26540: ... (is the app running?)`, and the exit code is 1.
+5. **The kernel accepts.** The thread `unidtk-ipc` (started in `IpcServer::start`) accepts connections. Each connection gets its own thread, `handle_conn`.
+6. **The in-flight limit is checked.** `InflightGuard::acquire` allows at most **8** requests at a time (`MAX_INFLIGHT`). A ninth one gets the reply `busy: too many ipc requests in flight` and is closed.
+7. **One line is read.** `handle_conn` sets a **1500 ms** read timeout on the server side and reads exactly one line. The protocol is one request per connection.
+8. **The line is routed.** `route()` parses the JSON. A parse error gives `bad json: ...`. Otherwise the request goes to `dispatch(&req, Door::Socket)`. [Chapter 3](#chapter-3-the-two-doors-and-why-writes-stay-on-the-ui-door) explains the door.
+9. **The inventory is consulted.** `dispatch` calls `check_door(cmd, door)`. It looks the name up in the inventory (see 2.5). An unknown name gives `unknown cmd: <name>`. A name the door does not serve gives a refusal with a reason.
+10. **The route is found.** `dispatch` looks the name up in the static table `ROUTES` (see 2.6). For `vpn_status` the handler is `handle_vpn_status`.
+11. **The module is called by its id.** `handle_vpn_status` calls `call_module(server, "vpn", "vpn_status", args)`. `call_module` finds `"vpn"` in `MODULE_ROUTES` and calls `vpn::ipc_call`. The kernel passes the module an opaque handle to the application, typed `&(dyn Any + Send + Sync)`. The module downcasts it to fetch its own state. The kernel never names the module's state type.
+12. **The reply is built.** `respond()` wraps the outcome as `{"ok": true, "result": ...}` or `{"ok": false, "error": "..."}`. It adds `"v": 1`, and it echoes `"id"` when the request had one.
+13. **The reply is written.** `handle_conn` writes the reply with a trailing newline and closes the connection.
+14. **The client checks the reply.** `ipc()` reads one line and parses it. If the reply carries an `id`, it must equal the request's id. If it carries a `v`, it must equal 1. Otherwise the error is `protocol mismatch: the app speaks vN, this bridge speaks v1 ... update them together`. On `ok: true` the client pretty-prints `result` and exits 0. On `ok: false` it prints the `error` and exits 1.
+
+The envelope is optional on the server side. An older bridge that sends only `{cmd, args}` still works, and the reply simply has no `id` to echo.
+
+### 2.3 Wire format at a glance
+
+```text
+client -> app   {"cmd":"vpn_status","args":{},"v":1,"id":3}\n
+app -> client   {"ok":true,"result":{...},"v":1,"id":3}\n
+```
+
+A failure looks the same, with `"ok":false` and `"error":"..."` in place of `result`. The protocol number is `PROTOCOL = 1` in [core/kernel/ipc.rs](../core/kernel/ipc.rs). The same number is reported in the `ping` reply as `proto`, so a client can compare its own version with the app's before it trusts an answer.
+
+### 2.4 Transport failures and what they mean
+
+| Symptom | Cause | What to do |
+|---|---|---|
+| `IPC server not reachable at 127.0.0.1:26540 ... (is the app running?)` | Nothing listens on 26540. The app is not running, or it failed to bind the port | `udtk run`, or `schtasks /run /tn UniDTK` |
+| `busy: too many ipc requests in flight` | Eight requests are already being served | Retry. This is back-pressure, not a fault |
+| `protocol mismatch: ...` | The CLI and the app are different versions | Update both together (`udtk build` installs both) |
+| `protocol: response id N does not match request id M` | A reply belonged to another request | Usually a stale or foreign process on the port; restart the app |
+| The command stops responding after 2.5 s | The client read timeout is 2500 ms. The server may still be running the command | Re-check the state before retrying. Commands that change state must not be retried blindly (see 3.5) |
+
+### 2.5 The inventory: one list of what can be asked
+
+The file [core/kernel/command_inventory.rs](../core/kernel/command_inventory.rs) describes every command the application can be asked. It is compiled **twice**: into the application and into `udtk`, which includes it with `#[path]`. The offline manifest that `udtk help --json` prints and the surface the kernel serves are therefore built from the same data, and they cannot drift apart.
+
+Each command is a `CommandSpec` value, defined in [core/api/src/commands.rs](../core/api/src/commands.rs). A spec has a `name`, a `summary`, a list of `args`, an `access` (`ReadOnly` or `Write`), a list of `doors` (`Socket`, `Ui`), and an `idempotency` (`Safe` or `Unsafe`). Three constructors set these fields:
+
+| Constructor | Access | Doors | Idempotency | Count in the inventory |
+|---|---|---|---|---|
+| `read_only(...)` | ReadOnly | Socket and UI | Safe | 20 |
+| `read_only_cli(...)` | ReadOnly | Socket only (the tool's own surface) | Safe | 5 |
+| `write(...)` | Write | UI only | Unsafe | 12 |
+
+The inventory holds **37** commands (the constant `ALL`, in declaration order). Twenty-five of them are served on the socket, and thirty-two on the UI door. The 12 writes never reach the socket by construction. Each name is written once: the route table takes the name from the constant (`COMMAND.name`), not from a repeated string.
+
+Inventory rules that the tests enforce are listed in [Chapter 15](#chapter-15-how-a-module-joins-the-bridge).
+
+### 2.6 The route table and the module routes
+
+A name in the inventory is not enough to serve it. The kernel also needs a handler. There are two tables in [core/kernel/ipc.rs](../core/kernel/ipc.rs):
+
+- **`ROUTES`**: a static slice of `(name, handler)`, where each handler is a kernel function with the type `fn(&IpcServer, &Args) -> Result<Value, String>`. The kernel owns handlers that need kernel state, such as the log (`handle_logs`, `handle_log_delta`), the widget configuration, and the module-enable switch. Module commands are thin: each handler calls `call_module`.
+- **`MODULE_ROUTES`**: a static slice of `(module_id, ipc_call)`. It lists the six modules that answer for their own commands: `glyph-bar`, `explorer`, `vpn`, `telegram`, `mp3-player`, and `micrographics`. The kernel addresses a module by id and never names its state type. A test, `router_does_not_name_module_state_types`, reads the source of `ipc.rs` and fails if a module state type name appears there.
+
+`dispatch` looks the name up in `ROUTES`. If the inventory knows a command but no route exists, the reply is `command '<name>' is declared in the inventory but has no handler`. The route tests exist to make that impossible to ship: `every_command_has_a_handler`, `every_socket_command_has_a_handler`, `every_handler_is_declared_in_the_inventory`, and `route_names_are_unique`. They are tests, not build-time checks, because `generate_handler!` is a macro that `build.rs` cannot read (see [Chapter 15](#chapter-15-how-a-module-joins-the-bridge)).
+
+---
+
+## Chapter 3. The two doors, and why writes stay on the UI door
+
+### 3.1 Who is asking
+
+A **door** is a rule about **who is asking**, not about which pipe carries the bytes. The enum `Door` in [core/api/src/commands.rs](../core/api/src/commands.rs) has two values:
+
+- **`Door::Socket`**: the `udtk` bridge over the local TCP line protocol. This socket is loopback-only and **unauthenticated**. Any process of the same user can connect to it.
+- **`Door::Ui`**: the application's own interface. It is authenticated by the token of [Chapter 4](#chapter-4-the-websocket-door). During the migration its transport changed from Tauri IPC to a WebSocket. The door did not change with it, because the question is who is asking, not what the pipe is made of.
+
+The door is passed into `dispatch(req, door)` by the caller. The TCP path passes `Door::Socket`, and the WebSocket path passes `Door::Ui`. A command therefore behaves the same way on either door, and only the set of allowed commands depends on the door.
+
+### 3.2 The policy, as data
+
+The policy is the `doors` field of each spec, not a rule written into `dispatch`:
+
+| Spec | Served on the socket | Served on the UI door | What a request from the other door receives |
+|---|---|---|---|
+| Read on both doors | yes | yes | Served |
+| `read_only_cli` (for example `ping`, `logs`, `commands`) | yes | no | `served by the tool door only` |
+| `write` (for example `vpn_connect`) | no | yes | `changes state, and write commands stay on the UI door` |
+| Not in the inventory | no | no | `unknown cmd: <name>` |
+
+`check_door` in [core/kernel/ipc.rs](../core/kernel/ipc.rs) produces these three refusal messages. It is a free function on purpose: an `IpcServer` cannot be created in a unit test, because it needs a live `AppHandle`, while the policy is pure data and can be tested directly. The tests `a_write_command_is_refused_on_the_socket_and_answered_on_the_ui`, `a_cli_only_read_is_not_offered_to_the_ui`, `a_read_command_is_served_on_both_doors`, and `an_unknown_command_is_refused_on_every_door` cover the three cases.
+
+### 3.3 Why writes stay on the UI door
+
+The socket accepts any local process of the same user, without a password. If it could change state, then any program on the machine could connect a VPN, send a Telegram message, change the volume, or write to the journal and erase evidence. The inventory states this rule in its own comments. The `frontend_log` entry says that a socket that can write log records "lets any local process forge or erase evidence". The VPN entries say that the rule is kept "by rule rather than by accident".
+
+The UI door is different. Its requests come only from the page, and the page proved that it holds the per-run token before any command is parsed. So the interface may change state. The policy is the same for the Tauri and the WebSocket transports, because it is attached to the door, not to the transport.
+
+### 3.4 Consequences for `udtk`
+
+- `udtk invoke vpn_connect` is refused with `command 'vpn_connect' is not available on the socket door: it changes state, and write commands stay on the UI door`, and it exits 1.
+- `udtk` cannot write state through the socket. To observe a write from the outside, use `udtk gui js:...` (which runs in the page through CDP) or read back the consequence with a read command. Chapter 9 shows how.
+- A read command that the CLI calls internally, such as `ping`, can be served only on the socket. Asking for it on the UI door is refused.
+- `udtk gui js:<expr>` does not use the WebSocket door. It evaluates the expression in the page through CDP (Chapter 5), which needs no token.
+
+### 3.5 Retry safety
+
+A request can be repeated, either by a client that reconnects or by a human who presses the button again. The contract records whether repetition is harmless. `Idempotency::Safe` means that asking twice equals asking once. Every read is `Safe`. Every write is `Unsafe`, because it may duplicate an effect. The field is published in both manifests as `retry_safe`, so a client can see it. The test `socket_surface_is_retry_safe` in [core/kernel/command_inventory.rs](../core/kernel/command_inventory.rs) checks that every socket command is `Safe`.
+
+Honest note: the code records the class, but it does not yet deduplicate writes by request id, and it does not refuse automatic retries of writes. The request-id deduplication cache the plan describes is not in [core/kernel/ipc.rs](../core/kernel/ipc.rs) or [core/kernel/ws.rs](../core/kernel/ws.rs) as of this rewrite. See [Chapter 18](#chapter-18-known-gaps-and-open-decisions).
+
+---
+
+## Chapter 4. The WebSocket door
+
+### 4.1 Why a second door
+
+The socket of Chapter 2 is read-only by policy. The page, however, must change state: play music, connect the VPN, move a folder. The page therefore gets its own door. It is a WebSocket server on the kernel, in [core/kernel/ws.rs](../core/kernel/ws.rs). It uses the same dispatcher as the socket, but it is protected by a secret that only the page knows. Because it is protected, it serves the UI door.
+
+### 4.2 The token, and where it is handed out
+
+The token is made once per launch by `ws::new_token()`. It is 32 hexadecimal characters, built from two values of the standard library's OS-seeded hasher (`RandomState`) plus the process id and the time. No new dependency is needed. The token only has to be unpredictable to other local processes, and it changes on every launch.
+
+The token reaches the page in **one** place: the Tauri command `session_info` in [core/kernel/main.rs](../core/kernel/main.rs). It returns `{"v": 1, "wsPort": ..., "token": ...}`. The page asks for it through the facade, [core/ui/unidtk-bridge.js](../core/ui/unidtk-bridge.js), which calls `session_info` through Tauri and never through the public `invoke`. The token is not written to a file, to a URL, or to the command line.
+
+The socket's `ping` reply publishes the **port** of the door as `wsPort`, but never the token. The comment in `handle_ping` explains why: that reply travels over the unauthenticated socket.
+
+### 4.3 The handshake
+
+The door listens on an **ephemeral** loopback port (`bind((LOCALHOST, 0))`). The port is public, and the token is not. The first frame on a new connection must be a handshake:
+
+```text
+client -> app   {"hello":{"token":"<the 32 hex characters>"}}
+app -> client   {"v":1,"ok":true,"result":{"ready":true}}
+```
+
+The rules, as written in `serve()`:
+
+1. The first read has a **3 second** deadline (`HANDSHAKE_DEADLINE`). Nothing else is parsed before the handshake.
+2. If the first frame is not text, or the token does not match, the server sends `{"v":1,"ok":false,"error":"handshake required: send {\"hello\":{\"token\":\"...\"}} as the first frame"}`, closes the connection, and logs `ws: connection rejected (missing or wrong token)`.
+3. After a correct token, the server sends the `ready` frame.
+
+The **3 second** value is the server's deadline. The client side of the page waits longer. The facade's `HANDSHAKE_TIMEOUT_MS` is **8000**, because on a cold page the first call could time out. Section H4 records that case.
+
+### 4.4 Requests after the handshake
+
+After `ready`, every text frame is one of three things:
+
+- `{"type":"subscribe","event":"<name>"[, "since": N]}`: an event subscription (4.5).
+- `{"type":"unsubscribe","event":"<name>"}`: removes the event from this connection.
+- Any other JSON: a command. It is dispatched with `Door::Ui`, and the reply is `respond(id, dispatch(...))`, which carries the `id` back.
+
+A connection that sends nothing for **120 seconds** (`IDLE_TIMEOUT`) is dropped, so a forgotten page cannot hold a slot forever. The loop reads with a **50 ms** poll (`READ_POLL`), and between reads it pushes any pending event frames. The socket stays a single object owned by one thread, so no lock guards it.
+
+### 4.5 Events
+
+Events are pushed by the **broker** in [core/kernel/events.rs](../core/kernel/events.rs). Every event published through the contract emitter gets a global, monotonic sequence number `seq`. The emitter is set once in `main.rs` (`unidtk_api::set_emitter`). That one closure feeds Tauri and the broker, so both doors carry the same events with the same numbers. Each event keeps a **ring of 64 frames** (`RING_CAPACITY`).
+
+Events come in two classes:
+
+- **State events** (`system-volume`, `audio-bands`, `vpn`, `telegram-connection-state`, `sync-tasks`, `weather-update`, six names in `STATE_EVENTS`). Only the newest frame matters, so the ring keeps one value. The writer merges all pending frames of a state event into the newest one per pass.
+- **Stream events** (for example the Telegram messages). Their order matters, so every frame is kept in the ring and delivered in order.
+
+A subscriber gets a frame in this shape:
+
+```text
+{"v":1,"type":"event","event":"system-volume","seq":2,"payload":{...}}
+```
+
+The rules for subscribing:
+
+- A subscription **without** a cursor receives, at once, the newest value of a state event, marked with `"snapshot": true`. The mark matters: a catch-up frame is not a live delivery, and the comparison of the migration counted it as one until it was marked.
+- A subscription **with** `"since": N` receives the frames after `N` from the ring (`replay`). If the ring no longer covers `N` for a stream event, the server sends `{"v":1,"type":"gap","event":...,"since":N,"error":"the buffer no longer covers this cursor; resync the state"}`. The client must then resynchronise the state, which is safer than a silently incomplete stream.
+- A slow client never blocks the kernel. The broker delivers with `try_send` into a bounded channel of 64 frames, and drops what does not fit.
+
+### 4.6 The client side: the facade and the transport flag
+
+The page never calls Tauri or the WebSocket directly. It imports one module, `@unidtk/bridge`, which is [core/ui/unidtk-bridge.js](../core/ui/unidtk-bridge.js) (the facade). An import map and a build lint enforce this, as Chapter 15 explains.
+
+The facade chooses the transport **once**, when the module loads:
+
+- `?transport=<value>` in the page URL wins, for a one-off probe.
+- Otherwise `sessionStorage["unidtk.transport"]` is read. `localStorage` is deliberately not used, so that a forgotten flag cannot survive a restart.
+- The values are `tauri` (the default, the old door), `shadow` (both doors are called and compared), and `ws` (the new door is used).
+
+Three allowlists decide what travels over the new door. A command is added to a list only after a clean `shadow` run:
+
+| List | Count | Meaning |
+|---|---|---|
+| `WS_COMMANDS` | 14 | Read commands. In `shadow` they are called on both doors and the answers are compared. |
+| `WS_WRITES` | 8 | Write commands. They use the new door only in `ws` mode. They are verified by their consequence, never by comparison (see below). |
+| `WS_EVENTS` | 18 | Events subscribed through the socket instead of Tauri |
+
+Why writes are not compared: `shadow` calls both doors with the same question. For a read, that is harmless. For a write, it performs the action twice. So a write is verified differently. It is switched to the new door in `ws` mode, and then a read of the state it changed confirms the result. Writes not yet migrated (`set_module_enabled`, `ai_dj_model_download`, `telegram_set_archived`, `explorer_sort_set`) are not in `WS_WRITES`, and they stay on Tauri.
+
+The facade counts what it does. `getTransportState()` returns `transport`, `wsState` (off, connecting, ready, closed, failed), the number of shadow checks and divergences, the number of commands sent over WS, and up to three samples of divergence. The CLI reads it with `udtk gui js:window.__UNIDTK_BRIDGE__.getTransportState()`.
+
+Comparison of answers is **structural**: key order is ignored (`sameShape` sorts the keys). Event comparison is by **delivery**, not by position: the facade keeps the last 8 live payloads of each event and counts a divergence only when the Tauri payload is absent from them.
+
+### 4.7 Boundary: what the token protects, and what it does not
+
+The token keeps out any local process that does not know it, and any web page that tries to open the socket. It does **not** protect against code already running inside the same process. The CDP protocol can read the page's own variables, and the token is one of them. That is the accepted risk of [Chapter 6](#chapter-6-design-decisions). It is also why the token does not justify widening the socket's policy.
+
+---
+
+## Chapter 5. Controlling the WebView over CDP
+
+`udtk gui`, `udtk shot`, `udtk cdp-list`, and `udtk stop` talk to the WebView2 engine through the Chrome DevTools Protocol (CDP). CDP is a JSON protocol over WebSocket that the browser engine exposes on a local port. This chapter explains how the CLI finds the right window and drives it safely.
+
+### 5.1 Always on, and the port is discovered
+
+WebView2 is started with a remote-debugging port. [core/kernel/main.rs](../core/kernel/main.rs) decides the port in `pick_cdp_port()`:
+
+1. Try `127.0.0.1:9222`. If it can be bound, use it.
+2. Otherwise bind port 0 and let the operating system choose a free port.
+
+The port is stored once (`CDP_PORT`) and published over the socket as `cdpPort` in the `ping` reply. The CLI never guesses. A stale or foreign process may hold 9222, and a blind guess would drive the wrong window. In one recorded probe, 9222 was held by a foreign listener and the app took port 54060, and `udtk eval` worked through it (see [H3](#h3-slices-s0-to-s5-former-109-to-1022)).
+
+The browser arguments are assembled by `merge_browser_args()`. It keeps whatever `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` already holds, **except** an inherited `--remote-debugging-port=` or `--remote-allow-origins=`, and then appends the kernel's own arguments and `--remote-debugging-port=<port>`. The kernel no longer overwrites what the caller set. `--remote-allow-origins` is not set anywhere in the code: the old wildcard was removed (session records in [H3](#h3-slices-s0-to-s5-former-109-to-1022)).
+
+### 5.2 Finding the page, and refusing foreign windows
+
+The CLI asks `cdpPort` of the app, through `ping`, and caches the answer for the process (`cdp_port()`). If the app is older and does not publish a port, the CLI falls back to 9222, because such a kernel always binds it. If the app does not answer at all, the error is `cannot determine the CDP port: app is not answering on 127.0.0.1:26540`.
+
+Then `cdp_ws_url()` in [opt/cli/main.rs](../opt/cli/main.rs):
+
+1. Reads the target list over plain HTTP (`GET /json`, with `Host: 127.0.0.1`).
+2. Chooses the page whose URL is `http://tauri.localhost/` (the wallpaper document). A transient window, such as the location-permission host, is also a page, and must never be chosen by list order.
+3. **Refuses** any target whose URL does not start with `http://tauri.localhost`, with `CDP target is not the UniDTK page (url: ...); refusing to drive a foreign window`.
+4. Rewrites a `ws://localhost/...` address to `ws://127.0.0.1:<port>/...`, which WebView2 sometimes reports without a port.
+
+### 5.3 One session per batch
+
+The `Cdp` structure in [opt/cli/main.rs](../opt/cli/main.rs) holds **one** WebSocket and a counter of request ids. `udtk gui` opens it once and runs all its steps over that connection. Before this design, every call opened a new WebSocket, so one click cost five handshakes.
+
+`Cdp::call` sends `{"id", "method", "params"}` and reads frames until it finds the reply with the same id. Frames without a matching id are progress events, and they are ignored on purpose. Each call has a 10 second deadline (`CDP response timeout for <method>`). A CDP error becomes `CDP error: <message>`.
+
+`Cdp::evaluate` calls `Runtime.evaluate` with `returnByValue` and `awaitPromise`. A JavaScript exception becomes `JS Exception: <text>`.
+
+### 5.4 Input conventions
+
+Mouse input is `Input.dispatchMouseEvent` in three steps: moved, pressed, released. The coordinates are **CSS pixels** straight from `getBoundingClientRect()`. CDP takes them **1:1**. Multiplying by `devicePixelRatio` would miss the target by a factor of 1.25 to 1.5, and the comment in `mouse_click` says so.
+
+Keyboard input is `Input.dispatchKeyEvent`, and the `press:` step emulates a **US keyboard**, independent of the system layout. The `code` is physical (`KeyA`, `Digit1`), and `vk` is the virtual key code. Only DOM `key` names are accepted (`Escape`, `ArrowLeft`, `Enter`). Aliases such as `Esc` or `Left` are refused, so each capability has one name. Text is entered with the `type:` step (`Input.insertText`), not with `press:`.
+
+### 5.5 The page harness
+
+The page defines `window.__UNIDTK_HARNESS__`, implemented in [core/ui/harness.js](../core/ui/harness.js). The CLI uses three of its functions:
+
+- `getSemanticTree()`: a list of the interactive elements, each with a numeric `id`, a `ref`, an accessible name, a `point` (the centre in CSS pixels), and an `occluded` flag with the `covering` element when something sits on top.
+- `getErrors(clear)`: the page errors collected since the last call. With `true`, the buffer is cleared.
+- `resolveTarget(target)`: maps a target string to a node. The order in the code is: a numeric id, then a stable reference `r<N>` (the `data-udtk-ref` attribute, which survives re-rendering), then `@testid`, and then the other locators.
+
+A node that has neither a test id nor an element id is marked `fragile: true`. The harness skips anything inside `.simulation-sandbox`, so that a diagnostic render is never offered as a target.
+
+### 5.6 Security boundary
+
+Honest statement, unchanged since the design decision of [Chapter 6](#chapter-6-design-decisions): CDP is always on in release. Any local process of the same Windows user can connect to it and run JavaScript in the page. The boundary is the **Windows user account**, not a token and not a flag. Two things do close the web-page class: the CDP HTTP endpoint checks the `Host` header (only IP or localhost is accepted), and it sends no CORS headers. These two statements come from the recorded live probes of slice S0, not from code that can be read here. The CSP of the page allows `ws://127.0.0.1:*` in `connect-src` ([toolchain/tauri.conf.json](../toolchain/tauri.conf.json)), so the page can reach the WebSocket door.
+
+---
+
+## Chapter 6. Design decisions
+
+This chapter records the decisions behind the structure. The history of how each was reached is in [Part V](#part-v-history).
+
+### 6.1 One contract, two doors
+
+The command surface used to be written down three times: a `match` in the kernel, a list in the `commands` reply, and the Tauri command list. Adding a module command meant editing the kernel in three places. The decision was to describe the surface **once**, as data (the inventory of Chapter 2), and to make both doors read that data. The Tauri wrappers stay handwritten, because they carry the Tauri injection (`State`, `AppHandle`) that only the kernel can express. Their names are checked against the inventory by a test.
+
+### 6.2 A manifest built into both binaries
+
+The manifest is a static build artifact, compiled into the kernel and into `udtk`. It must not be produced by instantiating the modules. The reason is concrete: building the list from `registry::all_modules()` would create second instances of the modules. That means a repeated VPN auto-connect, a second TDLib, and a race with the deferred start of the player. The CLI does call `registry::all_modules()` in `doctor -env`, but only to read `Module::dependencies()`, which does not start anything.
+
+### 6.3 Modules own their state
+
+The kernel no longer names module types in its router. Each module answers for its own commands through `ipc_call`, and fetches its state from the host handle itself. A third-party module can add a command in three steps: declare it in the inventory, implement it in `ipc_call`, and add one line to `MODULE_ROUTES`. No kernel code changes. This is true for the socket and the UI door. For the Tauri wrappers it stays true only while they exist.
+
+### 6.4 Rejected alternatives
+
+| Alternative | Why it was rejected |
 |---|---|
-| `0` | Success (for `doctor`: all checks passed) |
-| `1` | Execution error / unreachable IPC / remote command failed / `doctor` failure |
-| `2` | Invalid arguments: unknown command, unknown `doctor` flag |
+| A procedural macro `#[udtk_command]`, plus scanning `modules/*/rust` in `build.rs` | Two parsers of the same thing. A text scan also catches comments and disabled code |
+| Generating the bodies of the Tauri wrappers | The Tauri injection is known only to the kernel, and `include!` from `OUT_DIR` breaks the IDE and incremental builds |
+| Linker magic (`inventory`, `linkme`) | On MSVC, `/OPT:REF` strips unreferenced sections, so entries silently vanish |
+| A long-lived CLI daemon that holds session state | It would move logic into the CLI. The CLI stays a thin client, one batch per `gui` run |
+| Write commands on the socket, "right away" | It lowers the security perimeter without a threat model |
+| The `help --json` answer taken from the socket | It would make the diagnostics depend on the running app |
 
-Unknown `doctor` flags are rejected strictly (whitelist `ALLOWED_DOCTOR_FLAGS`). Nothing is "silently ignored".
+The reference projects were used for technique, not as dependencies. `agent-browser` (Rust and CDP, element references taken from a snapshot) gave the refusal on an occluded target and the stable references. Chrome DevTools MCP gave the idea of targeted queries instead of a full snapshot after each action.
+
+### 6.5 Owner's decisions, and the accepted risk
+
+The owner decided four things, and they are the basis of the current design:
+
+1. The page is moved entirely to the new protocol (the radical option). Authentication of the door is therefore a required stage, not an option.
+2. Module state moves into the modules. This is the condition for a third-party developer to add a command without editing the kernel.
+3. `metadata.json` is extended with the render entry points for the probe (see [Chapter 11](#chapter-11-doctor-the-diagnostic-loop)).
+4. CDP stays enabled always. The port is no longer hard-coded, and the `dev` and `--debug` modes are retired.
+
+The accepted, recorded risk: a local process of the same user can execute JavaScript in the application, and the token does not prevent it. The security boundary is the Windows user account. The plan was written with the honest limit stated, and it is repeated here so that it is not forgotten.
 
 ---
 
-## 2. Command summary
+## Part II. Commands
 
-| Command | Purpose | Requires the running app |
+## Chapter 7. The command map
+
+| Command | Purpose | Needs the running app |
 |---|---|---|
-| `udtk` (no arguments) | Prints the branded splash and the command map | no |
-| `udtk doctor [flags]` | Comprehensive non-destructive diagnostics (compiler, dependencies, kernel, modules, IPC, simulation) | partly (`-ping`, `-simulate`) |
-| `udtk invoke <cmd> [json]` | Direct call of a kernel/module IPC command | yes |
-| `udtk logs [filters]` | Reads log entries from `unidtk_logs.redb` over IPC | yes |
-| `udtk gui [steps]` | Drives the page through a single CDP session: `js:`, `click:`, `type:`, `press:`, `tree`, `wait:` | yes (+CDP) |
-| `udtk shot [path] [--json] [-q]` | Screenshot via CDP (default `Pictures/Screenshots`) | yes (+CDP) |
-| `udtk cdp-list` | Lists CDP targets/pages | yes (+CDP) |
-| `udtk tasks [status\|register\|unregister\|cleanup-old]` | Manages Windows Task Scheduler tasks | no |
-| `udtk autostart [status\|enable\|disable]` | Quick control of autostart (`UniDTK`) | no |
-| `udtk path [status\|ensure]` | Checks/registers the CLI directory in the User PATH | no |
-| `udtk build` | Full release build + resource layout | no |
-| `udtk dev [--debug]` | `cargo tauri dev` (+ CDP on 9222) | no |
-| `udtk run [args…] [--debug]` | Starts the app from the directory that holds the CLI itself | no |
-| `udtk help [--json]` | Help text; `--json` gives the machine-readable command manifest | no |
+| `udtk` (no arguments) | Prints the splash and the command map | No |
+| `udtk doctor [flags]` | Diagnostics: compiler, dependencies, kernel, modules, IPC, simulation | Partly (`-ping`, `-simulate`) |
+| `udtk invoke <cmd> [json]` | Calls one socket command | Yes |
+| `udtk logs [filters]` | Reads journal records through the socket | Yes |
+| `udtk gui [--json] [--force] <step>...` | Runs a batch of steps in the page over one CDP session | Yes, plus CDP |
+| `udtk shot [path] [--json] [-q]` | Saves a PNG of the window through CDP | Yes, plus CDP |
+| `udtk cdp-list` | Lists the CDP targets | Yes, plus CDP |
+| `udtk tasks [status\|register\|unregister\|cleanup-old]` | Manages the Windows scheduled tasks | No |
+| `udtk autostart [status\|enable\|disable]` | Controls the logon task `UniDTK` | No |
+| `udtk path [status\|ensure]` | Checks or adds the install directory to the User PATH | No |
+| `udtk build [-j N]` | The one release build: stop, build, install, verify, restart | No (it stops and restarts the app) |
+| `udtk stop` | Quits the app gracefully, then forces it, so that its files can be replaced | Optional |
+| `udtk run [args...]` | Starts the app that sits next to the CLI | No |
+| `udtk doc` | Renders the book and opens it | No |
+| `udtk help [--json]` | Prints the help text, or the machine-readable manifest | No |
 
-Commands that no longer exist:
-
-* `udtk ping` and `udtk status` are gone. There is no command, alias, or redirect for either. Both print `error: unknown command: …` plus help to stderr and exit with code 2. Ping lives only as the flag `doctor -ping`.
-* `udtk check` was removed too. Use `udtk doctor -check` instead (otherwise `error: unknown command: check`, exit 2).
-* `udtk commands` was removed. The machine manifest moved to the flag `udtk help --json` (otherwise `error: unknown command: commands`, exit 2).
-* The aliases `-h` and `--help` were removed. Help is invoked only as `udtk help`. A bare `udtk` prints the splash, while `udtk -h` gives `unknown command`, exit 2.
-* Redundant `doctor` flag synonyms were removed: `-cargo`/`--cargo` (a duplicate of `-check`) and `-sim`/`--sim` (a duplicate of `-simulate`), as well as the historical `-app`/`--app` and `-ipc`/`--ipc`. Each flag keeps exactly one `-x`/`--x` pair. Anything else gives `error: unrecognized flag '…'`, exit 2.
+The help text of `udtk help` and the manifest of `udtk help --json` are generated from [opt/cli/main.rs](../opt/cli/main.rs). In the manifest, `cli_commands` lists the 14 commands of `udtk` itself, and `app_commands` lists the 37 entries of the inventory, each with its `access`, its `doors`, and its `retry_safe`. The manifest also states `"protocol": 1`. The `cli_commands` array is written by hand in `help_cmd` (see [Chapter 18](#chapter-18-known-gaps-and-open-decisions)).
 
 ---
 
-## 3. `udtk doctor` — the diagnostic loop
+## Chapter 8. `invoke` and `logs`
 
-A single health-check entry point. There is no "live telemetry" with hardcoded kernel variables. Everything is built from declarative module manifests and polymorphic calls of the `unidtk-api` contract.
+### 8.1 `udtk invoke`
 
-### 3.1 Flags
-
-| Flag (aliases) | Section | What it does |
-|---|---|---|
-| `-check`, `--check` | compiler & build | `cargo check` in `toolchain/` |
-| `-env`, `--env` | dependencies & DLLs | Presence of `libmpv-2.dll`, `tdjson.dll`, `sing-box.exe`, `vpn-helper.exe`, `ciadpi.exe` (ByeDPI, Optional, from the telegram manifest); `.env`; weights `opt/models/discogs-maest-129e/{model.onnx,model.onnx.data}`; state of scheduler tasks + detection of stale ones |
-| `-kernel`, `--kernel` | kernel diagnostics | Dry emulation of the kernel subsystems (see 3.3) |
-| `-modules`, `--modules` | modules diagnostics | Declarative dependencies + life cycle of all modules (see 3.4) |
-| `-ping`, `--ping` | runtime & IPC | TCP poll of the kernel (500 ms) + `log_stats` telemetry |
-| `-quick`, `--quick` | — | Quick run without compilation: `env + kernel + modules + ping` |
-| `-simulate`, `--simulate` | user simulation | End-to-end simulation of actions and a CDP run of the rendering functions (see 3.2) |
-| `-all`, `--all` | everything | Full audit (default mode) |
-
-The full whitelist lives in `ALLOWED_DOCTOR_FLAGS`. Anything not in it (including the historical `-app`) is rejected with code 2.
-
-### 3.2 Section selection logic
-
-* If **any** selective flag is passed and there is no `-all`/`-quick`, exactly **the chosen** sections run.
-* Otherwise, with `-quick`: `env + kernel + modules + ping`.
-* Otherwise (default or `-all`): `compiler + env + kernel + modules + ping`. `-simulate` is added only when requested explicitly.
-
-Result: `[✓] UniDTK doctor: ALL CHECKS PASSED` (exit 0) or `[!] UniDTK doctor: FAILED (N issues detected)` (exit 1). A module failure in the life-cycle phase does not bring the process down. It is reported as `[FAIL]`/`[WARN]`.
-
-### 3.3 Kernel section (`-kernel`)
-
-Five checks built on the `unidtk-api` contract. All of them run in memory, with no disk access:
-
-1. `kernel:in_memory_db` — the `ModuleDb` contract on `InMemoryModuleDb`: CRUD, prefix `kv_list`, `kv_count`, deletion.
-2. `kernel:event_bus` — loopback of the event bus: `emit` → `state` returns the sent value.
-3. `kernel:system_paths` — resolution of `install_dir`, `data_dir_view` (without creating anything!), `logs_dir`, `cache_dir`.
-4. `kernel:task_templates` — substitution of `@INSTALL_DIR@` and the user name in the task XML templates (no placeholders may remain).
-5. `kernel:capture_logger` — isolation of the thread-local log-capture buffer.
-
-### 3.4 Modules section (`-modules`)
-
-Modules are taken from the single registry `core/kernel/registry.rs::all_modules()`, not from a hand-written `vec![Box::new(…)]` in the CLI. Each run consists of four phases.
-
-**Phase 1 — declarative manifest `module.dependencies()`.** For each entry, the carrier is checked:
-
-* `DynamicLibrary { file_name, companions, min_bytes }` — `resolve_binary` + `validate_pe_x64` (MZ, PE signature, `Machine == 0x8664`, minimum size) + presence of companions (for example, OpenSSL for TDLib).
-* `Executable { file_name, probe_args }` — presence + an optional smoke probe (`CREATE_NO_WINDOW`, capture of stdout/stderr, a 1500 ms watchdog).
-* `ModelAsset { relative_path, min_bytes, companion_files }` — the ONNX graph, its minimum size, and external weights (`.data`) with their own minimums.
-* `WindowsTask { task_name, require_elevated }` — registration of the task in Task Scheduler.
-
-**Phase 2 — dry `init`.** The module is initialized in `ModuleContext::new_diagnostic(id, InMemoryModuleDb)` in a separate thread, under `catch_unwind` + `recv_timeout(2000 ms)`. Logs are captured by `capture_logs_unwind` and are not lost even on panic. On timeout the thread stays detached, without a blocking `join`.
-
-**Phase 3 — `shutdown` in LIFO order**, with a 1500 ms budget.
-
-**Phase 4 — cross-check of disk and registry.** A directory `modules/*/rust/Cargo.toml` that has no counterpart among the active modules is flagged as `orphan Rust module … missing from registry!` and fails the check.
-
-Notes on `-env` that matter for accuracy: PE validation and version checks run in the module phase. The environment section is limited to checking that files are present.
-
-### 3.5 Simulation (`-simulate`)
-
-1. IPC ping + writing a marker into the log.
-2. Health of `unidtk_logs.redb` (`log_stats`).
-3. Audit of uncaught frontend exceptions (`logs level=ERROR`, sources `frontend`/`webview`).
-4. Validation of the widget grid JSON config (`get_widget_config`).
-5. A safe read-only poll of the VPN and Telegram runtimes.
-6. A CDP run of the rendering functions in the hidden `simulation-sandbox` DOM: `renderClock`, `initVpnPanel`, `renderMusicPlayer`, `renderGlyphBar`, `renderTelegramWidget`, with timing.
-7. A click on the live clock widget (expand/collapse) and a DOM audit for cards showing `"Failed to fetch"`.
-
-Without a running app / `CDP`, the section degrades to `[INFO] CDP simulation unavailable (…)` instead of failing.
-
----
-
-## 4. Commands in detail
-
-### `invoke`
 ```bash
 udtk invoke <cmd> [json-args]
 ```
-Direct call of an IPC command. `json-args` is an object, for example:
+
+`json-args` is a JSON object. The reply is printed pretty. Examples:
+
 ```bash
-udtk invoke logs '{"limit":10,"level":"ERROR"}'
+udtk invoke ping
 udtk invoke vpn_status
+udtk invoke logs '{"limit":10,"level":"ERROR"}'
 ```
 
-### `logs`
+| Failure | Message | Exit |
+|---|---|---|
+| No command given | `usage: udtk invoke <cmd> [json-args]` | 1 |
+| Arguments are not JSON | `bad json args: ...` | 1 |
+| Name not in the inventory | `unknown cmd: <name>` | 1 |
+| A write over the socket | `command '<name>' is not available on the socket door: it changes state, and write commands stay on the UI door` | 1 |
+| A UI-only read over the socket | `command '<name>' is not available on the socket door: it is served by the UI door only` | 1 |
+| The module does not handle the command | `module '<id>' is registered but does not handle '<cmd>'`, or the module's own error text | 1 |
+
+### 8.2 `udtk logs`
+
 ```bash
 udtk logs [--limit N] [--since ID] [--level LEVEL] [--source SOURCE]
 ```
-The default is `--limit 50`. The source (`--source frontend|backend|…`) and the level are passed as strings.
 
-### `gui`
+The default limit is **50**. `--since` returns the records after a journal id. `--level` and `--source` are passed as strings, for example `--level ERROR` or `--source frontend`. The command calls the socket command `logs` (its name comes from the inventory constant `SIMULATE_LOGS`, so a rename cannot leave `logs` talking to a dead name). The journal itself is `unidtk_logs.redb`, read by [core/kernel/log_store.rs](../core/kernel/log_store.rs).
+
+Examples:
+
+```bash
+udtk logs --level ERROR          # expect [] when the app is healthy
+udtk logs --source frontend --limit 30
+```
+
+`udtk logs` answers only as far as the journal goes. A page error that happened in the page itself is collected by the page harness and read with `getErrors`, which `gui` does for every step (see [Chapter 9](#chapter-9-gui-driving-the-page)).
+
+---
+
+## Chapter 9. `gui`: driving the page
+
 ```bash
 udtk gui [--json] [--force] <step>...
-# steps:
-#   js:<expr>             — arbitrary JS, returns the value
-#   click:<target>        — physical click (move → press → release)
-#   type:<target>:<text>  — click to focus + Input.insertText
-#   press:<key>           — key press: keyDown/rawKeyDown + keyUp with key,
-#                            code, windowsVirtualKeyCode and modifiers;
-#                            format press:<mod>+<key> (ctrl|shift|alt|meta);
-#                            printable characters carry text and are inserted once;
-#                            an unknown or non-ASCII key → refused without sending
-#   tree                  — semantic tree of the harness (formerly `dom`)
-#   wait:<ms>             — pause, at most 10 000 ms
 ```
 
-It merges the former `dom` + `eval` + `act`. The key difference from them is **one CDP session for the whole batch**. Previously every call opened a new WebSocket, so a single click cost five handshakes. Now the handshake happens once, and the steps run over that one connection in sequence (at most 50 steps per batch).
+`gui` runs a batch of steps in the page. It is the replacement for three older commands, `dom`, `eval`, and `act`, which were removed. The batch has at most **50** steps, and it opens one CDP session (Chapter 5) for all of them.
 
-The harness itself resolves the step target. The value `r<N>` is a stable reference that survives re-rendering. After it come `@testid`, a positional `id`, an accessible name, or a CSS selector. Coordinates are CSS pixels from `getBoundingClientRect()`, and they are passed **1:1**. Multiplying by `devicePixelRatio` would miss by a factor of 1.25–1.5×.
+### 9.1 The steps
 
-**Occlusion is a refusal, not a "warning".** If the center of the target is covered by another element, the step returns `ok: false`, `refused: "occluded"` and `covering: {tag, id, testid, ref}`. That gives the name of the element that covers it, and the click is not sent. `--force` lifts the restriction and clicks anyway.
+| Step | What it does |
+|---|---|
+| `js:<expr>` | Evaluates JavaScript in the page and returns the value |
+| `click:<target>` | Moves the mouse to the centre of the target, presses, and releases |
+| `type:<target>:<text>` | Clicks the target to focus it, then inserts the text (`Input.insertText`) |
+| `press:<key>` or `press:<mod>+<key>` | Presses one key. Modifiers are `ctrl`, `shift`, `alt`, `meta` |
+| `tree` | Returns the semantic tree of the page |
+| `wait:<ms>` | Pauses, at most 10 000 ms |
 
-Every step produces a receipt: `kind`, `ok`, `value` (for `js`/`tree`), `hit_point`, `covering`, `refused` (the refusal reason: `occluded`, `unknown-key`, `non-ascii`, `unknown-modifier`, `empty-key`), `key` (for `press`, an object `{key, code, vk, text, modifiers, event}`, where `event` is the event type actually sent: `keyDown` with text, or `rawKeyDown` without), `text` (for `type`), `log_delta` (the delta of the kernel journal from `log_delta`, one IPC round trip per step), `ui_errors` (page errors, the buffer is cleared) and `duration_ms`. `--json` returns `{ok, steps:[…]}`. In text mode it prints a line-by-line report, and any failure gives exit 1.
+The `<target>` is resolved by the page's own harness (Chapter 5, 5.5): a numeric id from the tree, a stable reference `r<N>`, a test id written `@name`, an accessible name, or a selector.
 
-**`press:` emulates a US keyboard** and does not depend on the system layout. `code` is always physical (`KeyA`, `Digit1`), and `vk` is the virtual key code. Canonical names are strictly the DOM `key` values (`Escape`, `ArrowLeft`, `Enter`). Aliases such as `Esc`/`Left` are refused, so that each capability has exactly one name. Russian letters are not emulated (there is neither `code` nor `vk` for them). Text is entered with the `type:` step. Keys that used to be inert through the CLI (`Delete`, `Backspace`, `F2`, `F5`) now **really act** on the page. Do not run them in checks against live data.
+Examples:
 
-### `shot`
+```bash
+udtk gui js:6*7
+udtk gui tree
+udtk gui click:r12
+udtk gui type:@search:hello press:Enter
+udtk gui press:ctrl+a
+udtk gui js:window.__UNIDTK_BRIDGE__.getTransportState()
+```
+
+### 9.2 The receipt
+
+Each step produces a receipt, so the caller never has to trust that a step worked. The fields the code writes are `step`, `kind`, `ok`, `target`, `hit_point`, `covering`, `refused`, `text`, `key`, `value`, `error`, `log_delta`, `ui_errors`, and `duration_ms`.
+
+- `log_delta` holds the journal records written since the previous step. It is read with the socket command `log_delta`, one round trip per step.
+- `ui_errors` holds the page errors collected since the previous step.
+- `ok` is derived from what happened, not from whether a message was sent. A click on an occluded target has `ok: false`, not `ok: true`.
+
+`--json` prints `{"ok": ..., "steps": [...]}`. The text mode prints one line per step. Any failed step gives exit 1.
+
+### 9.3 Occlusion is a refusal
+
+Before a click, the harness reports whether the centre of the target is covered by another element. If it is, the step is **refused**, not sent:
+
+```text
+ok: false, refused: "occluded", covering: {tag, id, testid, ref}
+```
+
+The receipt names the covering element. `--force` lifts the refusal and clicks anyway. This rule came from a live finding: the old `act` read the flag and sent the click anyway, and returned `status: ok` while the press landed on another element (see [H3](#h3-slices-s0-to-s5-former-109-to-1022)).
+
+### 9.4 Key refusals
+
+A key that cannot be emulated is refused before anything is sent, so that no `keyUp` is left without its `keyDown`:
+
+| `refused` value | Cause |
+|---|---|
+| `unknown-key` | The name is not a canonical DOM key name (for example `Esc`, `Left`) |
+| `non-ascii` | A non-ASCII character was given to `press:` (use `type:` for text) |
+| `unknown-modifier` | The modifier is not `ctrl`, `shift`, `alt`, or `meta` |
+| `empty-key` | Nothing follows the modifiers |
+
+Keys that used to be inert through the CLI, such as `Delete`, `Backspace`, `F2`, and `F5`, now act on the page. Do not run them against live data in a check.
+
+### 9.5 Failure modes
+
+| Message | Meaning |
+|---|---|
+| `too many steps in one batch (max 50)` | Split the batch |
+| `CDP not reachable on <port>: ... (is the app running?)` | The app is not running, or CDP is not open |
+| `CDP target is not the UniDTK page ...` | The first page is not the app's page; the CLI refuses to drive it |
+| `target not found in the active UI: <target>` | No element matches; use `tree` to see the names |
+| `unknown step kind: <kind>` | A step was not understood. In PowerShell 5.1 a multi-line `js:` argument is split at line breaks and double quotes, and each piece becomes a step. Write one line, with single quotes inside |
+
+---
+
+## Chapter 10. `shot` and `cdp-list`
+
 ```bash
 udtk shot [path] [--json|-j] [-q|--quiet] [-o|--output <path>]
-```
-The default is `Pictures/Screenshots/unidtk_YYYY-MM-DD_HH-MM-SS.png`, resolved through `SHGetKnownFolderPath`, with fallbacks to `Pictures/Screenshots` and `%TEMP%`. The PNG signature and a minimum size (≥1 KiB) are checked. `-q` prints only the path. When CDP is unreachable, the hint distinguishes "the app is not running" from "the kernel is up, CDP is not".
-
-### `help`
-```bash
-udtk help [--json]
-```
-Without the flag, it prints human-readable help. With `--json`, it prints the full machine manifest of all commands (15 entries), synchronized with the dispatcher and `help()`. Both forms produce identical text for a person. Previously JSON had its own command, `commands`. Now it is a flag.
-
-### `tasks` / `autostart` / `path`
-
-| Task | XML template | Description | Privileges |
-|---|---|---|---|
-| `UniDTK` | `UniDTKTask.xml` | Shell autostart at logon | Unelevated (`InteractiveToken`) |
-| `UniDTKSingbox` | `UniDTKSingboxTask.xml` | Sing-Box TUN helper | Elevated (`HighestAvailable`) |
-| `UniDTKVpnStop` | `UniDTKVpnStopTask.xml` | VPN stop helper | Elevated |
-
-* `udtk tasks register [all|UniDTK|UniDTKSingbox|UniDTKVpnStop|autostart]` substitutes `@INSTALL_DIR@` and the current user into the UTF-16 XML, and registers the task through `schtasks`. If needed, it goes through UAC (`Start-Process … -Verb RunAs`). It requires `vpn-helper.exe` next to the app.
-* `udtk tasks unregister <all|name>` / `cleanup-old` (stale tasks: `NothingWallpaper*`).
-* `udtk autostart [status|enable|disable]` is a wrapper over the `UniDTK` task.
-* `udtk path [status|ensure]` writes exactly one directory into the User PATH: the one that contains `udtk.exe` itself. No copies of the binary are made in the data directories.
-
-### `build` / `dev` / `run`
-
-* `build`: `cargo tauri build` → `cargo build --release --bins` → copying `libmpv-2.dll` and the ONNX weights into `target/release` → `prune_stale_resources` (removes modules that no longer exist in the sources, so that a second widget card does not appear).
-* `dev [--debug|-d]`: with `--debug`, it lays out the DLLs and models. The app enables CDP itself and picks the port itself. The CLI does not set the port and does not extend the list of allowed origins.
-* `run [args…] [--debug|-d]`: starts **only** `unidtk.exe` from the directory next to the CLI (`paths::install_dir()`), loads `.env`, and sets `CREATE_NO_WINDOW`. `--debug` only sets the markers `UNIDTK_DEBUG`/`SHELL_DEBUG`. The kernel owns the WebView2 arguments (including the CDP port). There is no search for "some" binary in the repository.
-
----
-
-## 5. Splash (`udtk` with no arguments)
-
-`opt/cli/splash.rs` plus the generated `opt/cli/splash_art.rs`. **Do not edit by hand.** Regeneration is `docs/unidtkascii.md` §5, and the check is `make_splash.py --repo <repo> --check`.
-
-* **Four tiers** by width **and** height. The thresholds derive from the art width. `≥98` columns and height `≥29` give the XL emblem `48×21` (the splash is 27 lines). `≥86` gives `36×16`. `≥78` gives the compact `28×12`. Otherwise the emblem sits above the wordmark, with a ladder of truncations. `<46` gives the `UniDTK` line instead of the block wordmark, and `<29` gives text mode. The line budget is `min(28, height−2)`. The height comes from `srWindow` (overridden by `LINES`).
-* Emblem: a metallic Ouroboros (titanium `#C3D0DE→#5A6678`), an icy Saturn (`#C6EEFF→#367CB0`) with rings. A protective sky mask keeps the serpent's colors from leaking onto the rings. On top of the geometry, the serpent's body is modulated by the byte `shade` (`128` is neutral, step `8`, range `80…176`). That is brightness taken from the original Ouroboros painting (`docs/unidtkascii.md` §4.7). The planet, the rings and the background are never modulated.
-* The `UniDTK` wordmark: `Uni` in chrome, `DTK` in the colors of the German flag (graphite/red/gold).
-* Color is enabled only on a TTY or with `FORCE_COLOR`/`CLICOLOR_FORCE`. It is disabled by `NO_COLOR` and `TERM=dumb`. The width comes from `COLUMNS` and the height from `LINES`. On Windows, it uses `GetConsoleScreenBufferInfo` plus a **verified** enabling of VT mode and CP65001. If that fails, the output is plain text instead of raw ESC sequences.
-* The right column is aligned to the **dynamically computed** maximum width of the emblem (`display_width`), not to the constant `geo.cols`. Otherwise the stack's lines "slid" to the left.
-* At the bottom is the command map: `control · telemetry · ui · system`. In narrow windows the list wraps with an indent of `13` columns. Previously the `system …` line broke below `57` columns.
-* Tests (13 in `splash.rs`): all tiers fit the width **and** the height (`24`/`30`, widths `120…30`). Plain output has no escape sequences and matches the colored output after SGR is stripped. Planet, ring and body zones are isolated (the sum of the zones equals the block area). The rows, the `shade` values and `geo.cols` agree, and the alphabet is braille only. `shade` is neutral and quantized. The photo texture is present. The wordmark lines are 46 characters long. The right column is strictly aligned. The command map wraps. The XL tier is exceeded on a tall window.
-
----
-
-## 6. Rules for modules (contract and inventory)
-
-1. **No shadow test code in modules.** The `diagnostic_checks` method was removed from the `Module` trait. Diagnostics are declarative.
-2. **Dependencies are declared as data**, not as code:
-   ```rust
-   fn dependencies(&self) -> &'static [manifest::ModuleDependency] { &[] }
-   ```
-   The types are `DependencySeverity::{Mandatory, Optional}` and `DependencyKind::{DynamicLibrary, Executable, ModelAsset, WindowsTask}`.
-3. **A single registry.** A module is registered in `core/kernel/registry.rs` (`all_modules()`, `ALL_MODULE_IDS`) and wired into `toolchain/Cargo.toml`. Both the kernel and the CLI use the registry, so there is no duplicated list.
-4. **Build linter for the inventory.** `toolchain/build.rs::lint_modules_integrity()` runs at build time and scans `../modules/*/rust/Cargo.toml`. A module on disk that is outside the registry/manifest fails the build with `BUILD INTEGRITY ERROR`.
-5. **Zero disk pollution.** Diagnostics do not create data directories (`paths::data_dir_view()` is used instead of `data_dir()`) and run on `InMemoryModuleDb`.
-6. **Safe life cycle.** `init` in diagnostic mode runs once and starts no background threads. `shutdown(budget)` fits within its budget. For the VPN helper this is critical at Windows shutdown.
-7. **Panics are not lost.** `capture_logs_unwind` returns the logs accumulated before the panic.
-
----
-
-## 7. Known discrepancies (technical debt)
-
-* The environment section of `-env` checks only the presence of DLLs and binaries, without PE validation. PE validation lives in the module phases. Keep this in mind when reading the report.
-
-The legacy name `shell` was removed from the CLI. The `usage:` lines, the `shot`/`cdp_get` hints, doc comments, test messages and the file header now say `udtk`/UniDTK. Only `shell32` (the Win32 API) and the env key `SHELL_DEBUG` are kept on purpose. The global `__SHELL_HARNESS__`, the `Shell*` tasks in `OBSOLETE_TASKS`, and the cleanup of the `%LOCALAPPDATA%\Shell` directory were removed together with the migration from that directory (session 131).
-
----
-
-## 8. What changed on 17.09.2026 (sessions 58–60)
-
-**Commit `c3c7070` — `feat(kernel,cli)`:**
-
-* The hardcoded `udtk status` (and `udtk ping`) was removed. The aggregating function `status_snapshot()` in `core/kernel/ipc.rs` was eliminated, so that a new module would not force kernel edits.
-* `doctor` was rewritten around a strict flag whitelist. `--app` was replaced by `-ping`. Later the redundant synonyms were cleaned out: only the `-x`/`--x` pairs remain (without `-ipc`, `-cargo`, `-sim`), and the duplicate command `udtk check` was removed in favor of `udtk doctor -check`.
-* A declarative manifest `core/api/src/manifest.rs` and `Module::dependencies()` were added.
-* `diagnostic_checks` was removed from the modules. `ModuleRunMode`, `ModuleContext::new_diagnostic`, `InMemoryModuleDb`, `capture_logs`, `capture_logs_unwind`, `CheckStatus`/`CheckResult` were introduced.
-* Added `core/kernel/registry.rs` and the build linter `lint_modules_integrity()`.
-* The CLI gained `validate_pe_x64`, `run_executable_probe`, `run_module_checks` (4 phases), `run_kernel_checks`, `run_ping_check`.
-* Splash: a redesign of `splash_art.rs`/`splash.rs`. `UniDTK` in mixed case, `DTK` in the colors of the German flag, a titanium Ouroboros with scales, an isolated Saturn.
-
-**Commit `afdd2e4` — `fix(cli,ui)`:**
-
-* `side_by_side` computes the emblem width dynamically, so the right column is strictly aligned to a single axis. A regression test for the alignment was added.
-* The paint clipping of the library popup was removed (`contain: none !important` for `.music-widget`). The popup no longer clips the header and the close button.
-
----
-
-## 9. Live verification checklist
-
-After any change to the CLI, the kernel, or the modules:
-
-```bash
-cargo test --bin udtk
-cargo build --release --bins
-
-udtk doctor -quick          # env + kernel + modules + ping
-udtk doctor -all            # comprehensive audit
-udtk doctor -unknown        # expect exit 2 and a flag error
-udtk logs --level ERROR     # expect [] or the parsed causes
-udtk shot                   # mandatory visual audit of the layout
+udtk cdp-list
 ```
 
-`cargo test --workspace` is mandatory before handing off (currently 66 passed / 0 failed). Direct calls of `cargo check` / `node --check` that bypass the CLI bridge are prohibited. End-to-end diagnostics go through `udtk doctor` (including `udtk doctor -check`).
+`shot` asks CDP for a PNG (`Page.captureScreenshot`, from the surface, optimised for speed). The default file is `unidtk_YYYY-MM-DD_HH-MM-SS.png` in the **Screenshots** folder of the user, found through `SHGetKnownFolderPath`. If that folder cannot be created, it tries `Pictures\Screenshots`, then `Pictures`, and then the system temporary directory. A name that already exists gets `_1` to `_100` appended. A path without an extension gets `.png`. A relative path is taken from the current directory.
+
+Before writing, the file is checked: it must start with the PNG signature and be at least **1024 bytes**. Otherwise the error is `corrupted screenshot received (size: N bytes, expected valid PNG)`. If writing to the chosen place fails, the file goes to the temporary directory, and the output gives the path that was actually used.
+
+`-q` prints only the absolute path. `--json` prints `{"ok": true, "path": ..., "bytes": N}`.
+
+When CDP is not reachable, the error carries a hint, and the hint tells two cases apart: `UniDTK application is not running. Start it via 'udtk run' or 'schtasks /run /tn UniDTK'` when the socket also fails, and `UniDTK core is running, but WebView2 CDP (port N) is not responding.` when only CDP fails.
+
+`cdp-list` prints the JSON list of CDP targets from `GET /json`.
 
 ---
 
-## 10. Plan: one command contract, two doors, and `udtk gui`
+## Chapter 11. `doctor`: the diagnostic loop
 
-Status: **version 3**. This version comes after the critique by six subagents and two rounds of dialogue with a seventh. The outcome of the dialogue is §10.8, which must be executed. We start with slice S0 (§10.8.3).
+`doctor` is one entry point for health. It reads declarations from the modules rather than holding its own lists. Each section is described below.
 
-### 10.1 The problem
+### 11.1 Flags and which sections run
 
-The application's command surface is duplicated **three times**. All three lists are handwritten and drift apart:
+```text
+udtk doctor [-kernel] [-modules] [-ping] [-env] [-check] [-quick] [-simulate] [-all]
+```
 
-1. `core/kernel/ipc.rs::route()`: a `match cmd` with about 20 arms. The kernel knows the module types (`vpn::VpnRuntime`, `telegram::TelegramRuntime`, `music::commands::AppState`).
-2. The response of the IPC command `commands`: yet another list of the same names, synchronized by hand.
-3. `#[tauri::command]` (about 30 functions in `core/kernel/main.rs`) plus the single `generate_handler!`: a second, independent surface for the web interface.
+Each flag has a long form with two dashes (`--kernel`, and so on). The whitelist is `ALLOWED_DOCTOR_FLAGS`, and any other flag is refused with exit 2.
 
-Separately, `doctor -simulate` contains a **fourth** handwritten list: five render functions hardcoded as a JS string in `opt/cli/main.rs`.
-
-Adding a command in a module requires kernel edits in three places. This is the same anti-pattern that was eliminated in `status_snapshot` and `diagnostic_checks`.
-
-### 10.2 Recorded decisions
-
-- **`udtk gui`**: a single page-control command that merges `dom` + `eval` + `act`.
-- **One contract, two doors, the front end entirely on our protocol (the owner's decision).** The Tauri command transport is removed, and the page goes through our door. Consequence: authentication of the door is **mandatory**. A loopback socket without a password gives no protection, and the WebSocket door is reachable from any web page (WS has no CORS). The adopted scheme: the CLI (Rust) uses a named pipe with a check of the client process (`GetNamedPipeClientProcessId` + the parent chain). The WebView uses a WebSocket on loopback with a token issued on each launch, a check of the origin, and a mandatory first handshake frame. Honest boundary: this protects against web pages and other users, but **not** against malware running as the same user, since the token file and the process memory are available to it. This is a deliberately accepted risk.
-- **The manifest is a static build artifact, compiled into both the kernel and the CLI.** Materializing modules just to build the list is forbidden. `registry::all_modules()` in the kernel would produce second instances: a repeated VPN auto-connect, a second TDLib, a race with the deferred bootstrap of the player.
-- **A module declares its metadata declaratively**, as a `macro_rules!` list in its own crate, following the pattern of `dependencies()`. The kernel and the CLI read it through a registry of function pointers, without instantiation.
-- **The handwritten `#[tauri::command]` wrappers stay in the kernel.** They carry the Tauri injection (`State`/`AppHandle`) that a module cannot express. Only the list of names and the expansion of `generate_handler!` are generated.
-- **One routing table** instead of three lists, plus a build check that "every declared spec has a handler".
-- **Linker magic is not used** (`inventory`/`linkme`). On MSVC, `/OPT:REF` strips unreferenced sections.
-- **We borrow techniques, not dependencies.** The reference points are `agent-browser` (Rust + CDP, element references taken from a snapshot) and Chrome DevTools MCP (targeted CDP queries instead of a full snapshot after every action).
-- **Separation of layers.** Business logic lives in the modules. The kernel does transport, routing, and inventory. The CLI is a thin client. Logic does not settle into the CLI.
-
-### 10.3 Module decisions and open questions
-
-**Accepted:**
-
-- **A module owns its runtime state.** The kernel stops naming module types (`VpnRuntime`, `TelegramRuntime`, `AppState`). The state lives in the module, and the handler fetches it itself. Accompanying requirement: `init` must be verifiable and cancellable, not "silently lose" a repeated `OnceLock::set`.
-- **`metadata.json` is extended with the render entry points** (and added for `vpn`/`explorer`, where it is currently absent). `simulate` takes the list from there.
-
-**Open:**
-
-1. **The fate of plugins and assets.** Commands and events move to our protocol, but `fs`/`opener`/`path` and `convertFileSrc` (serving images) stay on Tauri. Whether to move them too is a separate stage C, a large decision.
-2. **Who stops the running instance during an update** (NSIS hook / CLI command / updater). Currently `PREUNINSTALL` removes autostart, and it does so on upgrade too. The old process holds ports 26540/9222.
-3. **Resource budgets**: the maximum number of steps in a `gui` batch, the lifetime of a CDP session, and the permissible growth of Working Set / idle CPU.
-
-### 10.4 Stages
-
-**Stage 0. The debug door: preserve and secure (owner's decision: CDP always on).**
-CDP on 9222 stays enabled permanently. `udtk gui`/`shot`/`dom` run on it. Instead of a gate, the surface is reduced:
-
-- **Remove `--remote-allow-origins=*` entirely, not narrow it to an origin.** The `Origin` header is chosen by the client itself, so an "allowed WebView origin" filters nothing. Any local client will send `http://tauri.localhost`. This is a control that looks like a control but is not one. Our CLI (`tungstenite::client_with_config`) sends no `Origin` and is not affected. Verified with a probe: an upgrade without `Origin` gives `101`.
-- **Three points, not one:** `core/kernel/main.rs:1477`, `opt/cli/main.rs:1203` (`dev --debug`), `opt/cli/main.rs:1236` (`run --debug`). Otherwise the hole returns from the CLI.
-- **The kernel stops overwriting `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`** (`core/kernel/main.rs:1480`). Today it erases what the CLI set, so the CLI arguments are dead. It must append its own arguments to the existing value.
-- **Port and target discovery is inside stage 0, not "in the future".** A target is accepted only if the listening socket belongs to `msedgewebview2.exe` whose parent is `unidtk.exe` from `install_dir()`. Otherwise it is a hard error, not a warning. Otherwise `gui` would drive the window of an old or foreign process.
-
-**Clarification of the boundary (verified by probes on the live app).** The "web page" class is closed **not** by this flag. It is closed by the `Host` check on DevTools (only IP/`localhost` is accepted; a request with `Host: evil.test` gets `500` before the target is looked up) and by the absence of CORS on `/json`. That means DNS rebinding against CDP fails regardless of `*`. The flag only widened the door for a client that **already knows the target UUID**. The class "local process of the same user" is not closed by anything: it connects and executes JS. **The security boundary here is the Windows user account.** The authentication of our door (§10.4 stages 1/7) is protocol hygiene, not a boundary, and cannot justify widening the write surface.
-
-**In the future (a separate task, not in this plan):** remove the `dev` and `--debug` modes together with the variables `UNIDTK_DEBUG`/`SHELL_DEBUG`. Debugging is available at all times anyway, so a separate flag loses its meaning.
-
-**Stage 1. Protocol envelope v1.**
-`{"v":1,"id":N,"cmd":…,"args":…}` → `{"v":1,"id":N,"ok":…,"result"|"error":…}` + a frame type for push events. Mandatory server-side ceilings: the maximum size of a line/message, clamps on `limit`/`since`, a limit on the outgoing queue. In `ping`: `proto`, `capabilities[]`, `min_cli`. This removes the blocker "there are no versions at all": the installed CLI and the kernel update independently.
-
-This stage also includes the **handshake**: a mandatory first frame that carries the token and has a hard timeout. No command is executed before it. There is also an origin check for the WebView. Without this stage, the front end cannot be moved to our door.
-
-**Stage 2. Command manifest (no proc-macro and no scanning of sources).**
-`CommandSpec { name, summary, args, access, requires_state, doors }` in `core/api`. Each module declares its own set in one `macro_rules!` list (one line per command). The registry enumerates `fn commands() -> &'static [CommandSpec]` through function pointers. The kernel and the CLI get the **same** compiled manifest. Build checks: duplicate names, missing description, collision with reserved names, "spec without a handler", and orphan modules (the existing `lint_modules_integrity`, with a fix to `rerun-if-changed` on `../modules`).
-
-**Stage 3. One routing table in the kernel.**
-`ipc.rs::route()` looks up the table, and the `match` is removed. The key point is to preserve the difference between **"the command does not exist"** and **"the module is not ready"** (currently these are different texts). Readiness is a separate field, not a fact of presence in the table. The Tauri wrappers stay handwritten, but their names are checked against the manifest at build time.
-
-**Stage 4. The CLI reads the manifest.**
-`udtk invoke` and `help --json` read from the shared manifest. This works even when the app is off, because the manifest is linked into the CLI. The response of the IPC command `commands` stays as a runtime reflection of the door (it honestly distinguishes doors and rights), but it stops being the source of truth.
-
-**Stage 5. `udtk gui`.**
-One CDP session per batch. **Ownership belongs to the scope of the CLI process**, with keepalive and one automatic reconnect. The tree snapshot is **one per batch**, with stable references. Target resolution is point-wise, without another full `getSemanticTree`. A receipt for each step: `kind`, `ok`, `value` | `hit_point`/`occluded`, `log_delta`, `ui_errors`, `duration_ms`. To avoid two connections per step, a new command `log_delta {since}` returns `(max_id, entries)` in one response. There is a limit on the batch by steps and by time. `dom`/`eval`/`act` are removed (with aliases during a transition period).
-
-**Stage 6. `simulate` on the registry (rewrite it, do not "finish" it).**
-- Remove the self-ping and the duplicates of `-ping`/`logs`/`-modules`. Simulate is responsible only for what the other sections do not cover, and it **does not re-initialize modules**.
-- Remove the click on the **live** clock widget. Right now it fires the real `toggleWidget`, collapses a widget the user has opened, and races the animation timer (300 ms against a 60 ms pause). Instead, work with an offscreen copy or through the harness, with state save/restore.
-- The sandbox must not be visible to global queries (`.widget-card`, the harness, `relayoutWidgets`). Isolate it, exclude it from selectors, and apply `contain: strict`.
-- Render entry points come from the extended `metadata.json` (§10.3, "Accepted"), not from a string in the CLI. Record explicitly that the run is read-only: `save_widget_config` is not called during the run.
-
-**Stage 7. The front end: migration to our protocol (radical option, the owner's decision).**
-- First, an **inventory** of the dependencies on Tauri, as an artifact: commands, events (17+ subscriptions), the plugins `fs`/`opener`/`path`, and `convertFileSrc`.
-- Fix the bypass immediately: `modules/explorer/ui/*.js` import Tauri by a **relative path**, bypassing the importmap. The facade would not intercept them.
-- The facade is the single import point for commands, events, and (for now) plugins. A lint rule forbids direct imports of `@tauri-apps/*` outside the facade.
-- The door: a WebSocket on loopback + a token per launch + an origin check + a first handshake frame (stage 1). The CLI door is a named pipe with a check of the client process.
-- Migration **one command at a time** behind a runtime flag, keeping the working Tauri path until the phase passes. Rollback without a rebuild.
-- The door must restore subscriptions after a reconnect. In Tauri the kernel is always alive. On our channel it is not, and otherwise events are lost silently.
-- Authentication comes **before** write commands are enabled, not together with them.
-- Plugins and assets stay on Tauri. That is a separate stage C (§10.3, open question 1).
-
-**Stage 8. Acceptance and documents.**
-Update `AGENTS.md` (§3.1/§3.4: `dom`/`act`/`eval` → `gui`; the status of `simulate`) and `docs/architecture.md`. Acceptance is checked against §10.5.
-
-### 10.5 Acceptance criteria (measurable)
-
-1. **Manifest completeness**: a test in the kernel iterates over the real routing table and compares it with the manifest. A mismatch fails the test.
-2. **Door consistency**: `udtk help --json` == manifest == the runtime response of `commands`, in terms of the set of names. Differences by door/rights are permissible and must be flagged explicitly.
-3. **Front end**: a snapshot test that the set of names in `invoke(...)` calls from `core/ui` and `modules/*/ui` is a subset of the manifest. This closes the risk that a rename silently breaks the front end.
-4. **Offline**: with the app off, `udtk help --json` and `udtk doctor -modules` are green.
-5. **`gui`**: a sequence of steps in one session, a log delta for each step, the number of CDP handshakes = 1 per batch (verified by a counter), and the number of IPC connections ≤ 2 per batch.
-6. **`simulate`**: read-only (`save_widget_config` not called during the run; the layout state and `activeExpandedWidgetId` match before and after). No `[INFO] CDP simulation unavailable` while the app is running.
-7. **Regressions**: `cargo test --workspace` is green, `udtk doctor -all` has no errors, and `utdk shot` shows no layout changes.
-
-### 10.6 Risks
-
-- **Security**: CDP is always on (the owner's decision). Slice S0 removed `--remote-allow-origins=*` (three places) and introduced port discovery. Residual risk, accepted knowingly: any local process can execute JS in the shell. **The boundary here is the Windows user account**, not a token and not a flag.
-- **Version compatibility**: an old `udtk.exe` from the shipped install and a new kernel diverge independently. Without a protocol version this looks like "strange failures". Addressed by stage 1.
-- **Resources of a persistent process**: a connection per request + a thread per connection. A `getSemanticTree` snapshot forces a layout and a hit-test on the WebView2 UI thread (the same wallpaper). Budgets: §10.3 item 5.
-- **Threads and COM**: all tauri commands are declared `(async)`. A generated synchronous wrapper would freeze the UI (AGENTS §4.3). Socket threads do not initialize COM, so commands that work through COM/the clipboard must not be called from them. This must be recorded in the contract.
-- **Shutdown**: a request in `block_on` during `app.exit(0)` leaves a torn redb transaction. A closing gate and a drain of `INFLIGHT` are needed.
-- **Module life cycle**: an `init` timeout leaves the module alive without `shutdown`. A repeated `init` is ignored by `OnceLock::set`, so the module silently works with a foreign context.
-- **Update**: `PREUNINSTALL` removes autostart on upgrade too. Busy ports and locked files in Program Files.
-- **Scope creep**: ~30 tauri commands + ~20 IPC + calls in JS. Only in stages, one module at a time.
-
-### 10.7 Outcome of the subagent critique
-
-**Rejected from the first version of the plan:**
-- A proc-macro `#[udtk_command]` plus scanning `modules/*/rust` in `build.rs`. These are two parsers of the same thing, mutually exclusive mechanisms. A substring scan catches comments and `cfg`-disabled code.
-- Generating the bodies of the `#[tauri::command]` wrappers. Not feasible: the Tauri injection (`State`/`AppHandle`) is known only to the kernel, and `include!` from `OUT_DIR` breaks the IDE, rust-analyzer, and incremental builds.
-- Building the table from `registry::all_modules()`. This creates second module instances in the kernel and double initialization of VPN/TDLib/the player.
-- Exposing write commands on the socket "right away". This lowers the security perimeter without a threat model.
-- The criterion "the single source of truth in `help --json` through the socket". It would make diagnostics depend on the running app.
-
-**Accepted into the plan:**
-- The manifest as a build artifact linked into the kernel and the CLI. Declaration in the module, without instantiation.
-- The protocol envelope with a version, id, limits, and capabilities.
-- Preserving the difference between "no command" and "not ready".
-- Read-only by default for the socket, with closing CDP as a separate stage.
-- `gui` with one session and one snapshot per batch, plus the `log_delta` command.
-- Rewriting `simulate` (live click, sandbox isolation, no repeated init).
-- An inventory of the Tauri dependencies and a facade before the front-end migration.
-- Measurable acceptance criteria and explicit resource budgets.
-
-**The owner's decisions from the discussion (recorded in §10.2–10.4):**
-- The front end is moved entirely to our protocol (the radical option). Door authentication is therefore a mandatory stage, not an option. The accepted boundary (protection from web pages and other users, but not from malware of the same user) is recorded as a knowingly accepted risk.
-- Module state moves into the modules themselves. This is the condition for a third-party developer to add a command without editing the kernel.
-- `metadata.json` is extended with render entry points.
-- Work starts with stage 0, which secures the debug door. CDP stays enabled always (the owner's decision), but `--remote-allow-origins=*` is removed, the port stops being hardcoded, and the `dev`/`--debug` modes are to be retired in the long run.
-
----
-
-## 10.8 Consensus after a dialogue with a subagent
-
-A two-round dialogue (positions → objections → consensus), with live probes against the running app. The outcome is recorded in the plan as mandatory.
-
-### 10.8.1 Kernel and module types: narrow the wording of the goal
-
-"The kernel stops naming module types" **is not achievable in full at stage 3**, and it should not be. The Tauri surface continues to name the types until stage 7.
-
-Facts: in `core/kernel/main.rs` there are **31** `#[tauri::command]`, **93** `State<…>` parameter positions, and **9** `app.manage(...)` sites. In `core/kernel/ipc.rs` there is a separate, smaller surface (~20 arms).
-
-**Decision:** §10.3 applies **to the routing surface**. From stage 3, `ipc.rs::route()` looks up a table where each arm is a module's `dispatch(&self, cmd, args)`, so the state type does not leave the module. The handwritten wrappers, `generate_handler!`, and `app.manage(module.runtime())` **remain** until stage 7, and are removed together with the Tauri transport.
-
-**Consequence to be written into §10.1 and §10.7 in plain text:** "a command can be added without editing the kernel" is true **for our door**. For the Tauri surface it becomes true only after stage 7.
-
-**Criteria:** S3 — a grep test that "there are no module type identifiers in `ipc.rs`". S7 — "there is no `State<…>` with a module type in `main.rs`, and no `app.manage` of module state".
-
-**The rule "a module depends only on `unidtk-api`" is factually obsolete.** `tauri` is declared by 4 of the 5 modules, and the contract itself provokes this (`ModuleContext::host::<tauri::AppHandle>()`). **Owner's decision: the rule is narrowed** to the invariant that protects updatability: "a module **does not** depend on the kernel crate. `unidtk-api` is mandatory, and Tauri host types are permitted". Application: a rewording in `docs/architecture.md` §1 and in the header of `core/api`. The check is in `toolchain/build.rs::lint_modules_integrity()`, which fails on a dependency on the kernel crate in `modules/*/rust/Cargo.toml`. Do this as part of S2.
-
-### 10.8.2 Manifest and route: where verification is possible and where it is not
-
-The check "spec without a handler" **cannot be done at build time**. The proc-macro and source scanning were rejected, and `generate_handler!` is opaque to `build.rs`. So:
-
-- the routing table of the socket door is **the only handwritten enumeration of names**;
-- the build guarantees only what can be derived: duplicate names, reserved names, missing descriptions, orphan modules;
-- "spec without a handler" and "table == manifest" are **test** guarantees, and the test must be non-degenerate (a mutation check: remove a handler → the test turns red);
-- the macro pays off not as a description of commands, but as a way to keep `generate_handler!` and the name array from drifting apart.
-
-### 10.8.3 Slices and gates
-
-**S0** (CDP + discovery) → **S1** (`gui`) → **S2** (manifest + route + CLI) → **S3** (decoupling of types in `ipc.rs`) → **S4** (front end, one command at a time behind a flag) → **S5** (`simulate` + acceptance).
-
-The gate on **each** slice: `cargo test --workspace` + `udtk doctor -all` + `udtk doctor -check` + `udtk shot` (the layout has not changed). In S0 a negative check is added: `rg -n -- '--remote-allow-origins'` must be empty **and** `udtk eval 1+1`, `udtk dom`, `udtk shot`, `udtk doctor -simulate` must be green. This is the proof that our client works without an `Origin` header.
-
-### 10.8.4 What to borrow from `agent-browser` first
-
-Techniques matter more than snapshot frequency. Our approach (one snapshot per batch + typed receipts + log delta) is not behind. Chrome DevTools MCP made the post-action snapshot **optional**, and `agent-browser` re-snapshots the tree only on failure. The borrowing order:
-
-1. **Refusal on an occluded target, plus a report of what exactly occluded it.** This is the most valuable and the cheapest change (see §10.8.5 item 3).
-2. **References instead of indexes:** a stable `data-udtk-ref`, not a positional number from the snapshot.
-3. **An annotated screenshot** with boxes and references (`udtk shot`) as a replacement for the tree snapshot, when a picture is cheaper.
-4. **Do not borrow the `agent-browser` daemon.** It contradicts §10.2 ("logic does not settle in the CLI") and moves session state into the CLI. Our contract is one batch per `udtk gui` run.
-
-### 10.8.5 Found beyond the plan (live probes, DPI contract, harness)
-
-**1. A direct contradiction in the documentation about DPI. It will hit S1.**
-`docs/agent-e2e-and-ipc-plan.md` "Taboo #9" prescribes multiplying coordinates by `devicePixelRatio`. Section §5.3 of the same document says exactly the opposite: in CDP, `Input.dispatchMouseEvent` takes CSS pixels 1:1, and multiplication gives a miss of 1.25–1.5×. The code is right. There is no multiplication, and `opt/cli/main.rs:664-688` sends the coordinates from `getBoundingClientRect()` as they are. **Fix:** reword the taboo into "a ban on mixing input conventions". CDP takes CSS pixels without scaling. Native `SendInput` takes physical pixels and requires the dpr. Per-monitor-v2 DPI awareness is mandatory.
-
-**2. The harness and `act` break their own "Taboo #3" (only `data-testid` and roles).**
-`core/ui/harness.js` builds its selection by class (`.action-btn`, `.nav-btn`, `.track-row`, …) and exposes a `selector` of the form `.class`. `udtk act` accepts an arbitrary CSS selector. In addition, the `id` in the tree is **positional** (`nextId++`), so it is not stable between snapshots. Plan §10.4, stage 5, requires "stable references". **Fix:** expose outside only the locators `{testid}` / `{role+name}` / `{ref}`, plus a flag `fragile` if no stable one exists. Keep classes only for internal discovery. Set `data-udtk-ref` (it is removed together with the node). `act` by class only with an explicit `--allow-fragile`. The gate is a JS test: "the tree output contains no class locator".
-
-**3. `occluded` is detected, but the click is sent anyway. The receipt lies (verified on the live app).**
-`udtk dom` returned **41 elements, and all 41 are marked `[OCCLUDED]`**. `#explorerContainer` (`z-index: 2000`) is open on top, and the centers of the nodes land on other elements of Explorer itself. `act` reads the flag but **does not cancel** the click. It sends the events and returns `"status": "ok"` in the JSON receipt. The warning is printed only in text mode. Automation that reads the status sees success, while the press was received by Explorer. The check exists only for show. **Fix:** the receipt's `ok` is derived from the hit-test. With `occluded: true`, refuse without `--force`. Add `covering: {id, selector, surface}` to the receipt. Do not offer nodes under an active surface as targets. **S1 acceptance:** "a click on an occluded target → a refusal receipt with the name of the covering element".
-
----
-
-## 10.9 Slice S0 completed (report)
-
-**What changed in the code:**
-
-* `core/kernel/main.rs`: `--remote-allow-origins=*` was removed. Added `pick_cdp_port()` (9222 if it is free, otherwise an ephemeral port), `merge_browser_args()` (its own WebView2 arguments are **appended** to the inherited ones, and the inherited `--remote-debugging-port`/`--remote-allow-origins` are discarded), and `cdp_port()`. The port is published in IPC.
-* `core/kernel/ipc.rs`: `ping` returns `cdpPort`. The **write command `save_widget_config` was removed** from the route (and from the `commands` response). The door again matches the declared read-only model.
-* `opt/cli/main.rs`: `--remote-allow-origins=*` was removed from `dev --debug` and `run --debug`. The CDP port is no longer hardcoded: `cdp_port()` asks the app for it and **does not substitute 9222 blindly**. `cdp_ws_url()` refuses to work if the target is not `http://tauri.localhost`. `run_simulation()` returns a failure flag, and `doctor` takes it into account.
-
-**Verified live (release build, the app was actually restarted):**
-
-| Check | Result |
-|---|---|
-| `utdk invoke ping` | `{"cdpPort": 9222, "pong": true}`. Discovery works |
-| WebSocket with `Origin: http://evil.test` | **rejected** (before the fix it was `101`) |
-| WebSocket without `Origin` (our CLI) | `101`, works |
-| 9222 occupied by a foreign listener | the app took **54060**, and `utdk eval` worked through it |
-| `save_widget_config` through IPC | `unknown cmd` |
-| `dom` without the running app | a clear error, "cannot determine the CDP port", without a blind 9222 |
-| `doctor -simulate` without the app | `FAILED (1 issue detected)`, exit 1 (previously it could give "ALL CHECKS PASSED") |
-| `cargo test -p unidtk --bin udtk` | 10/10 |
-| `utdk doctor -quick` | ALL CHECKS PASSED |
-| `utdk shot` | layout is fine (checked visually) |
-
-**Remarks from the independent reviewer (GPT-5.6 Sol), accepted for the next slices:**
-
-- **Idempotency and request repetition** (S1/S4): `id` in the envelope is correlation, not protection against repeated execution. A `gui` reconnect, or a timeout after a command has actually executed, can repeat a side effect. Idempotency classes, deduplication by request-id, and a ban on automatic retries for non-idempotent commands are needed.
-- **Events are not restored by resubscription** (S4): `Bus::last` stores only the last value, so events between a disconnect and a new subscription are lost. A monotonic sequence/cursor, `resumeFrom`, a gap signal, and a mandatory resync are needed.
-- **TOCTOU in port selection** (S1): between the probe `TcpListener` and the actual bind, WebView2 leaves a window. A re-verifiable owner marker (PID/parent or a unique page identifier) and a refusal in case of uncertainty are needed.
-- **A fourth list** (S2): if the routing table appears alongside separate `CommandSpec`s and handlers, the promise of "one table" will not hold. The unit of declaration must carry both the spec and the handler at once, and the manifest must be a projection of that structure.
-- **Separating the inventory from the factories** (S2): the CLI currently pulls in `core/kernel/registry.rs::all_modules()`, which creates modules. The command inventory must live in static data, without calling `Module::init`.
-- **The wording "build-time guarantee of a handler" is wrong.** It is a test guarantee (§10.8.2 already admits this). In the S2 gate, phrase it exactly that way.
-
-**Environment (found along the way):** the running app holds `tdjson.dll`/`libcrypto`/`libssl`/`z.dll` from `target\release`, which makes the release build fail with `os error 32`. The order for a release: stop the app → `cargo build --release --bins` → start the app. Second: **do not run cargo through a PowerShell pipeline with `Select-Object`.** The output is cut off, the build process ends early, and the artifact silently stays old. This was caught twice as "build succeeded, binary is old".
-
----
-
-## 10.10 Slice S1 completed: `udtk gui`
-
-**What changed:**
-
-* `opt/cli/main.rs`: the `gui` command. One CDP session for the whole batch (a `Cdp` structure with monotonic `id`s; events are ignored). Steps `js:` / `click:` / `type:` / `press:` / `tree` / `wait:`, up to 50 steps. A receipt for each step (`kind`, `ok`, `value`, `hit_point`, `covering`, `refused`, `text`/`key`, `log_delta`, `ui_errors`, `duration_ms`), `--json`, `--force`. The `dom`, `act`, `eval` commands were removed.
-* `core/ui/harness.js`: stable references `data-udtk-ref` (field `ref`), a `covering` field on occluded nodes, class selectors removed from the output (the `fragile` flag is used instead), and `resolveTarget` understands `r<N>`.
-* `core/kernel/ipc.rs`: the command `log_delta`, which returns the journal delta and the new watermark in one round.
-
-**Verified live:** a batch of two `js` steps with receipts; `tree` returned 29 nodes, all with a `ref`, and 0 class locators; a click on `r1` with the menu open was refused with `refused: "occluded"` and `covering: div#menuOverlay (r30)`; `--force` clicks anyway; `cargo test -p unidtk --bin udtk` 10/10; `doctor -quick` PASSED; the layout is intact per the screenshot.
-
----
-
-## 10.11 Slice S2 (partial): a unified command inventory
-
-**What changed:**
-
-* `core/api/src/commands.rs` (new): the types `CommandSpec`, `Access::{ReadOnly, Write}`, `Door::{Socket, Tauri}`. A write command by construction does not reach the socket. This is reflected in the contract tests. The rule has become **data**, not a default.
-* `core/kernel/command_inventory.rs` (new): 21 commands with name, description, arguments, access, and doors. The file **compiles into both binaries**. The kernel serves from it, and the CLI `#[path]`-includes it and describes the surface even when the app is off.
-* `core/kernel/ipc.rs`: a guard before the route. `route()` first looks the command up in the inventory. Not in the inventory → `unknown cmd`. In the inventory but write → a refusal with an explanation. The `log` branch was removed from the `match` (its role now belongs to the inventory), and the response to `commands` is built from the inventory.
-* `opt/cli/main.rs`: `help --json` returns `protocol: 1`, `cli_commands` (the commands of `udtk` itself), and **`app_commands`**, the application surface from the shared inventory.
-
-**Verified live:** `invoke commands` → 21 records with `access`/`doors`. `invoke log` → `command 'log' is not available on this door (write commands stay on the UI door)`, exit 1. `invoke save_widget_config` → `unknown cmd`. `invoke ping` and `gui js:` work. `help --json` shows 13 CLI commands and 21 application commands offline. `cargo test --workspace`: 0 failures.
-
-**The honest boundary of what was done (remains for S3):**
-
-* The handlers still live in the kernel's `match`. The names now come from the inventory (the guard makes it authoritative), but there is no "(spec, handler)" table yet. That is S3, together with decoupling the module types.
-* A full test "inventory == route" requires a live server. Right now the mismatch is caught by the guard, not by a test.
-- module commands are still listed in the kernel, not declared by the modules themselves. This depends on the decision "a module owns its state", adopted for S3;
-- the module dependency rule has been narrowed. It is no longer "only `unidtk-api`" but "does not depend on the kernel crate; Tauri host types are permitted". This is recorded in `AGENTS.md` §1.1 and in the header of `core/api`. The lint check in `build.rs` has not been added yet.
-
----
-
-## 10.12 Slice S1 addendum: Sol's reliability remarks
-
-Taken into work, but not yet implemented. They are moved to S4, where the real door will appear:
-
-- **Idempotency**: commands need a class (idempotent or not) and deduplication by `request-id`. Automatic retry of non-idempotent commands is forbidden.
-- **Events**: `Bus::last` stores only the last value. A sequence/cursor, `resumeFrom`, and a mandatory resync after reconnection are needed.
-- **Port TOCTOU**: between the probe `TcpListener` and the WebView2 bind, a window remains. A re-verifiable owner marker is needed (PID/parent, or a unique page identifier).
-
----
-
-## 10.13 Slice S3, step 1: a route table instead of `match`
-
-**What changed** (`core/kernel/ipc.rs`): the handwritten `match cmd` with ~20 arms was replaced by a **route table**:
-
-- `type Handler = fn(&IpcServer, &Args) -> Result<Value, String>`. Each former "arm" became a separate function (`handle_ping`, `handle_logs`, `handle_vpn_status`, …).
-- `static ROUTES: &[(&str, Handler)]` is the only enumeration of handlers. **The names are taken from the inventory constants** (`command_inventory::PING.name`), not from repeated strings, so a name is written in the code once.
-- `route()` = the guard against the inventory → lookup in the table → call. If a name is declared but has no handler, the answer honestly reports a build inconsistency.
-
-**Tests that make the table meaningful** (`ipc::route_tests`):
-
-1. `every_socket_command_has_a_handler`: every socket command in the inventory has a handler. This is the missing "non-degenerate" check. If you add a spec without a handler, the test fails instead of a silent 404.
-2. `every_handler_is_declared_in_the_inventory`: the reverse direction.
-3. `route_names_are_unique`: there are no duplicates.
-
-**Verified live** (release, the app was restarted): `invoke ping` → `cdpPort`; `invoke vpn_status` → real data through the table handler; `invoke log_max_id` and `invoke log_delta` → correct answers; `invoke log` → refused by policy; `gui js:6*7` → 42; `doctor -quick` → ALL CHECKS PASSED, exit 0; `cargo test --workspace` → 0 failures, all 15 suites green.
-
-**What remains in S3 (step 2):** the kernel still names the module types. The handlers call `with_state::<vpn::VpnRuntime>` / `TelegramRuntime` / `AppState`. Decoupling requires moving the handling into the modules themselves:
-
-1. A contract method `Module::ipc_call(&self, cmd, args) -> Option<Result<Value, String>>`, whose default implementation returns `None`.
-2. The kernel holds **module instances**. Currently it creates them in `setup`, takes the runtimes through `app.manage(...)`, and loses the objects. A registry of `Arc<dyn Module>` available to `IpcServer` is needed.
-3. Each module answers for its own commands itself, fetching its state through `ModuleContext::host::<AppHandle>()`.
-4. A pilot on `glyph-bar` (one command, which needs no state), then `explorer`, `vpn`, `telegram`, `mp3-player`.
-5. The gate: a grep test that "there are no module type identifiers in `ipc.rs`".
-
-Assessment: this is the largest change to the plan after S4. It must not be done "by eye". First the pilot, then the rest, each with its own gate.
-
----
-
-## 10.14 Slice S3, step 2: modules answer for their own commands (decoupling done)
-
-**Mechanism.** The contract gains `HostHandle<'a> = &'a (dyn Any + Send + Sync)` and `ModuleIpcFn`, the signature of a module's handler. The kernel holds a table `MODULE_ROUTES: &[(&str, ModuleIpcFn)]` and addresses a module **by id**, passing an opaque host. The module fetches its own state itself (`downcast_ref::<AppHandle>()` + `try_state`). The contract stays free of Tauri types, and `glyph-bar` (which has no state for `volume_get`) stayed without a dependency on `tauri`.
-
-**What was done:**
-
-| Module | Commands | State |
+| Flag | Section | What it does |
 |---|---|---|
-| `glyph-bar` (pilot) | `volume_get` | not needed |
-| `explorer` | `explorer_drives`, `explorer_places` | not needed (`serde_json` added to the dependencies) |
-| `vpn` | `vpn_status`, `vpn_settings`, `vpn_list_servers` | `VpnRuntime` via host |
-| `telegram` | `telegram_status`, `telegram_chats` | `TelegramRuntime` via host |
-| `mp3-player` | `player_status`, `ai_dj_status`, `list_tracks`, `list_playlists`, `get_submodules` | `AppState` via host |
+| `-check` | Compiler and build | Runs `cargo check` on the toolchain. This takes tens of seconds |
+| `-env` | Dependencies | Presence of the files that modules declare (DLLs, executables, model weights, scheduled tasks), and the `.env` file |
+| `-kernel` | Kernel | Five dry checks, in memory (see 11.3) |
+| `-modules` | Modules | Four phases per module (see 11.4) |
+| `-ping` | Runtime and IPC | Connects to the socket, asks `ping`, and reads the journal statistics |
+| `-quick` | Shortcut | `env`, `kernel`, `modules`, and `ping`. No compilation |
+| `-simulate` | User simulation | Probes of the live app and of the rendering functions (11.6) |
+| `-all` | Everything | The full audit. This is the default |
 
-In the kernel, `run_player()` and `with_state()` were removed, together with the `tauri::Manager` import. The router no longer touches module state at all.
+Selection rules, as coded in `doctor_cmd`:
 
-**Gate (an automatic test, not a promise):** `ipc::route_tests::router_does_not_name_module_state_types` reads the `ipc.rs` source through `include_str!` and fails if a module state type name appears there. The names are assembled at runtime (`["Vpn","Runtime"].concat()`), so that the test's own text does not satisfy the search.
+- If a selective flag is given and neither `-all` nor `-quick` is, **only** the chosen sections run.
+- With `-quick`, the sections are `env`, `kernel`, `modules`, and `ping`.
+- Otherwise (no flag, or `-all`), the sections are `compiler`, `env`, `kernel`, `modules`, and `ping`. `-simulate` runs only when asked for.
 
-**Verified live:** all **17** socket commands answer `exit=0`: `ping`, `logs`, `log_stats`, `get_widget_config`, `commands`, `volume_get`, `explorer_drives`, `explorer_places`, `vpn_status`, `vpn_settings`, `vpn_list_servers`, `telegram_status`, `telegram_chats`, `player_status`, `ai_dj_status`, `list_playlists`, `get_submodules`. `cargo test --workspace` — 0 failures.
+### 11.2 Compiler and environment
 
-**What this gave in substance:** adding a module command no longer requires kernel edits. It takes three steps: declare it in the inventory, implement it in `ipc_call` of the module's own crate, and add a line to `MODULE_ROUTES`. This is exactly the goal the owner set ("a third-party developer adds a command without editing the kernel"), reached without a proc-macro and without linker magic.
+`-env` iterates the modules of the registry and, for each declared dependency, checks its presence:
 
-**Remaining:** S4 (the front end on our door: WS + token + handshake, idempotency and deduplication, event cursor/resync) and S5 (`simulate` + acceptance and documents).
+- `DynamicLibrary` (for example `libmpv-2.dll`, `tdjson.dll`), resolved with `paths::resolve_binary`, together with its companion files.
+- `Executable` (for example `sing-box.exe`, `vpn-helper.exe`, and `ciadpi.exe` for the Telegram proxy, which is Optional and gives a WARN, not a FAIL).
+- `ModelAsset` (the model graph and its external weights, under `opt/models`).
+- `WindowsTask` (the task must be registered in Task Scheduler).
 
----
+The `.env` file is looked up and reported. The scheduled tasks are checked for state, and a task that a module declares but that `udtk tasks` does not manage gives `[WARN] task '<name>' declared by module '<id>' is not managed by 'udtk tasks'`. The severity comes from the manifest: a `Mandatory` miss is a FAIL, and an `Optional` miss is a WARN.
 
-## 10.15 Slice S4, step 1: protocol envelope v1
+Limit of this section: `-env` checks **presence only**. It does not validate that a DLL is a valid x64 PE file. The PE check (`validate_pe_x64`) runs in the module phases (11.4), not here.
 
-This is the first and mandatory piece of S4. Without a version and a request identifier, the door can neither be versioned nor can responses be matched. A mismatch between "installed CLI" and "new kernel" would look like random failures.
+### 11.3 Kernel checks
 
-**What was done:**
+Five checks that run in memory, with no disk writes. They are built on the contract in `unidtk-api`:
 
-- `core/kernel/ipc.rs`: `PROTOCOL = 1` and a single function `respond(id, outcome)` were introduced. The response now carries `v` and, if the request sent one, an **echo of `id`**. The envelope on input is **optional**: an old bridge that sends only `{cmd, args}` keeps working. This is the condition for a painless transition.
-- `ping` reports `proto` and `capabilities: ["envelope-v1","log-delta","door-policy","gui"]`.
-- `opt/cli/main.rs`: `ipc()` numbers requests (`AtomicU64`), sends `v` and `id`, and checks the response. On a mismatched `id` or a foreign protocol version it gives a clear error, "update both sides", rather than degrading silently.
+1. `kernel:in_memory_db`: the `ModuleDb` contract on an in-memory store (create, read, update, prefix listing, count, delete).
+2. `kernel:event_bus`: the event bus loops back a published value to `state`.
+3. `kernel:system_paths`: resolves the install directory, the data directory **without creating it**, the logs directory, and the cache directory.
+4. `kernel:task_templates`: substitutes `@INSTALL_DIR@` and the user name into the task XML, and checks that no placeholder remains.
+5. `kernel:capture_logger`: the thread-local log capture buffer is isolated.
 
-**Verified live:** `invoke ping` → `proto: 1` plus the capability list. A raw request `{"v":1,"id":42,"cmd":"ping"}` gets the response `{"id":42,…, "v":1}`, so the echo is confirmed. Ordinary commands (`vpn_status`, `gui js:`) work. `doctor -quick` → exit 0. `cargo test --workspace` — 0 failures, no warnings.
+### 11.4 Module phases
 
-**Remaining in S4** (a large part, in separate steps):
+Modules come from the registry, not from a list written in the CLI. For each module the run has four phases:
 
-1. **WS door** for the page: `tungstenite` as a server, a mandatory first handshake frame with the token and a hard timeout, and an origin check. The token is issued per launch and reaches the page through `initialization_script`, not through a URL, a file, or the command line.
-2. **Idempotency**: a command class (idempotent or not), deduplication by `request-id`, and a ban on automatic retry of non-idempotent commands. This is Sol's remark.
-3. **Events**: sequence/cursor, `resumeFrom`, a gap signal, and a mandatory resync. Currently `Bus::last` stores only the last value, so a connection break loses events silently.
-4. **Frontend migration** one command at a time, behind a runtime flag, keeping the working Tauri path and the ability to roll back. First come a dependency inventory and a fix for the importmap bypass in `explorer/ui/*.js`.
+1. **Declarations.** For each dependency, the carrier is checked. A `DynamicLibrary` is resolved, and `validate_pe_x64` checks the `MZ` header, the PE signature, the machine type `0x8664` (x64), and the minimum size. An `Executable` is checked for presence and, if it declares probe arguments, run with a **1500 ms** watchdog (`run_executable_probe`, started with `CREATE_NO_WINDOW`, with its output captured). A `ModelAsset` is checked for its size and companion files. A `WindowsTask` is checked for registration.
+2. **Dry init.** The module is initialised with `ModuleContext::new_diagnostic(id, InMemoryModuleDb)`, in a separate thread, under `catch_unwind` and `recv_timeout(2000 ms)`. Logs are captured, so that they survive a panic. On timeout the thread is left detached, without a blocking join.
+3. **Shutdown.** The modules are shut down in reverse order, with a **1500 ms** budget each.
+4. **Orphans.** A directory `modules/*/rust/Cargo.toml` that the registry does not know gives `orphan Rust module ... missing from registry!` and fails the check.
 
----
+No data directory is created during the run. `paths::data_dir_view()` is used, not `data_dir()`.
 
-## 10.16 Slice S4, step 2: the WS door with handshake
+### 11.5 Runtime and IPC
 
-**Why a second door.** The TCP door is for local tools, and by policy it is read-only. The page needs its own door, and that door is protected by a **token per launch**. The first frame must be a handshake with this token. No command is parsed before it, and a wrong token closes the connection immediately.
+`-ping` connects to `127.0.0.1:26540` with a 500 ms timeout, sends `ping`, and reads the answer. On success it prints `[OK] IPC ping (N ms): app is running` and then the journal statistics from `log_stats`. If the app does not answer, the output is `[FAIL] IPC ping: app is not running (...)`.
 
-**What was done:**
+### 11.6 Simulation
 
-- `core/kernel/ws.rs` (new): a server on `tungstenite` (an ephemeral loopback port), `HANDSHAKE_DEADLINE = 3 s`, `IDLE_TIMEOUT = 120 s`. The token (32 hex characters) is derived from an OS-seeded `RandomState`, so there is no new dependency, and it is regenerated on every launch.
-- `ipc.rs`: the dispatcher was moved out into `IpcServer::dispatch(&Value) -> Result<Value,String>`. **Both doors go through it**, so a command cannot behave differently depending on how it arrived.
-- `ping` publishes `wsPort` (the port is public knowledge), but **not the token**. This response travels over the unauthenticated door.
-- The token is given to the page in exactly one place: the command `session_info` (in `generate_handler!`), plus the helper `harness.sessionInfo()`. It is in neither a file, nor a URL, nor the command line.
+`-simulate` checks the live application. The code runs these steps, in order:
 
-**Verified live:**
+1. `IPC Ping`, timed in milliseconds.
+2. Journal health: `log_stats`.
+3. `Frontend Error Audit`: the journal records from the sources `frontend` or `webview` at level ERROR. Any such record is a FAIL. The first three are printed.
+4. Widget configuration: `get_widget_config` is read and checked for positions. An empty layout is a WARN.
+5. Read-only probes of the VPN and Telegram runtimes: `vpn_status` and `telegram_status`. Each one prints `[OK]`, or `[INFO] ... (idle or offline)` if it does not answer.
+6. A **CDP run** in a hidden sandbox. For each module that declares a `simulate` entry in its `metadata.json`, the probe imports the module's file, renders the function into an offscreen `div` with the class `simulation-sandbox`, and times it. The sandbox deliberately has **no** `widget-card` class, so the layout code and the harness never see it.
+7. An interaction on the **offscreen copy** (`interaction:clickSandboxCopy`), and an audit of cards that show `Failed to fetch`.
 
-| Check | Result |
-|---|---|
-| WS without a handshake | `{"ok":false,"error":"handshake required: send {\"hello\":{\"token\":\"…\"}} as the first frame","v":1}` |
-| `ping` | `wsPort: 51090`, `capabilities` includes `ws-door` |
-| token read through the page (CDP) | 32 hex characters, the port from the page matches |
-| WS with the token | `{"ok":true,"result":{"ready":true},"v":1}` |
-| command over WS after the handshake | `{"id":7,"ok":true,"result":{"level":50,"muted":false},"v":1}`, which is `volume_get` with an echo of `id` |
+Without a running app, the CDP part degrades to `[INFO] CDP simulation unavailable (...)` and does not fail. If no module declares a `simulate` entry, the output is a WARN. The probe is read-only: it does not call `save_widget_config`, and it does not click the live widgets. Earlier versions clicked the live clock widget. That defect is recorded in [H3](#h3-slices-s0-to-s5-former-109-to-1022).
 
-`cargo test --workspace`: 0 failures.
+### 11.7 Result
 
-**The boundary, named honestly:** the token blocks other local processes that do not know it, and any web page. It does **not** protect against code that is already running inside the process. CDP reads the token straight from the page, which is exactly how it was obtained in the check above. This is the accepted risk from §10.8. That is why the token does not cancel the read-only policy of the open door.
+The last line is one of two:
 
-**Remaining in S4:** idempotency/deduplication, event cursor + resync, and the frontend migration itself, one command at a time behind a runtime flag. First come a dependency inventory and a fix for the importmap bypass.
-
----
-
-## 10.17 Slice S4, step 3: the importmap bypass is closed, and a regression is forbidden by the build
-
-**Problem (found by the earlier critique, confirmed in the code):** three Explorer files imported Tauri by a **relative path**, `../../assets/vendor/@tauri-apps/api/core.js`, bypassing the document's import map. Any facade or transport swap would not intercept such calls. Half of Explorer would keep calling Tauri directly, and the divergence of "the door" would show up at runtime, not at build time.
-
-**What was done:**
-
-- `modules/explorer/ui/{explorer,tabs,preview}.js`: the import was switched to the bare specifier `@tauri-apps/api/core`, exactly as `core/ui/*.js` already do. The mapping for it exists in `core/ui/index.html`.
-- `toolchain/build.rs`: a new lint `lint_ui_imports()`. At build time it scans `core/ui` and `modules/explorer/ui`, and it **fails the build** if an import through `assets/vendor/@tauri-apps` reappears in UI JavaScript.
-
-**Lint check (negative test):** I temporarily put the bypass back into `tabs.js`. The build failed with `UI IMPORT ERROR: ../modules/explorer/ui\tabs.js imports Tauri through the vendor path, bypassing the import map; use the bare specifier`. After the file was restored, the build is green. This is the proof that the gate works, not just that it exists.
-
-**Verified live:** the release was rebuilt and started. The interface tree has 29 nodes, the same as before the edit. `harness.getErrors()` is empty, and `udtk logs --level ERROR` → `[]`. `cargo test --workspace`: 0 failures.
-
-**The honest boundary:** the Explorer panel itself was **not opened** in this pass. It is not in the tree, because it is covered by the Telegram panel. So "explorer.js runs" is confirmed only indirectly: by the build, the lint, and a clean page load without errors. An attempt to check it with a dynamic import from `http://tauri.localhost/modules/...` failed on a wrong URL. The modules are not served that way, so that test proves nothing. Running Explorer live should be done in the next session: open a folder on the desktop and check `harness.getErrors()`.
-
-**Remaining in S4:** idempotency/deduplication, event cursor + resync, and the frontend migration itself (the facade, plus moving one command at a time behind a runtime flag).
-
----
-
-## 10.18 Slice S5, step 1: `simulate` no longer touches the live interface
-
-**The main defect closed here.** `doctor -simulate` took the **live** clock widget (`document.querySelector('.widget-card[data-id="clock"]')`) and clicked it twice with 60 ms pauses. This was the real `toggleWidget`. It collapsed a widget the user had opened and raced the animation timer (300 ms against 60 ms), while writing `interaction:clickClockToggle — ok` into the receipt. In other words, a check that "does not destroy data" was in fact changing the state of the desktop.
-
-**What was done:**
-
-1. **The click on the live widget was removed.** The interaction is now checked on an **offscreen copy** inside the sandbox (`interaction:clickSandboxCopy`).
-2. **The sandbox is isolated.** It no longer has the class `widget-card`. That class is what made it visible to `relayoutWidgets`, to the audit of broken cards, and to the semantic tree. `contain: strict` was added. A comment in the code explains why the class was removed deliberately.
-3. **The harness does not see the sandbox.** `getSemanticTree` skips candidates inside `.simulation-sandbox`, so even if buttons are rendered during the run, the agent will not be offered them as targets.
-4. The dead calls `ipc({"cmd":"log"})` were removed from the simulation. The command `log` is now a write command and is not served on the socket door, so these calls did nothing anyway.
-
-**Verified live:**
-
-| Check | Result |
-|---|---|
-| `doctor -simulate` | exit 0, `ALL CHECKS PASSED` |
-| interaction receipt | `interaction:clickSandboxCopy — click dispatched on the offscreen copy` (there is no live click any more) |
-| rendering of all five modules | `renderClock`, `initVpnPanel`, `renderMusicPlayer`, `renderGlyphBar`, `renderTelegramWidget`, all `OK` |
-| interface tree after the run | 29 nodes, as before. The sandbox is **not** in the tree |
-| page errors after the run | 0 |
-| screenshot | layout intact, no trace of the sandbox |
-| `cargo test --workspace` | 0 failures |
-
-**Remaining in S5:** the render entry points are still listed as a JS string in the CLI (five functions). To remove this handwritten list as well, the modules' `metadata.json` must be extended with a field for the render entry point, and files must be created for `vpn`/`explorer`, where they are missing. This is a separate step, as §10.3 records. Acceptance per §10.5 is also ahead (criteria 3 and 4: the snapshot test of the `invoke(...)` names, and the offline check of `help --json`).
-
----
-
-## 10.19 Acceptance per §10.5: criteria 3 and 4 closed
-
-**Criterion 3, "the front end does not call what does not exist".** The test `frontend_contract_tests::frontend_invoke_names_are_registered` was added. It collects all literal names from `invoke("…")` in `core/ui` and in each `modules/*/ui`, and checks them against the list read from `generate_handler!` in `core/kernel/main.rs`. An unknown name is a test failure with the exact file and name. Plugin commands (`plugin:fs|…`) are skipped, since Tauri registers them.
-
-Why a test and not the build: `generate_handler!` is a macro, and `build.rs` cannot read it structurally (§10.8.2). This is exactly the case where "the compiler will catch it" is not true.
-
-**The test was checked for non-degeneracy, not just declared.** I temporarily added a call `invoke('command_that_does_not_exist')` to `core/ui/widgets-api.js`. The test failed with the message
-
-```
-the interface calls commands the kernel does not register:
-…/core/ui/widgets-api.js: invoke("command_that_does_not_exist")
+```text
+[✓] UniDTK doctor: ALL CHECKS PASSED                     (exit 0)
+[!] UniDTK doctor: FAILED (N issues detected)            (exit 1)
 ```
 
-After the file was restored, the test is green again. I had done the same earlier with the import lint. The gate was proven by a negative test, not by the fact of its existence.
-
-**Criterion 4, offline.** With the app stopped, `udtk help --json` returns `protocol: 1`, the 13 commands of `utdk` itself, and **21** application commands (from the shared inventory compiled into the CLI). `udtk doctor -modules` exits with 0. Then the app was started again, and `ping` confirmed `pong/proto/wsPort`.
-
-**Final run:** `cargo test --workspace`: **15 suites, 0 failures, 0 warnings**. Among them, the three gate tests are green: `every_socket_command_has_a_handler`, `router_does_not_name_module_state_types`, `frontend_invoke_names_are_registered`.
-
-**Remaining per plan:** in S4, idempotency/deduplication, event cursor + resync, and the front-end migration behind a flag. In S5, move the render entry points into `metadata.json`.
+A failure in a module phase is counted and reported as `[FAIL]` or `[WARN]`. It does not stop the process. The count includes failures from each section. The `-simulate` section counts as one failure when any of its checks fails. The rule matters: an earlier version printed `ALL CHECKS PASSED` while the frontend probes were broken.
 
 ---
 
-## 10.20 Migration step: an inventory of frontend dependencies and gates for events
+## Chapter 12. `tasks`, `autostart`, and `path`
 
-The frontend migration starts with an inventory: what exactly will have to be moved. The inventory is also written up as a verifiable artifact, not as a list made "by eye".
+### 12.1 Scheduled tasks
 
-**Inventory (four categories of dependency on Tauri):**
+The three background tasks are defined by templates in [scheduler-tasks/](../scheduler-tasks/). Each template contains the placeholder `@INSTALL_DIR@`, which registration replaces. The table below is taken from the files and from the `SCHEDULER_TASKS` table in [opt/cli/main.rs](../opt/cli/main.rs).
 
-| Category | Where it lives | State |
-|---|---|---|
-| **Commands** (`invoke`) | `core/ui/*.js`, `modules/explorer/ui/*.js`, `modules/vpn/ui/vpn-panel.js`, `modules/telegram/ui/widget.js`, `modules/mp3-player/ui/audio-arcs.js` | machine-readable: test `frontend_invoke_names_are_registered` |
-| **Events** (`listen`) | `core/ui/unidtk-core.js`, `modules/telegram/ui/widget.js`, `modules/glyph-bar/ui/widget.js`, etc. | machine-readable: test `frontend_listen_names_exist_in_rust` |
-| **Plugins** | `@tauri-apps/plugin-fs`, `plugin-opener`, `api/path`, in `core/ui/widgets-api.js`, `unidtk-core.js`, `telegram/widget.js` | from the code; the migration is a separate stage C |
-| **Assets** | `convertFileSrc` in `unidtk-core.js`, `telegram/widget.js`, `explorer/*.js` | from the code; the migration is a separate stage C |
-
-Commands and events are now **checked by tests**, so the inventory cannot go stale silently. It is updated together with the code, or it breaks the run.
-
-**A new guard for events.** `frontend_listen_names_exist_in_rust`: every literal name from `listen("…")` in the UI must occur as a string literal in the Rust code. Otherwise a renamed or removed event leaves its listener silent forever. This is the same class of silent breakage as with commands.
-
-**The strength of the check, named honestly:** it proves that the **name exists** on the Rust side. It does not prove that the event is actually emitted on the required path. A text analysis cannot be stricter, because names are often passed as a separate argument (`emit(app, "telegram-message-new", payload)`, with the call split across lines), and some names are built dynamically. My first version of the test gave **10 false positives** for exactly this reason (`telegram-message-new`, `audio-bands`, `wallpaper-wheel`, and others). I checked each one in the code. All of them are emitted, just written differently. So the criterion was weakened to "the name is alive", and this is recorded in the test's comment.
-
-**Checked with a negative test:** I renamed the listener `wallpaper-wheel` in `unidtk-core.js` to `wallpaper-wheel-renamed`. The test failed, naming the file and the name. After restoration it is green.
-
-**Result:** `cargo test --workspace`: **15 suites, 0 failures, 0 warnings**. Four gate tests are green: `every_socket_command_has_a_handler`, `router_does_not_name_module_state_types`, `frontend_invoke_names_are_registered`, `frontend_listen_names_exist_in_rust`.
-
----
-
-## 10.21 Idempotency became contract data
-
-`Idempotency::{Safe, Unsafe}` and the field `CommandSpec::idempotency` were added to `unidtk_api::commands`. The value is set by the constructors: `read_only()` → `Safe` (reading twice is harmless), `write()` → `Unsafe` (the conservative side for writes). The field is published in both manifests, in the `commands` response and in `help --json`, under the name `retry_safe`.
-
-Why it belongs in the contract and not in a comment: a door that can reconnect and retry must **know** whether a retry is safe. Otherwise a retry after a timeout, when the command actually executed, would duplicate the effect. This is Sol's remark about retries.
-
-**Invariant under test:** `command_inventory::tests::socket_surface_is_retry_safe`. Everything exposed on the socket door must be `Safe`.
-
-**Honest about the strength of the check:** right now the invariant holds **trivially**. The socket door has only read-only commands, so they are all `Safe`. The value is not in today's run but in the future. As soon as the first write command reaches the door (this will happen during the frontend migration), it must be explicitly marked, or the test will fail. This is exactly the check that will be needed in the next step.
-
-`cargo test --workspace`: 15 suites, 0 failures. `socket_surface_is_retry_safe` is green.
-
----
-
-## 10.22 An executable plan for the frontend migration (following a consultation)
-
-The plan was drawn up from the actual code. It also recorded **four discrepancies** that must be fixed before the migration. They are visible in the sources:
-
-1. **`dispatch` applies the socket policy to both doors.** So WS cannot currently serve write commands, because the policy is tied to `spec.on_socket()`, not to the door. Before the write cutover, the dispatcher needs an explicit door context (TCP: tools, read-only; WS: the authenticated UI door).
-2. **The WS door supports only request/response.** There are no push events and no reconnection at all. This has to be designed, not "switched on".
-3. **Some events bypass `unidtk_api::emit`.** These are direct `AppHandle::emit` calls (`core/kernel/input.rs`, `main.rs`, and the modules). So a single broker will not see them until they are moved to a kernel-owned fan-out.
-4. **The response shapes diverge.** Over the socket, `list_tracks`/`list_playlists` return `{count, items}`, while the UI expects an array. Over the socket, `get_widget_config` returns `{}` instead of an `Option`. These commands must not be enabled on WS until the contract is unified.
-
-### Order of steps
-
-**1. Record the starting point.** Run `cargo test --workspace`, `udtk doctor -all`, `udtk shot`, `gui tree`, `harness.getErrors(true)`, and build a visual map (all widgets, the layout, glyph-bar, mp3, VPN, Telegram, Explorer, the menu). If the baseline is already unstable, do not start the migration. Otherwise an old defect cannot be told apart from a regression.
-
-**2. The facade `core/ui/unidtk-bridge.js`, still entirely on Tauri.** It exports `invoke`, `listen`, `convertFileSrc`, `sessionInfo`, `appDataDir`/`resolveResource`, the fs functions, `openPath`, and the diagnostic `getTransportState()`. Internally it holds the real `tauriInvoke`/`tauriListen`. `session_info` **always** goes through `tauriInvoke`. Otherwise, with WS enabled, it would recurse. A separate key `@unidtk/bridge` is added to the import map. **The key `@tauri-apps/api/core` must not be redirected**, because the vendor plugins (`plugin-fs`, `plugin-opener`) import it themselves. All UI files move to `@unidtk/bridge`, and behavior does not change.
-
-**3. The transport switch: `sessionStorage["unidtk.transport"]`** with the values `tauri` / `shadow` / `ws`. It is read once, when the module loads. It must not change in the middle of the page's life, because some subscriptions would remain on Tauri. No key → `tauri`. Do not use `localStorage` (a forgotten flag would survive a restart), and do not use env either (no access). Rollback: `sessionStorage.setItem('unidtk.transport','tauri'); location.reload()`, or simply restart the app.
-
-**4. The WS client and session, without moving business commands.** One memoized session per load (`session_info` exactly once), one WebSocket, hello as the first frame, a table of pending requests keyed by `id`, validation of `v`/`id`/`result`-or-`error`, and separate timeouts for connect, handshake, and command. The token is kept in memory only. Unit tests: wrong token, command before hello, timeout, out-of-order responses, socket close with pending requests, incompatible version.
-
-**5. The first four commands: `player_status`, `vpn_status`, `telegram_status`, `get_widget_config`.** All are read-only and retry-safe. Three have ready UI calls and visible indicators. `get_widget_config` checks WS early enough (the boot path). An explicit allowlist `WS_COMMANDS` means anything unknown does not go over WS. First comes the `shadow` mode: both transports are called, the UI gets the Tauri result, and any divergence is logged. Only after a clean run comes `ws`.
-
-**6. Events are a separate protocol, not disguised as commands.** A single `EventBroker` lives in the kernel. The event envelope carries `type: event`, the name, a global monotonic `seq`, and the payload. Events fall into two classes. *state/latest* (`system-volume`, `vpn`, `telegram-connection-state`): on subscribe and on reconnect, the last snapshot is sent. *stream/edge* (Telegram new/edited/deleted/sent, `explorer-open`): a bounded ring with `seq` and replay. `audio-bands` carries only the last sample (coalesced), otherwise a slow WebView accumulates memory. On reconnect: if the ring covers the gap, replay by `seq`. If the cursor is older, send an explicit `gap` and a mandatory domain resync. The socket's reader and writer are separated (broker → bounded channel → writer). Subscriptions live in the facade and are recreated automatically, with backoff and jitter.
-
-**7. The remaining read-only commands, in vertical slices** (explorer → glyph-bar → vpn → telegram → mp3-player). Each goes through: inventory → `ipc_call` → route → contract test → `shadow` → allowlist.
-
-**8. Write commands, only after the read-only commands and events are stable.** They need a door context in the dispatcher, dedup by `request-id` (a bounded cache of completed responses), a ban on automatic retry with a new id, and a ban on a WS→Tauri fallback after a write request has been sent. Order: reversible settings → player control → VPN → Telegram/Explorer.
-
-**9. Cutover:** default `ws`. `tauri` stays as a kill switch for the release cycle, and Tauri handlers are not deleted. Transport diagnostics (counters for reconnect, pending, and gap), plus a build gate: "the UI does not import Tauri directly, except through the facade and vendor".
-
-### Three main risks
-
-1. **Mismatch of Tauri and WS shapes.** Protection: `shadow` + structural comparison of JSON + contract tests. A name may not be enabled without a clean shadow run.
-2. **Accidentally moving plugins/assets to WS.** Protection: a separate specifier. The facade imports vendor itself. `convertFileSrc`, fs, path, and opener stay on Tauri. The lint forbids bypassing the facade.
-3. **Loss and duplication of events, repetition of destructive commands.** Protection: `seq`/ring/`gap`/resync, one ordering broker, dedup by id, no automatic retries.
-
-### What not to do
-
-Do not move plugins and assets. Do not enable `withGlobalTauri`. Do not redirect `@tauri-apps/api/core` in the import map. Do not delete Tauri handlers before the end of the rollback period. Do not open write on TCP 26540. Do not make a single global toggle without an allowlist. Do not retry writes without dedup. Do not keep the token outside memory. Do not change WorkerW/input/CDP for the sake of the transport.
-
-### Questions whose answers change the plan
-
-1. Does the nearest release end with read-only commands and events, or does write (Telegram, VPN, Explorer) also need to be in it?
-2. Does Telegram need guaranteed replay of every message within a launch, or is a `gap` with a full reload of chat state acceptable?
-3. Do we keep `sessionStorage`/CDP as an emergency switch in production, or is a user/CLI mechanism for choosing the transport needed, one that does not require CDP access?
-
----
-
-## 10.23 Migration, steps 1–2: baseline and facade (behavior unchanged)
-
-**Step 1, baseline recorded** (`%TEMP%\unidtk-baseline`): `cargo test --workspace` with 0 failures, `doctor -quick` with 0, a screenshot, the tree with **29 nodes**, and page errors **0**. Without this it would be impossible to tell an old defect from a migration regression.
-
-**Step 2, the facade `core/ui/unidtk-bridge.js`.** The whole interface was switched to a single import, `@unidtk/bridge`:
-
-- the facade re-exports exactly the surface that was in use: `invoke`, `listen`, `convertFileSrc`, `appDataDir`, `resolveResource`, `BaseDirectory`, `mkdir`, `readDir`, `readTextFile`, `writeTextFile`, `openPath`, plus `sessionInfo()` and the diagnostic `getTransportState()`;
-- the real Tauri functions remain private inside (`tauriInvoke`, `tauriListen`). Otherwise the future WS path would recurse into itself;
-- `session_info` always goes through `tauriInvoke`, not through the public `invoke`, for the same reason;
-- the transport is read **once**, when the module loads (`?transport=` for a one-off probe, otherwise `sessionStorage["unidtk.transport"]`; values `tauri`/`shadow`/`ws`, default `tauri`). `localStorage` is deliberately not used, because a forgotten flag would survive a restart;
-- the token is not stored anywhere: not in storage, not in the URL, not in the log;
-- `WS_COMMANDS` is empty. A command gets there only after a clean shadow run.
-
-13 files were migrated (20 import lines): `core/ui/{boot-log,harness,widgets-api,unidtk-core,menu}.js`, `modules/{explorer/ui/{explorer,tabs,preview},vpn/ui/vpn-panel,telegram/ui/widget,glyph-bar/ui/widget,mp3-player/ui/{widget,audio-arcs}}.js`. The key `@unidtk/bridge` was added to the import map. **The key `@tauri-apps/api/core` was not redirected**, because the vendor plugins import it themselves.
-
-**The gates were extended.** `lint_ui_imports()` in `toolchain/build.rs` now scans **all** UI modules and fails the build if anyone imports Tauri directly, other than the facade itself. Checked with a negative test: I added a direct `@tauri-apps/api/core` import to `glyph-bar/ui/widget.js`. The build failed with `UI IMPORT ERROR: … imports Tauri directly; the interface must go through the bridge`. After restoration it is green.
-
-**Verified live (release, the app was restarted):** the tree has **29 nodes** (baseline 29), page errors are **0** (baseline 0), and `getTransportState()` → `{transport: "tauri", migratedCommands: [], sessionInfoCalls: 0}`. The screenshot matches the baseline visually. `cargo test --workspace`: 15 suites, 0 failures.
-
-**What this gives:** the transport has become replaceable in a single file, and the build protects this. The next step (the WS client and session, §10.22 item 4) no longer touches UI files, only the facade.
-
-**Accepted defaults** (the owner did not object): in this release, read-only commands and events; write comes later. For Telegram, a `gap` with resync is allowed instead of guaranteed replay of every message. `sessionStorage` remains the emergency switch.
-
----
-
-
-## 10.24 Migration, steps 3–5: flag, WS client, and first command migration
-
-**Step 3, the transport flag.** `sessionStorage["unidtk.transport"]` (`tauri`/`shadow`/`ws`) is read once, when the module loads. `?transport=` is for a one-off probe. `localStorage` is deliberately not used.
-
-**Step 4, the WS client and session** (inside the facade, UI files untouched): one memoized session per load, one socket, the handshake as the first frame, a table of pending requests keyed by `id`, validation of `v`/`id`/`result`-or-`error`, and separate timeouts. Closing the socket rejects all in-flight promises instead of leaving them hanging. The token lives only in the module's memory.
-
-**Two real blockers were found and fixed:**
-
-1. **The CSP did not let WS through at all.** `connect-src` in `toolchain/tauri.conf.json` allowed only `ws://127.0.0.1:26540` (the TCP door), while the WS door is ephemeral. So the page could not connect (`ws connection failed`). `ws://127.0.0.1:*` was added. Without this, the whole migration would have hit the policy rather than the code.
-2. **The comparison of responses was too strict.** The first shadow run gave **16 "divergences" out of 17**, and all of them were only **key order**. Tauri writes fields in declaration order, while the socket path goes through `serde_json::Value` with a sorted map. The comparison was replaced by a structural one (`sameShape`, key order ignored). Otherwise a real defect would have drowned in this noise.
-
-In addition, the handshake got more headroom (8 s instead of 3, because on a cold page the first call timed out with `telegram_status: ws handshake timed out`). The socket is also warmed up when a non-tauri transport is enabled.
-
-**Step 5, the first three commands** (`player_status`, `vpn_status`, `telegram_status`; all of them are polled by widgets): `shadow` first, then `ws`. `get_widget_config` was deliberately left aside. Its contract diverges (`{}` against a missing value), and this must be unified before it is enabled.
-
-**Instruments, not promises:** the facade counts `shadowChecks`, `shadowDivergences`, `shadowFailures`, and `wsCalls`, and keeps up to three samples of divergence with both responses. Everything is visible through `gui js:window.__UNIDTK_BRIDGE__.getTransportState()`, without reading the console.
-
-**Live check:**
-
-| Check | Result |
-|---|---|
-| `shadow` (19 comparisons) | **0 divergences, 0 refusals** |
-| `ws` | `wsState: ready`, **18 commands** answered by the socket door, 0 page errors |
-| interface parity | 29 tree nodes and 0 page errors in both modes |
-| screenshot | layout identical to the baseline |
-| rollback (`sessionStorage → tauri`) | `transport: tauri`, `wsState: off`, 0 calls over WS, tree 29 |
-| `cargo test --workspace` | 15 suites, 0 failures |
-| `udtk doctor -quick` | exit 0 |
-
-**What this means:** the transport switches with one line in `sessionStorage`. The first trio of commands really goes through our authenticated door, and the rollback to Tauri is instant and verified. The next step in the plan is events (a single `EventBroker` with `seq`, a ring, and resync), and then the remaining read-only commands as vertical slices.
-
----
-
-## 10.25 Migration, step 7 (first slice): six commands on our door
-
-**Extending the allowlist to six:** `player_status`, `vpn_status`, `vpn_list_servers`, `vpn_settings`, `telegram_status`, `ai_dj_status`. They were selected on two criteria: the name in the inventory matches the name the UI calls, and the response shape is already identical on both doors.
-
-**Deliberately deferred** (and why, so that it does not look like forgetfulness):
-
-- `get_widget_config`: the socket handler answers `{}` where Tauri answers a missing value. The contract has to be unified first.
-- `list_tracks` / `list_playlists`: the socket returns `{count, items}`, while the UI expects an array.
-- `explorer_places`: the inventory has the name `explorer_places`, while the UI calls `get_user_places`. The name must be unified first.
-- `volume_get`: the UI does not call it by name (volume arrives as the `system-volume` event), so there is nothing to migrate yet.
-
-**A counter per command.** The first attempt to check six commands gave "23 comparisons, 0 divergences". That was **not proof**: of the six commands, only two were actually called. So a per-name counter (`perCommand`) was added to the facade, and the check now runs deliberately, through the same comparison path: `m.invoke('<cmd>')` from the page.
-
-**Final live check:**
-
-| Mode | Result |
-|---|---|
-| `shadow` | **54 comparisons, 0 divergences, 0 refusals**. Coverage by name: `player_status` 48, `telegram_status` 2, `vpn_status`/`vpn_list_servers`/`vpn_settings`/`ai_dj_status` 1 each |
-| `ws` | `wsState: ready`, **25 calls** over the socket, the same per-name coverage, 0 divergences |
-| interface parity | 29 tree nodes, 0 page errors in both modes |
-| rollback | `sessionStorage.removeItem('unidtk.transport')` → `transport: tauri`, `wsState: off`, tree 29 |
-
-**Conclusion:** six read-only commands are served by our authenticated door, each with a proven comparison against Tauri. All of it is switched off with one key in `sessionStorage`. The next slice in the plan is events (a single `EventBroker` with `seq`, a ring, and resync), then the remaining read-only commands after the contracts are unified.
-
----
-
-## 10.26 The seventh command, contract unification, and two errors found by the shadow
-
-**Unifying the contract of `get_widget_config`.** The Tauri command returns `Result<Option<Value>>`, that is, JSON `null` when there is no configuration. The socket handler answered `{}`. The two doors diverged, which is why the command could not be migrated. Fixed: the socket handler now returns `Value::Null`. After that the command was added to the allowlist (the seventh).
-
-**Deliberately NOT migrated: `list_tracks`/`list_playlists`, and here is why (verified in the code, not by eye).** The Tauri commands accept `search`, `sort_key`, and `sort_dir`, while the socket handlers **ignore** these arguments and also return `{count, items}` instead of an array. Moving them now would silently break search and sorting in the library. First the contract (arguments and shape), then the migration. This reason is recorded directly in the comment on `WS_COMMANDS`.
-
-**The shadow found two real errors. Both were fixed, not muffled:**
-
-1. **False "refusals" caused by a too-tight timeout.** The first run gave **14 refusals** (`ws timeout for 'player_status'`) on a busy backend (a library scan was running). 4 seconds was self-inflicted: the kernel serves one connection sequentially, and a busy command legitimately takes seconds. The timeout was raised to 15 s, and a comment explains why it is that value.
-2. **A race in my own client.** After the timeout was raised, 2 refusals remained with a different cause: `ws handshake timed out`. The cause was in `ensureSocket`. It cached the **socket**, not the promise, so two calls arriving during the handshake each opened their own connection (a leak and a lost response). Now the promise is cached, and `onclose` resets it.
-
-The second error is exactly why the `shadow` mode exists. Without a comparison, it would have surfaced for the user as "the widget sometimes does not update".
-
-**Final live check (seven commands):**
-
-| Mode | Result |
-|---|---|
-| `shadow` | **34 comparisons, 0 divergences, 0 refusals**. `wsCalls = 34`, so every comparison was a real call over the socket, not a skip |
-| coverage | `player_status` 26, `telegram_status` 2, `get_widget_config` 2, `vpn_status`/`vpn_list_servers`/`vpn_settings`/`ai_dj_status` 1 each |
-| `ws` | `wsState: ready`, **30 calls** over the socket, the same coverage, 29 tree nodes, 0 page errors |
-| rollback | key reset → `transport: tauri`, `wsState: off`, tree 29 |
-| `cargo test --workspace` | 15 suites, 0 failures |
-| screenshot | layout in order |
-
-**Next per the plan:** events (a single `EventBroker` with `seq`/ring/resync, because right now WS does not push events at all). Then `list_tracks`/`list_playlists` after the arguments and shape are unified, and `explorer_places` after the name is unified.
-
----
-
-## 10.27 The whole UI read surface is moved to our door (13 commands)
-
-**Three contracts were unified. Without this, the migration would have been a breakage:**
-
-1. **`telegram_chats`**: the socket returned `{count, items}`, while Tauri returns an array. It was changed to an array. Along the way, the `--limit` argument, which Tauri does not have, was removed from the description in the inventory.
-2. **`get_drives` / `get_user_places`**: in the inventory these commands were called `explorer_drives` / `explorer_places`, while the UI (and Tauri) call them differently. The names in the inventory were changed to the ones both sides already use. One name works on both doors, and no aliases were added. The constants in the route registry refer to `.name`, so the handlers were renamed automatically.
-3. **`list_tracks` / `list_playlists`**: the socket handlers ignored `search`/`sort_key`/`sort_dir` and returned `{count, items}`. Now they accept the same arguments and return an array, like Tauri. This would have been the most treacherous breakage: search and sorting in the library would have silently stopped working in WS mode only.
-
-**Final live check (13 commands):**
-
-| Check | Result |
-|---|---|
-| `shadow` | **49 comparisons, 0 divergences, 0 refusals**. `wsCalls = 49`, so every comparison was a real call over the socket |
-| coverage | `player_status` 30, `get_user_places` 3, `telegram_chats` 3, `get_drives` 2, `get_widget_config` 2, `telegram_status` 2, the rest 1 each |
-| `ws` + live scenario (open the menu and Explorer) | `wsState: ready`, **31 calls** over the socket, among them `get_drives`, `get_user_places`, `telegram_chats`. 29 tree nodes, 0 page errors |
-| rollback | key reset → `transport: tauri`, `wsState: off`, tree 29 |
-| `cargo test --workspace` | 15 suites, 0 failures |
-| screenshot | layout in order |
-
-**What is now on our door:** all read-only commands that the interface calls by name: `player_status`, `ai_dj_status`, `list_tracks`, `list_playlists`, `get_submodules`, `vpn_status`, `vpn_settings`, `vpn_list_servers`, `telegram_status`, `telegram_chats`, `get_drives`, `get_user_places`, `get_widget_config`. What remains is not a matter of principle: `volume_get` (the UI does not call it by name, since volume arrives as an event), and the write commands (by the adopted decision, after the events are stabilized).
-
-**An honest assessment:** the command migration is complete, but it gives little while events bypass the door. Half of the interface lives on `listen`. So the next step is `EventBroker` with `seq`, a ring, and resync. It is larger than all the previous steps: it is a new protocol on both sides.
-
----
-
-## 10.28 Events: the broker in the kernel, push over WS, and the first event in the interface
-
-**The kernel, `core/kernel/events.rs` (new).** Events stopped being "just Tauri emit":
-
-- **a global `seq`**: a client can say "I have seen 41" and receive exactly what comes after;
-- **a ring per event** (64 frames) for a short reconnection;
-- **state events** (`system-volume`, `audio-bands`, `vpn`, …) keep only the newest frame. Replaying 120 ms volume samples to a slow WebView is pointless and expensive;
-- **an explicit `gap`**: if the ring no longer covers the cursor, the client gets a signal, not a silently incomplete sequence;
-- delivery through `try_send`, so a slow client never blocks the kernel.
-
-**One connection point.** The broker is fed from the same place where the kernel registers the emitter for Tauri (`main.rs`). Both doors carry **the same events with the same number**, rather than two parallel branches that have to be kept in sync.
-
-**WS protocol:** `{"type":"subscribe","event":"…"[, "since": N]}` / `{"type":"unsubscribe", …}`. A push frame is `{v, type:"event", event, seq, payload}`. If replay is impossible, the server sends `{type:"gap", …}`. On a subscription without a cursor, the server immediately sends the newest value of the state event. The connection is served by one thread: a read with a 50 ms timeout, and between reads the event queue is drained. The socket stays a single object without locks.
-
-**The facade:** `listen` for events from `WS_EVENTS` goes to the socket (registering local handlers, subscribing, unsubscribing). It keeps a **`seq` cursor per event**, and on a `gap` it resubscribes without a cursor. That is the resync.
-
-**Three bugs found by the instrument (all in my code, all fixed):**
-
-1. **Event comparison "by position"** gave false divergences. The doors are asynchronous, WS runs ahead, and I was matching different changes (`tauri=80` against `ws=50`). For **state** events the right semantics is convergence of values, not the order of frames. Now the newest socket value is compared 250 ms after a Tauri event. Stream events will need a separate rule, which is recorded in the code.
-2. **A comparator per `listen`**: several widgets listen to one event, and each registered its own comparator, draining the same buffer twice. Now there is one comparator per event.
-3. **A flaky broker test** (my own): the subscriber's channel receives all events, including publications from parallel tests, while I expected my frame first. The test now looks up its frame by name.
-
-**Live check:**
-
-| Check | Result |
-|---|---|
-| raw WS client | subscription → snapshot `seq: 1`; volume change → push `seq: 2` |
-| `shadow` (event) | **34 comparisons, 0 divergences, 0 refusals** |
-| `ws`: does the interface update on the event | glyph bar: **2 segments at 20 %, 9 at 90 %**. The bar reacted to an event delivered by our door |
-| rollback | key reset → `tauri`, 29 nodes |
-| `cargo test --workspace` | 15 suites, 0 failures (including 4 broker tests) |
-
-**Known limits:** some events are published by direct `AppHandle::emit` calls (`core/kernel/input.rs`, `main.rs`, modules) and **do not reach** the broker. They must be moved to the contract emitter one domain at a time, and this is the next step. `WS_EVENTS` currently holds one event (`system-volume`). The others are added in the same order: "compare → enable".
-
----
-
-## 10.29 All events go through the contract, and the code is free of warnings
-
-**Moved to the contract** (`unidtk_api::emit` instead of `AppHandle::emit`). Now these events are seen by both Tauri and the broker:
-
-- kernel: `explorer-open` (three points), `display-changed` (two), `hotkey-pressed`;
-- telegram: one helper, `TelegramRuntime::emit`, closed all of its events at once (connection state, chat updates, messages). More than ten places were fixed in one change;
-- player: `audio-bands`, `ai-dj-progress`, `sync-tasks`, `sync-auto`.
-
-**A side effect, but an important one: the dead scaffolding was removed, not silenced.** Once emission moved to the contract, the player module no longer needed `AppHandle`. Removed: `app` from `AppState` (the field was deleted entirely), and `app` parameters from `start_url`, `start_all`, `start_stale`, `start_existing_playlist`, `start_playlist`, `run_task`, `run_yt_dlp`, `run_incremental_snapshot`, `run_yt_dlp_download`, `update`, `spawn_auto_playlist_sync`, `analyze_tracks`, `reanalyze_tracks`, `sync_url`, `sync_playlist`, `sync_all`, `audit::start`, and from the corresponding Tauri wrappers in the kernel. That is about fifteen parameters and one structural cycle. **`cargo check` now passes without a single warning.**
-
-**Coalescing on the wire.** `audio-bands` is published about 30 times per second. For a state event, forwarding every frame is pointless: the WS writer collapses them to the newest value per pass (`events::is_state`). For stream events, order is preserved.
-
-**Live check after the emission was moved:**
-
-| Check | Result |
-|---|---|
-| `explorer-open` through the contract (a second instance with a path) | tree **29 → 39 nodes**, the Documents path is visible in the interface, 0 page errors |
-| a **module** event in the broker | `telegram-connection-state` → `{"state":"Ready"}` with a real `seq` |
-| `cargo test --workspace` | 15 suites, 0 failures |
-| `cargo check --release --bins` | **0 warnings** |
-| `udtk doctor -quick`, `udtk logs --level ERROR` | exit 0, no errors |
-| screenshot | layout in order |
-
-**Honest limits of this check:** `audio-bands` and `ai-dj-progress` are published only during playback and analysis. They cannot be brought up live without starting music and AI analysis, so they were verified through the common emitter path, not by observation. `sync-tasks` requires a real synchronization. All of them go through the same `unidtk_api::emit` as the verified events. The user's config was not changed during these experiments. The value of `visualizer_enabled` was `true` originally, verified against a backup copy.
-
----
-
-## 10.30 Migration complete: the interface on its own door (shadow → ws)
-
-**Result.** The interface works over the socket. **13 commands** (`get_drives`, `get_user_places`, `get_widget_config`, `player_status`, `telegram_chats`, `telegram_status`, and others) and **17 events** go through the new door. The untranslated ones (`get_folders`, `scan_directory`, `explorer_tabs_get`, `frontend_log`, `telegram_get_config`, `telegram_debug`) remain on Tauri, and this is visible in the per-door counters. The tree has 29 nodes, page errors are 0, and the screenshot is fine. The default transport remains `tauri`. `shadow` and `ws` are enabled with a flag in `sessionStorage`. It is cleared together with the WebView2 session, so a forgotten flag does not survive a restart.
-
-**Comparison (shadow): 65 checks, 0 divergences, 0 refusals.** It was the comparison, not "seems to work", that produced two protocol improvements:
-
-1. **The snapshot at subscription is marked explicitly.** On a subscription without a cursor, the server answers with the current value of the state event. That frame has no counterpart on the Tauri door. The comparison took it for a live event and reported a divergence that did not exist. Now the frame carries `"snapshot": true`, and the check compares only live deliveries. The fix is in `ws.rs` and the facade.
-2. **Comparison by delivery, not by the last value.** The first runs gave 3–4 "divergences" for Telegram. Analysis showed that both doors delivered everything. The module sends events in batches (several user status changes, several messages per second), and the comparison was setting the "payload from Tauri" against the "last socket frame". That is two different messages from one batch (`from: "Yae Miko"` against `from: ".#GS"`, different `userId`s). The instrument was wrong, not the transport. Now the socket keeps a ring of the last 8 live payloads per event, and a divergence is counted only when **this** event is absent from the delivered ones.
-
-**Side findings during the restoration of the build (both are real defects, not one-off failures):**
-
-- **A cold build from scratch is impossible.** `build.rs` via `tauri_build::try_build` requires the resources from `tauri.conf.json` (`../target/release/udtk.exe`, `../target/release/vpn-helper.exe`) to already exist. With an empty `target/` this is a closed loop: to build `udtk`, the script requires `udtk`. The workaround is to create zero-length placeholder files, after which cargo overwrites them with the real binaries (verified: `udtk.exe` 28 MB, `vpn-helper.exe` 331 KB). The fix is an edit to build.rs: accept missing resources at `cargo build` time, and check them only at packaging.
-- **The installed app can hold files from the repository.** The app from `C:\Program Files\UniDTK` held `tdjson.dll`, `libcrypto-3-x64.dll`, `libssl-3-x64.dll`, and `z.dll` **from the repository's `target/release`**. The path to the Telegram library is stored in the settings and points into the repository. Consequences: `cargo build` fails with `os error 32` without a clear file name, and after renaming the folder (`shell` → `unidtk`) Telegram breaks. Verified by searching the process's loaded modules. Before a release build, the app must be stopped.
-
-**A lesson about resources (it cost a system freeze).** A full build with thin-LTO on this machine hits the **memory allocation limit**. The system reached 63.4 GB out of 63.7 GB, the page file swelled to 48 GB, after which rustc failed with `LLVM out of memory` and `memory allocation failed`, and Windows stopped responding. What helped: stop the app, build on **one thread** (`-j 1`), and give the compiler a large stack (`RUST_MIN_STACK=134217728`). Without the stack it failed on the huge `windows` crate after just 16 seconds. Result: 155 dependencies plus three binaries, `Finished release profile in 13m 55s`, without a single warning.
-
----
-
-## 10.31 Stage 7 closed completely: writes, the door policy, and three manifest defects
-
-The last blocker of stage 7 was closed (found when analyzing §10.22). **The dispatcher applied the socket policy to both doors**, so write commands did not pass anywhere. On the socket that was correct. On the authenticated WS door it was wrong. Without this fix the "migration" was half-done: the interface could not switch a VPN or send a message.
-
-**What changed:**
-
-- **The door became the dispatcher's context.** `dispatch(req, door)`: the TCP door passes `Door::Socket`, and WS passes `Door::Ui`. The connection has proven ownership of the token, and that is what makes it the interface door. The policy is taken from the contract data (`spec.doors`), not from one rule for all. The check was moved into a separate function, `check_door`, because an `IpcServer` cannot be created in a test (it needs a live `AppHandle`), while the policy is pure data.
-- **The second door was renamed: `Door::Tauri` → `Door::Ui`.** The name describes **who is asking**, not the pipe. The interface transport is exactly what changes from Tauri to WebSocket, and the policy must not change with it.
-- **The three refusals have distinct reasons, and they no longer lie:** "changes state, writes stay on the UI door", "served only by the tool door" (for `ping`/`logs`/`commands`), and "UI door only".
-- **A new kind of command: `read_only_cli`.** Liveness, reading the journal, and the command list itself were declared as available to the interface, although the interface does not call them and the kernel does not register them. Now the manifest does not promise this.
-- **Three manifest defects were fixed.** The journal write was declared as `log`, while the kernel registers `frontend_log`. The volume was declared as `volume_get`, while the kernel has `get_system_volume`. The `glyph-bar` module waited for the old name, so renaming without editing the module would have broken volume. CLI commands were presented as available to the interface.
-- **The write command of the UI door got a route.** This was found by a **live probe after the tests were already green**: `frontend_log` arrived over WS at the dispatcher and got "declared in the inventory but has no handler". A Tauri command with the same name is a *different* transport, not a replacement. The test checked routes only for the socket subset, so it stayed silent.
-
-**Guards that would prevent this from recurring:**
-
-| Test | What it guarantees |
-|---|---|
-| `every_command_has_a_handler` (extended from the socket subset to all commands) | every declared command has a route, so at least one door can serve it |
-| `every_manifest_ui_command_is_registered` (new) | every manifest command for the UI door is actually registered in the kernel. Previously the **manifest was not checked against anything** |
-| `a_write_command_is_refused_on_the_socket_and_answered_on_the_ui`, `a_cli_only_read_is_not_offered_to_the_ui`, `an_unknown_command_is_refused_on_every_door` (new) | three different policy refusals, not one "just in case" |
-| `a_read_command_is_served_on_both_doors` (fixed) | the command is selected **by property**, not by position. The first read command is the CLI command `ping` itself, and the index-based test asserted the opposite of the manifest |
-
-**Live check after the build:**
-
-| Probe | Result |
-|---|---|
-| write `frontend_log` over the **socket** | refused: "not available on the socket door: it changes state, and write commands stay on the UI door" |
-| write `frontend_log` over the **WS door** | `ok`, and the write **landed in the journal**. `udtk logs --source frontend` shows `"запись через WS-дверь: проверка"` ("write via WS door: check") as the first line |
-| read `get_system_volume` over WS | `{"level":0,"muted":true}` |
-| CLI command `ping` over WS | refused: "served by the tool door only" |
-| the old name `volume_get` | `unknown cmd` |
-| `cargo test --release --workspace` | 0 failures (40 tests in the kernel), build `Finished in 14m 13s`, zero warnings |
-| interface | 29 nodes, 0 errors |
-
-**A note on the tool (not a code defect).** `udtk gui js:<expr>` takes JS as one argument. PowerShell 5.1, however, breaks the argument at line breaks and at double quotes inside it. A multi-line script turns into a dozen "steps" (`unknown step kind: write`). The working technique is single-line JS, with **single** quotes for the strings inside.
-
----
-
-## 10.32 The first write from the interface on the new door (and why a write cannot be "compared")
-
-**A trap found before the migration.** `shadow` (the comparison) works like this: **both** doors are called and the responses are compared. For reads this is correct. For writes it is not: the doors are not compared, but **the action is executed twice**. So the rule "we migrate a command only if the comparison is clean" cannot apply to writes at all. This had to be recorded before the first write entered the list.
-
-**How it was done.** The facade has two separate lists:
-
-- `WS_COMMANDS`: reads. They go to the socket in both `shadow` and `ws`, and the comparison is their check.
-- `WS_WRITES`: writes. They go to the socket **only in `ws`**, while in `shadow` they stay on the old door. A write is checked not by comparison, but by its **consequence**, that is, a subsequent read of the state.
-
-This is recorded in a comment in the facade itself, so that whoever adds a write to the list next does not fall into double execution.
-
-**The pilot, `frontend_log`.** It was chosen because its consequence is harmless and directly observable: a journal entry. Also, it is exactly the command for which the live probe found the missing route (§10.31), so the route was tested too.
-
-**Live check:**
-
-| Mode | What was called | `tauri frontend_log` | `ws frontend_log` | Journal entries |
+| Task | Template | Runs | Run level | Hidden |
 |---|---|---|---|---|
-| `shadow` | `frontend_log` through the facade | 16 | 0 | **1** (no double execution) |
-| `ws` | the same | 0 | 32 | **1** |
+| `UniDTK` | [UniDTKTask.xml](../scheduler-tasks/UniDTKTask.xml) | `@INSTALL_DIR@\unidtk.exe` | `LeastPrivilege`, for the Users group (`S-1-5-32-545`) | `false` |
+| `UniDTKSingbox` | [UniDTKSingboxTask.xml](../scheduler-tasks/UniDTKSingboxTask.xml) | `@INSTALL_DIR@\vpn-helper.exe` | `HighestAvailable` | `true` |
+| `UniDTKVpnStop` | [UniDTKVpnStopTask.xml](../scheduler-tasks/UniDTKVpnStopTask.xml) | `@INSTALL_DIR@\vpn-helper.exe` | `HighestAvailable` | `true` |
 
-The interface in socket mode: 29 nodes, 0 errors, the layout is intact (screenshot `unidtk_2026-09-20_15-19-05.png`). After the check, the transport was returned to `tauri`. By default the app runs on the old door.
+The `Hidden` column differs from the rule in [AGENTS.md](../AGENTS.md) (section 6 of the architecture rules), which says that every background task is hidden. The file `UniDTKTask.xml` says `false`. See [Chapter 18](#chapter-18-known-gaps-and-open-decisions).
 
-**What this gives.** The mechanism for migrating writes is ready and verified on a harmless command. From here on, live writes (VPN, Telegram, Explorer) are migrated by this scheme, one at a time: declare the write in the manifest, give it a route, add it to `WS_WRITES`, and verify it by consequence. Writes that are not yet in the manifest (`vpn_connect`, `telegram_send_message`, Explorer file operations) must first be added there. The manifest still describes only part of the UI door's surface.
+`udtk tasks` has these subcommands:
 
----
+- `udtk tasks status` (or `list`): the state of each task.
+- `udtk tasks register [all|<name>]`: writes the XML and registers the task. `all` is the default. Registration needs `vpn-helper.exe` in `C:\Program Files\UniDTK`, and it fails with `vpn-helper.exe is not next to the app` otherwise. The template is read from the install directory first, and from the checkout if that is missing. `@INSTALL_DIR@` and the user name are substituted. The temporary XML is written as **UTF-16 LE with a byte-order mark**, because `schtasks` expects it. The registration first runs `schtasks /create` directly. Only if that fails does it retry through `Start-Process schtasks.exe ... -Verb RunAs -Wait` (elevation). The code comment says that UAC is off on the author's machine, so the elevated retry succeeds without a dialog.
+- `udtk tasks unregister <all|name>`: removes the task.
+- `udtk tasks cleanup-old`: removes the obsolete tasks `NothingWallpaper`, `NothingWallpaperSingbox`, `NothingWallpaperVpnStop`, and `NothingWallpaperXray`, if they exist.
 
-## 10.33 The first live writes: volume is declared in the manifest and migrated
+Failures are reported in the exit code. The installer runs `udtk tasks register all` and checks its status. A swallowed failure once looked like a successful install while the autostart task was missing. The hook is in [toolchain/windows/hooks.nsh](../toolchain/windows/hooks.nsh). The uninstall hook runs `udtk tasks unregister all`.
 
-The `frontend_log` pilot was a **kernel** write. The next step is a **module** write, because the path is different there. The dispatcher calls the module by the name from the manifest, and the name must match in three places.
+### 12.2 Autostart
 
-**What went into the manifest:** `set_system_volume` and `set_system_mute`, both `Access::Write`, so by construction they are unavailable on the socket door. Volume was chosen as the first live write because the module has no state (it stays Tauri-free), and its consequence is visible and reversible.
+`udtk autostart status` reports the state of the `UniDTK` task. `udtk autostart enable` (or `on`) registers it. `udtk autostart disable` (or `off`) removes it. It is a wrapper over the same task.
 
-**What this required (a recipe for the other writes):**
+### 12.3 The PATH
 
-1. The write in the manifest (`CommandSpec::write`). This is also what removes the command from the socket door.
-2. A branch in the module's `ipc_call`. The **name must match the manifest**, otherwise the dispatcher reports "declared, but there is no handler".
-3. A route in the kernel (`handle_*` → `call_module`), because over WS the command arrives at the dispatcher, not at its own Tauri wrapper.
-4. The name in the facade's `WS_WRITES`, and only there, not in `WS_COMMANDS`. A write cannot be "compared" (§10.32).
-
-**Live check:**
-
-| Probe | Result |
-|---|---|
-| `set_system_volume` over the **socket** | refused: "changes state, and write commands stay on the UI door" |
-| `set_system_volume {level:30}` over **WS** | response `{"level":30,"muted":false}` |
-| the consequence: an independent read **over the socket** | `{"level":30,"muted":false}`. The state changed, not just "a response came back" |
-| restoring the original state through **the same door** | `{level:0}` → `{"muted":false}`, then `set_system_mute {muted:true}` → `{"level":0,"muted":true}`. A read confirmed the original values |
-| `cargo test --release --workspace` | 0 failures (40 in the kernel), build `Finished in 14m 27s`, zero warnings |
-| interface after the flag reset | transport `tauri`, three transferable writes, 29 nodes, 0 errors |
-
-**An observation on substance:** the `set_system_volume` write with a non-zero level **clears mute**. That is how the module works: "raised the volume, so it is not muted". It behaved exactly the same on the new door, so the command's behavior does not depend on the transport. That is what had to be proven. The user's state was restored exactly.
+`udtk path status` (or `check`) reports whether `C:\Program Files\UniDTK` is in the User PATH, and whether `udtk.exe` is there. `udtk path ensure` (or `add`) adds that one directory to the User PATH. It refuses if `udtk.exe` is not in that directory. The CLI writes **no copy** of itself anywhere: two copies would drift in version. The installer runs `udtk path ensure` as part of the install.
 
 ---
 
-## 10.34 VPN writes: declared in the manifest and migrated
+## Chapter 13. `run`, `stop`, `doc`, `help`, and the splash
 
-The second module with writes, and the first where a write **changes network state**, not volume. The VPN panel's interface calls four: `vpn_connect`, `vpn_disconnect`, `vpn_ping_all`, `vpn_set_auto_connect`. All four are declared `Access::Write` (the socket, by construction) and migrated to the new door.
+### 13.1 `udtk run`
 
-**On `vpn_ping_all`, why it is a write even though it answers with measurements.** The command takes a global "measurement already running" flag (a second call during that time is honestly refused), and it saves the results. In other words, it changes observable state. `Access` describes what the command **does**, not what it replies with. Otherwise the door policy would stop being data and become a convention. This is recorded in a comment in the manifest so that the question does not come up again.
+```bash
+udtk run [args...]
+```
 
-**Live check:**
+`run` starts **only** `unidtk.exe` from the directory of the CLI (`install_dir()`). It loads the `.env` file, sets the working directory to that directory, forwards the arguments, and starts the process with `CREATE_NO_WINDOW`. It does not wait for the app. It prints `launched <path>` and returns. If `unidtk.exe` is not next to the CLI, the error is `unidtk.exe not found next to udtk.exe (...). Run 'udtk build' or install the app first.` `run` never searches the repository for another binary. A stale copy once started from a deleted `target` directory, and that is why the rule exists.
 
-| Probe | Result |
-|---|---|
-| `vpn_connect`, `vpn_disconnect`, `vpn_ping_all`, `vpn_set_auto_connect` over the **socket** | all four refused: "changes state, and write commands stay on the UI door" |
-| `vpn_set_auto_connect {enabled:true}` through **WS** | response `auto_connect: true` |
-| the consequence: an independent read of `vpn_settings` **over the socket** | `auto_connect: true` (the setting really changed) |
-| return to `{enabled:false}` through **the same door** | response `auto_connect: false`. A read confirmed the original value |
-| §10.5 acceptance, criterion 2 after the extension | manifest 27 commands (20 socket) **==** runtime (20 socket); 7 writes in the manifest |
-| interface | 29 nodes, 0 errors, screenshot fine; transport returned to `tauri` |
+`--debug` and `-d` are refused with `--debug was removed: CDP is always on in release builds`.
 
-**A lesson about tests (it cost one cycle).** Building the **test** targets is also heavy. `cargo test --release --workspace -j 2` brought down two LTO builds at once with `0xc000012d` (the memory allocation limit), even though the release binary had built normally. The tests pass at `-j 1`. So the rule "one thread on this machine" applies not only to the release build.
+### 13.2 `udtk stop`
+
+```bash
+udtk stop
+```
+
+`stop` makes the app's files replaceable. It runs in three steps:
+
+1. If CDP is reachable, it asks the page to quit through its harness (`h.invoke('quit_app')`). The command `quit_app` is defined in [core/kernel/main.rs](../core/kernel/main.rs). In that case it allows **3500 ms** for the quit.
+2. It then polls for processes whose executable lies under the install directory, excluding itself. The total wait is the grace period plus **2500 ms**. The poll uses PowerShell and `Win32_Process`.
+3. If processes remain after the deadline, it runs `taskkill /F` on each. Finally it runs `schtasks /end` for the elevated tasks (`UniDTKSingbox`, `UniDTKVpnStop`).
+
+It prints `stopped`. It does not check the result after the forced kill.
+
+### 13.3 `udtk doc`
+
+```bash
+udtk doc
+```
+
+`doc` renders [README.md](../README.md), [AGENTS.md](../AGENTS.md), and every page in `docs/` into `%LOCALAPPDATA%\UniDTK\cache\book`, and opens `index.html` in Explorer. The source is the installed `book` folder if it exists, and otherwise the checkout. The output goes to the cache because `Program Files` is read-only.
+
+### 13.4 `udtk help`
+
+`udtk help` prints the text help. `udtk help --json` prints the manifest of Chapter 7: `protocol`, `cli_commands`, `app_commands`, and a note. The offline manifest works when the app is not running, because the inventory is compiled into the CLI.
+
+### 13.5 The splash
+
+`udtk` with no arguments prints the splash, from [opt/cli/splash.rs](../opt/cli/splash.rs) and the generated art in [opt/cli/splash_art.rs](../opt/cli/splash_art.rs). The art is generated, so it must not be edited by hand. The generator is not in the repository. The sessions record says it lives next to the design skill, outside the repository, under the name `make_splash.py`, and that the repository keeps only the output.
+
+How the layout is chosen:
+
+- The width comes from `COLUMNS`, and the height from `LINES`.
+- The emblem is the largest of three precomputed sizes that fits **both** the width (a threshold computed from the art's geometry) **and** the row budget. The budget is `clamp(height - 2, 10, 28)` (`rows_budget`). Narrower or shorter windows fall back to smaller emblems, then to a stacked layout, then to text.
+- Colour is used only on a terminal. It is disabled by `NO_COLOR` and by `TERM=dumb`, and it is forced by `FORCE_COLOR` or `CLICOLOR_FORCE`.
+- On Windows, the console is set to VT mode and to code page 65001, and the result is **verified**. If that fails, the output is plain text instead of raw escape sequences.
+- The right column is aligned to the computed width of the emblem, not to a constant. Otherwise the lines drift.
+
+The command map at the bottom wraps at narrow widths, with an indent.
 
 ---
 
-## 10.35 Doctor without hardcoding: `-env` from the manifest, `-simulate` from the inventory and `metadata.json`
+## Chapter 14. `build`, step by step
 
-The remainder of §10.1 is closed. The "fourth handwritten list" lived in `doctor`. The `-env` section duplicated the names of DLLs, EXEs, and models as a string in the CLI, and `-simulate` held six IPC commands and five JS render functions. Now both sections read data, not literals.
+`udtk build` is the only way to make a release. It builds the three binaries and the NSIS installer in one tauri pass, installs the installer silently into `C:\Program Files\UniDTK`, proves the install by hashes, restarts the app, and checks it over IPC. Do not run `cargo build` by hand, and do not copy binaries into `Program Files`. Both skip the installer, and the scheduled tasks and the PATH are registered by the installer.
 
-**What changed:**
+```bash
+udtk build          # thread count from .cargo/config.toml
+udtk build -j 1    # one compiler thread, for a machine low on memory
+```
 
-- **`doctor -env` → `run_env_section()` (`opt/cli/main.rs`).** There are no longer any lists like `["libmpv-2.dll","tdjson.dll","sing-box.exe","vpn-helper.exe"]`, or the path `opt/models/discogs-maest-129e`, in the code. The section iterates `registry::all_modules()` → `Module::dependencies()`. For each `DynamicLibrary` / `Executable` / `ModelAsset` / `WindowsTask` it does a presence check through `paths::resolve_binary` / `resolve_asset` / `schtasks`. The severity from the manifest decides FAIL against WARN. Along the way it found `telegram:byedpi` (`ciadpi.exe`, Optional), which the old list did not declare, so the old hardcode simply did not see it. The `.env` block and `scheduled tasks` remained, since they are not module dependencies. In addition, there is a cross-check: a task from the manifest that is missing from `SCHEDULER_TASKS` yields `[WARN] … is not managed by 'udtk tasks'`.
-- **`doctor -simulate`, steps 1–5 → the inventory (`core/kernel/command_inventory.rs`).** New `SIMULATE_PING` / `SIMULATE_LOG_STATS` / `SIMULATE_LOGS` / `SIMULATE_WIDGET_CONFIG` (alias constants for `.name`) and a table `SIMULATE_PROBES` (`vpn_status`, `telegram_status`, both read-only). `run_simulation`, `run_ping_check`, `cdp_port`, `logs_cmd`, and the `shot` hint refer to them. Renaming a command in the inventory no longer leaves dangling literals. The test `simulate_probes_name_real_socket_commands` checks that every probe names an existing read-only socket command with a valid JSON object of arguments.
-- **`doctor -simulate`, step 6 (CDP) → `metadata.json` (`simulate`).** The entry points are declared by their owners. `modules/{clock,glyph-bar,mp3-player,telegram}/ui/metadata.json` received `simulate: {module, function, sandbox}`. Files were created for `vpn` and `explorer`. Explorer has no section, since it renders differently. This is normal: the absence of a section means "does not take part in the probe". The CLI (`simulate_targets()`) collects the entries from the checkout, `toolchain/dist`, or the install directory, sorts them by id, and generates one generic harness: a loop `import('../modules/<id>/<file>')` → `sandbox.innerHTML` → `await fn(sandbox, 'simulation-<id>')`. Values from the metadata are escaped into a single-quoted JS literal. An empty set gives `[WARN]`, not a silent success.
-- **Build gate (`toolchain/build.rs::lint_simulate_metadata`).** It checks that each `simulate` section names an existing JS file, that the file defines the function, and that at least one section is declared. It also checks that the production code of `opt/cli/main.rs` (before `#[cfg(test)]`) has no literals `renderClock` / `initVpnPanel` / `renderMusicPlayer` / `renderGlyphBar` / `renderTelegramWidget`. The test assertions name them on purpose, and the lint cuts off the `#[cfg(test)]` tail. There is no serde in the build dependencies: the fields are extracted with a hand-written parser.
-- **CLI tests:** `simulate_targets_come_from_metadata` (the five functions are found through discovery), and `env_section_lists_manifest_dependencies` (every `mod:dep:id` from the manifest appears in the `-env` report).
+The `-j N` (or `--jobs=N`) argument sets `CARGO_BUILD_JOBS` for the build. `.cargo/config.toml` sets `[build] jobs = 2` and the `RUST_MIN_STACK` stack size for the compiler. The lessons behind those numbers are in 14.3.
 
-**Verified:** `cargo test --workspace -j 1` is all green (CLI 17/17, kernel 41/41, including the new `simulate_probes_name_real_socket_commands`). `cargo check --bins` has zero warnings. `cargo build --bins` (debug) plus `udtk doctor -env` gives `ALL CHECKS PASSED` with line-by-line `mod:dep:id`. `udtk doctor -unknown` exits with 2. A live `-simulate` with CDP was not run, because the app was not running. The next session with the app up must confirm the parity of the probes with the previous output.
+### 14.1 Preconditions
 
-**Honest limits:** `-env` is a presence-only twin of the deep `-modules` phase. PE validation and smoke probes live there, from the same manifest. `SCHEDULER_TASKS`/`OBSOLETE_TASKS` remain hardcoded on purpose. This is the CLI's knowledge about the installation, not about the modules, and the drift against the manifest is now visible as a WARN. `help --json` for `cli_commands` is still a handwritten array. The app half comes from the inventory.
+- The `udtk.exe` that runs the command must **not** be in `Program Files`. If it is, the command refuses with `udtk build cannot self-build from Program Files (ACL). Run it from the checkout's target\release\udtk.exe`. The reason is that the directory is read-only for the user.
+- The working copy must be a checkout with a `toolchain/` directory. Otherwise the command fails with `toolchain not found (run from repo root)`.
+
+### 14.2 The steps
+
+Each step below is a stage in `build_cmd` in [opt/cli/main.rs](../opt/cli/main.rs).
+
+**Step 0. Stop the app.** `build_cmd` calls `stop_cmd()`, which is described in 13.2. The running app holds DLLs such as `tdjson.dll` and `libmpv-2.dll`. Replacing a file in use gives `os error 32`, so the app must be stopped first.
+
+**Step 1. Set the running CLI aside.** The `udtk.exe` that runs the build is in `target\release`, and cargo must relink it. Windows will not overwrite a running executable. So the command renames its own file to `udtk.exe.held`. It deletes any old `.held` file first.
+
+**Step 2. Build with tauri.** `run_cargo_tauri(["build", "--bundles", "nsis"], jobs)` runs `cargo tauri build --bundles nsis` in the `toolchain` directory. Tauri builds the three binaries and the NSIS installer in one pass. The environment is the `.env` file, and `CARGO_BUILD_JOBS` is set if `-j` was given. If the build fails, the command renames `udtk.exe.held` back to `udtk.exe`, so the CLI stays usable, and it returns the error.
+
+**Step 3. Remove the set-aside copy.** After a successful build, cargo has written a fresh `udtk.exe` at the canonical path. The `.held` copy is deleted, so that the installer packs the new CLI and not the old one.
+
+**Step 4. Copy the runtime library.** `opt/libmpv/libmpv-2.dll` is copied to `target\release`. It is compared by SHA-256 first, and an unchanged copy is left alone, because a large DLL is often held for a moment by a virus scanner. If the source is missing and no copy exists, the command fails with `... is missing and target/release has no copy`.
+
+**Step 5. Prune stale resources.** `prune_stale_resources` removes entries in `target\release\modules` and `target\release\folders` that no longer exist in the sources. A module removed from the sources would otherwise show a second widget card. Each removal is logged as `pruned stale resource: ...`.
+
+**Step 6. Copy the model weights.** If `opt/models/discogs-maest-129e` exists, its `model.onnx` and `model.onnx.data` are copied into `target\release\models\discogs-maest-129e`.
+
+**Step 7. Find the installer.** `find_installer` looks for a file ending in `-setup.exe` in `target\release\bundle\nsis`. None found gives `installer not found under target/release/bundle/nsis`.
+
+**Step 8. Install silently.** `run_installer_and_verify` starts the installer with `/S`, with no window.
+
+- If the installer cannot start because another process holds the file (`os error 32`, typical right after a build, when a scanner reads a fresh 400 MB file), the command retries **up to 5 times, 3 seconds apart**.
+- If the installer returns `740` (`ERROR_ELEVATION_REQUIRED`, because a per-machine install needs administrator rights), the command runs the installer again with `Start-Process ... -Verb RunAs -Wait`. On the author's machine UAC is off, so this succeeds without a prompt.
+- Because NSIS can skip a locked file and still exit 0, the command does not trust the exit code alone. It waits up to **60 seconds** until `C:\Program Files\UniDTK\unidtk.exe` exists with the same size as `target\release\unidtk.exe`. Otherwise it fails with `installer ran but installed unidtk.exe is missing or wrong size`.
+
+**Step 9. Verify by hashes.** For `udtk.exe`, `vpn-helper.exe`, and `libmpv-2.dll`, the command computes the SHA-256 of the installed copy and of the copy in `target\release`, using `certutil -hashfile`. A difference, or an empty hash, fails with `<name> did not update after install`. This is the proof that the installed files are the new ones.
+
+**Step 10. Restart and check over IPC.** The command starts the task with `schtasks /run /tn UniDTK`. Task Scheduler refuses to start the task from a shell that runs at medium integrity (a token filtered by UAC). When that happens, the command starts `C:\Program Files\UniDTK\unidtk.exe` directly, with the same working directory, and notes it in the output: `restart: task start denied (medium-integrity shell) — spawned the app directly`. Then it sends `ping` every 400 ms for up to **30 seconds**. If the app does not answer, the command fails with `app did not answer on IPC within 30s after install`.
+
+**Step 11. Report.** On success the output starts with `build to install to start to verify OK`, and then it appends the journal's ERROR records (`logs --level ERROR`). An empty list is the expected result.
+
+### 14.3 Lessons behind the steps
+
+These are the failures that shaped the steps. They are facts from the recorded sessions, and they are the reason for the stop-first rule.
+
+- **Memory.** A full build with thin LTO, on the author's 15.7 GB machine, reached the system's allocation limit. The page file grew to 48 GB, and the compiler failed with `LLVM out of memory`. The fix in `.cargo/config.toml` is a low job count and a large stack. For the tests, `cargo test --release --workspace -j 2` brought down two LTO builds at once with `0xc000012d`, so the tests run with `-j 1`. These are the author's recorded limits, not a general rule.
+- **Held files.** The installed app once held `tdjson.dll` and the OpenSSL DLLs **from the repository's `target\release`**, because the path to the Telegram library was stored in the settings. The consequences were an `os error 32` without a file name, and a broken Telegram after the folder was renamed. The step 0 stop and the install path prevent both.
+- **Cold build.** `build.rs` requires the resources of `tauri.conf.json` (`../target/release/udtk.exe`, `vpn-helper.exe`) to exist. On an empty `target/` the build cannot succeed, because it needs the program it builds. The recorded workaround is zero-length placeholder files, which cargo overwrites. The recorded fix is to accept missing resources at build time and check them at packaging.
+- **Quiet success.** A cargo run piped through a PowerShell `Select-Object` was cut off early, and the artifact silently stayed old. It was caught twice as "build succeeded, binary is old". Run cargo directly, and read the exit status.
+- **Commit `cd1949b`** (`fix(cli): leave an unchanged libmpv copy alone`) is the reason for the hash check in step 4.
+
+---
+
+## Part III. Rules for modules and the install
+
+## Chapter 15. How a module joins the bridge
+
+A module is a vertical slice, `modules/<id>/{rust,ui}`. Its back half, `rust/`, is a crate. Its front half, `ui/`, is the page code. The bridge reads a module in four places. Each has a rule, and most of the rules are enforced by a build lint or a test.
+
+### 15.1 Dependencies are data
+
+A module declares its external needs in `Module::dependencies()`, as a static list of `ModuleDependency` values. The types are in [core/api/src/manifest.rs](../core/api/src/manifest.rs):
+
+```rust
+fn dependencies(&self) -> &'static [manifest::ModuleDependency] { &[] }
+```
+
+- `DependencySeverity::{Mandatory, Optional}`: a missing mandatory dependency is a FAIL, and an optional one is a WARN.
+- `DependencyKind::{DynamicLibrary, Executable, ModelAsset, WindowsTask}`: what the dependency is.
+
+Diagnostics read this list. A module has no diagnostic code of its own. The old method `diagnostic_checks` was removed from the `Module` trait.
+
+### 15.2 The registry
+
+A module is registered in [core/kernel/registry.rs](../core/kernel/registry.rs): in `all_modules()`, and in the constant `ALL_MODULE_IDS`. The current list is `glyph-bar`, `explorer`, `vpn`, `telegram`, `mp3-player`, and `micrographics`. The module must also be a dependency in [toolchain/Cargo.toml](../toolchain/Cargo.toml). The kernel and the CLI both use the registry, so there is no second list. (The CLI includes `registry.rs` with `#[path]`.)
+
+### 15.3 Commands of a module
+
+A module answers for its commands through `ipc_call`, with the signature `ModuleIpcFn`:
+
+```rust
+fn(cmd: &str, args: &serde_json::Value, host: Option<HostHandle<'_>>)
+    -> Option<Result<serde_json::Value, String>>
+```
+
+It returns `None` when the command is not its own. The kernel then reports the module as registered but not handling the command, which is a build inconsistency and not a silent answer. To add a command, the module:
+
+1. declares it in [command_inventory.rs](../core/kernel/command_inventory.rs), with `read_only`, `read_only_cli`, or `write`,
+2. implements it in its own `ipc_call`, with the name taken from the inventory constant,
+3. gets one line in `MODULE_ROUTES`, and, if the kernel must route it, one handler in `ROUTES`.
+
+A write must also be listed in the facade's `WS_WRITES`, and a read in `WS_COMMANDS`, once it is verified. Chapter 4 explains why.
+
+### 15.4 The build lints
+
+Lints run in [toolchain/build.rs](../toolchain/build.rs) at compile time. They are cheap, and they stop a broken build before it starts:
+
+| Lint | What it checks | Error text |
+|---|---|---|
+| `lint_modules_integrity` | Every `modules/*/rust/Cargo.toml` is in the registry and in `Cargo.toml` | `BUILD INTEGRITY ERROR: Rust module '<id>' ... is missing from core/kernel/registry.rs` |
+| `lint_ui_imports` | No UI file imports Tauri directly or through the vendor path. Only the facade may | `UI IMPORT ERROR: ... imports Tauri directly; the interface must go through the bridge` |
+| `lint_module_contracts` | Each module's `ui/metadata.json` is well formed: an `embeddable` entry names a file that contains its render function, a container is not embeddable, and tints and packs have ids and labels | `<file>: embeddable.render <name> is not in <module>` (and similar) |
+| `lint_simulate_metadata` | Each `simulate` entry names an existing file that defines the function, at least one entry exists, and the production CLI has no hard-coded render names (the list is `ENTRY_POINTS`, six names including `renderMicrographics`) | (metadata check) |
+
+The rule for modules is narrower than it was. A module must not depend on the kernel crate. It must depend on `unidtk-api`. Tauri host types are allowed, because four of the five modules already use them, and the contract itself gives the host handle (see the decision recorded in [Chapter 6](#chapter-6-design-decisions)). **No lint in `build.rs` enforces this rule as of this rewrite.** The plan planned such a check in `lint_modules_integrity`, and the code of that function does not contain it (see [Chapter 18](#chapter-18-known-gaps-and-open-decisions)).
+
+### 15.5 Guarantees that are tests, not build checks
+
+Some guarantees cannot be checked by a build script, because `generate_handler!` is a macro, and a build script cannot read it. These are tests:
+
+- `every_socket_command_has_a_handler` and `every_command_has_a_handler`: every declared command has a route.
+- `every_manifest_ui_command_is_registered`: every command declared for the UI door is registered in the kernel's `generate_handler!`.
+- `frontend_invoke_names_are_registered`: every literal name in `invoke("...")` in the interface is a registered command. Plugin commands, such as `plugin:fs|...`, are skipped.
+- `frontend_listen_names_exist_in_rust`: every literal name in `listen("...")` is a string literal in the Rust code. This proves the name exists, not that the event is emitted on every path. A text analysis cannot be stricter, because some names are built dynamically.
+- `simulate_probes_name_real_socket_commands`: the probes of `doctor -simulate` name real read-only socket commands.
+
+Each of these was checked with a negative test: a deliberately broken name made it fail, and the restored name made it pass.
+
+---
+
+## Chapter 16. Install layout and data
+
+The rule is that the program and its data are kept apart, so that an update never overwrites user state. The list of the program's files below is the one stated in [architecture.md](architecture.md) (section 4.8). The path logic that this book cites is in code. The installer's file list was not read for this rewrite.
+
+| What | Where | Why |
+|---|---|---|
+| Program: `unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `sing-box.exe`, DLLs, `models/`, `modules/`, `scheduler-tasks/` | `C:\Program Files\UniDTK` | Read-only for the user. The installer writes it |
+| Data: `logs/`, `cache/`, `music/` | `%LOCALAPPDATA%\UniDTK` (`logs_dir()`, `cache_dir()`, `music_dir()` in [core/api/src/paths.rs](../core/api/src/paths.rs)) | The application writes here, never next to itself |
+| Databases: `unidtk.redb`, `unidtk_logs.redb` | `%LOCALAPPDATA%\UniDTK` | Described in [architecture.md](architecture.md) |
+
+The `UniDTK` task runs `unidtk.exe` from the install directory. The task templates contain the placeholder `@INSTALL_DIR@`, so that no absolute path is stored in the repository. The installer, not the first run of the app, registers the tasks and the PATH.
+
+The application does not write into its own directory. The code in `paths.rs` resolves the paths, and the modules declare a store rather than building paths themselves. The layout is therefore changed in one place.
+
+---
+
+## Part IV. Verification and open items
+
+## Chapter 17. How to verify a change
+
+The rule in [AGENTS.md](../AGENTS.md) is that a change is not done when it compiles. It is done when it has been run and checked through the bridge. The steps below use `udtk` only. Do not call `cargo` or `node` directly. The two exceptions are the build itself, which is `udtk build`, and the tests, which `udtk doctor -check` runs.
+
+1. **Build and install:** `udtk build`. It must end with `build to install to start to verify OK` and an empty ERROR list.
+2. **Health:** `udtk doctor -quick` and then `udtk doctor -all`. Both must exit 0.
+3. **Journal:** `udtk logs --level ERROR` (expect `[]`) and `udtk logs --source frontend --limit 30`.
+4. **Page:** `udtk gui tree`, and `udtk gui js:window.__UNIDTK_HARNESS__.getErrors(true)`. The page must have no errors.
+5. **Probe:** `udtk doctor -simulate` with the app running. It must print `ALL CHECKS PASSED`.
+6. **Visual:** `udtk shot`. The screenshot is the mandatory check of the layout after any change to the interface or the kernel. Open the file and look at it.
+7. **Behaviour of a write:** change the state through the page (`udtk gui click:...`, or `js:` through the page's door), then read the consequence back with a read command.
+
+For a change to the transport, add the `shadow` comparison of Chapter 4: set `sessionStorage["unidtk.transport"]` to `shadow` through `udtk gui js:...`, run the scenario, and read `getTransportState()`. The divergence count must be zero. Then reset the key and check that the transport is `tauri` again.
+
+---
+
+## Chapter 18. Known gaps and open decisions
+
+Each item was checked against the code on 2026-11-02. Items marked *not re-verified* are taken from the sessions and were not re-read for this rewrite.
+
+**Migration of the page (see [H4](#h4-migration-of-the-page-to-the-new-door-former-1023-to-1035)).**
+
+1. Four writes are still served only by Tauri: `set_module_enabled`, `ai_dj_model_download`, `telegram_set_archived`, and `explorer_sort_set`. They are not in `WS_WRITES`.
+2. Read commands that are not in `WS_COMMANDS`: `get_system_volume`, `get_disabled_modules`, `telegram_chats_archive`, `telegram_messages_around`, `explorer_sort_get`, and the kernel's own readers (`log_stats`, `log_max_id`, `log_delta`, `logs`). The volume reaches the page as an event, not as a call.
+3. Request-id deduplication for writes, and a refusal of automatic retries of writes, are part of the plan. They are **not** implemented in [ipc.rs](../core/kernel/ipc.rs) or [ws.rs](../core/kernel/ws.rs). Until they are, a write that times out on the client may still run on the server.
+4. The default transport is still `tauri`. `shadow` and `ws` are opt-in, through `sessionStorage`.
+5. The contract's emitter is the only path to Tauri for events in the kernel's own code. A search of [core/kernel/input.rs](../core/kernel/input.rs) and [core/kernel/main.rs](../core/kernel/main.rs) finds no other direct `emit`. Modules were not searched again for this rewrite (*not re-verified*).
+
+**Diagnostics and the install.**
+
+5. `doctor -env` checks presence only. It does not validate the PE format. The PE check lives in the module phases (11.4).
+5a. The rule that a module must not depend on the kernel crate has no enforcing lint in `toolchain/build.rs`. The plan said `lint_modules_integrity` would fail on such a dependency. The function reads the registry and `Cargo.toml` only, and it does not check module dependencies on the kernel. The rule currently rests on review.
+6. `SCHEDULER_TASKS` and `OBSOLETE_TASKS` are hard-coded in the CLI on purpose. They describe the installation, not the modules. A drift against a module's manifest is reported as a WARN.
+7. The `cli_commands` array of `help --json` is written by hand in `help_cmd`. The application half comes from the inventory.
+8. The `UniDTK` task has `Hidden` set to `false` in [UniDTKTask.xml](../scheduler-tasks/UniDTKTask.xml), while the architecture rule says that every background task is hidden. The code and the rule disagree. Decide which is right, then change one of them.
+9. The splash generator `make_splash.py` is not in the repository. The sessions say it lives outside it. The art in `splash_art.rs` cannot be regenerated from this repository alone.
+
+**Stop and update.**
+
+10. The question of who stops a running instance during an update is open. The uninstaller's `PREUNINSTALL` removes the autostart task on upgrade too, and the old process holds ports 26540 and 9222 until it exits. Today `udtk build` stops the app itself (Chapter 14).
+
+**Records and counts.**
+
+11. The old live checklist in this book used `cargo build --release --bins` and `cargo test --workspace`. The rule in [AGENTS.md](../AGENTS.md) forbids a direct release build, and the test count changed. Chapter 17 replaces the checklist. The counts in [Part V](#part-v-history) are the ones recorded at the time, and they are not re-run.
+12. The sessions record and [AGENTS.md](../AGENTS.md) still refer to the older section numbers of this book. The History chapter keeps those labels in its headings, so that the references still point at the right text.
+
+---
+
+## Part V. History
+
+This part keeps the session records of the design, the slices, and the migration, condensed. Each heading keeps the former section number in brackets, so that references from [sessions.md](sessions.md) and [AGENTS.md](../AGENTS.md) still resolve. The numbers, commit hashes, and recorded results are kept. The narrative of each step is shortened to its outcome.
+
+### H1. Sessions 58 to 60 (17.09.2026)
+
+**Commit `c3c7070` (`feat(kernel,cli)`).**
+
+- The hard-coded `udtk status` (and `udtk ping`) was removed. The aggregating function `status_snapshot()` in the kernel was eliminated, so that a new module would not force kernel edits.
+- `doctor` was rewritten around a strict flag whitelist. `--app` was replaced by `-ping`. The redundant synonyms were removed later: only `-x`/`--x` pairs remain. The duplicate `udtk check` was removed in favour of `udtk doctor -check`.
+- A declarative manifest (`core/api/src/manifest.rs`) and `Module::dependencies()` were added. `diagnostic_checks` was removed from the modules. `ModuleRunMode`, `ModuleContext::new_diagnostic`, `InMemoryModuleDb`, `capture_logs`, `capture_logs_unwind`, `CheckStatus`, and `CheckResult` were introduced.
+- `core/kernel/registry.rs` and the build lint `lint_modules_integrity()` were added.
+- The CLI gained `validate_pe_x64`, `run_executable_probe`, `run_module_checks` (four phases), `run_kernel_checks`, and `run_ping_check`.
+- The splash was redesigned: `UniDTK` in mixed case, `DTK` in the colours of the German flag, a titanium Ouroboros, an isolated Saturn.
+
+**Commit `afdd2e4` (`fix(cli,ui)`).**
+
+- `side_by_side` computes the emblem width dynamically, so the right column is aligned to one axis. A regression test was added.
+- The paint clipping of the library popup was removed (`contain: none !important` for `.music-widget`), so the popup no longer clips the header and the close button.
+
+**Later.** The shell name was removed from the CLI and from the paths in session 131, together with the `Shell*` tasks and the `%LOCALAPPDATA%\Shell` cleanup. Only the Win32 API `shell32` and the environment key `SHELL_DEBUG` remain on purpose.
+
+### H2. The plan and its critique (former 10.1 to 10.8)
+
+**The problem (10.1).** The command surface was written three times (the router `match`, the `commands` reply, and the Tauri list), and a fourth list lived in `doctor`. Each of them drifted. The plan set out to remove that drift.
+
+**Recorded decisions (10.2).** A single `udtk gui` command, which replaces `dom`, `eval`, and `act`. One contract with two doors. The manifest as a build artifact, linked into both binaries. A module declares its metadata declaratively. The handwritten Tauri wrappers stay in the kernel. One routing table. No linker magic. Separation of layers: business logic in the modules, transport and inventory in the kernel, the CLI as a thin client.
+
+**Module decisions (10.3).** Accepted: a module owns its runtime state, and the kernel stops naming module types. `metadata.json` is extended with the render entry points. Open at that time: the fate of plugins and assets (`fs`, `opener`, `path`, `convertFileSrc`), the stop during an update, and resource budgets for `gui`.
+
+**Stages (10.4).** Stage 0: secure the debug door. Remove `--remote-allow-origins=*` in three places (`core/kernel/main.rs`, `dev --debug`, `run --debug`), stop overwriting `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, and discover the port. Stage 1: protocol envelope v1, with a version, an id, limits, and a handshake. Stage 2: a command manifest. Stage 3: one routing table. Stage 4: the CLI reads the manifest. Stage 5: `udtk gui` with one session per batch, a log delta per step, and a receipt per step. Stage 6: `simulate` rewritten on the registry, without a live click. Stage 7: the front end moves to the new protocol, one command at a time, behind a flag. Stage 8: documents.
+
+**Acceptance criteria (10.5).** Seven measurable criteria. (1) The manifest matches the routing table, by a test. (2) `help --json`, the manifest, and the runtime answer of `commands` agree on the set of names. (3) Every name in the interface's `invoke` calls is in the manifest. (4) Offline, `help --json` and `doctor -modules` are green. (5) `gui`: one CDP handshake per batch and at most two IPC connections per batch. (6) `simulate` is read-only. (7) Regressions: `cargo test --workspace` green, `doctor -all` without errors, and `shot` shows no layout change.
+
+**Risks (10.6).** Security: CDP always on, with the boundary at the Windows user account. Version compatibility: an old `udtk.exe` and a new kernel diverge, so a protocol version is needed. Resources of a persistent process. Threads and COM: commands that touch COM or the clipboard must not run on socket threads, because those threads do not initialise COM. Shutdown: a request in flight during `app.exit(0)` could leave a torn redb transaction, so a closing gate and a drain of in-flight requests are needed. Module life cycle: an init timeout leaves the module alive without `shutdown`. Update: `PREUNINSTALL` removes the autostart on upgrade.
+
+**Outcome of the critique (10.7).** Rejected from the first version: a proc macro with source scanning, generated Tauri wrappers, building the table from `registry::all_modules()`, write commands on the socket, and a socket-based single source of truth for `help --json`. Accepted: the manifest as a build artifact, the envelope with version and capabilities, the distinction "no such command" against "not ready", read-only by default on the socket, `gui` with one session and one snapshot per batch with `log_delta`, the rewritten `simulate`, an inventory of the Tauri dependencies before the front-end migration, and measurable criteria with resource budgets.
+
+**Consensus after dialogue (10.8).** Two rounds with a subagent, with live probes.
+
+- *10.8.1.* "The kernel stops naming module types" is not achievable in full at stage 3. The rule "a module depends only on `unidtk-api`" is obsolete, because four of the five modules declare `tauri`. The owner narrowed the rule: a module does not depend on the kernel crate, and Tauri host types are permitted.
+- *10.8.2.* The check "spec without a handler" cannot be done at build time. The guarantee is a test, and it must be non-degenerate: removing a handler must turn the test red.
+- *10.8.3.* The slices: S0 (CDP and discovery), S1 (`gui`), S2 (manifest, route, and CLI), S3 (decoupling of types in `ipc.rs`), S4 (front end behind a flag), and S5 (`simulate` and acceptance). The gate on each slice was `cargo test --workspace`, `doctor -all`, `doctor -check`, and `shot`.
+- *10.8.4.* Borrow techniques from `agent-browser`, not its daemon. In order: refusal on an occluded target with the name of the covering element; references instead of indexes (`data-udtk-ref`); an annotated screenshot when it is cheaper than a tree; no daemon.
+- *10.8.5.* Found by the probes: a contradiction about DPI in the older test notes (CDP takes CSS pixels 1:1, and multiplying by the device pixel ratio misses); the harness selected elements by class and exposed positional ids, which are not stable; and an `occluded` flag that was detected but ignored, so that a click was sent and the receipt said `ok`. The fix was to derive `ok` from the hit test.
+
+### H3. Slices S0 to S5 (former 10.9 to 10.22)
+
+**Slice S0 (former 10.9).** Changed: `--remote-allow-origins=*` removed. `pick_cdp_port()`, `merge_browser_args()`, and `cdp_port()` added. `ping` returns `cdpPort`. The write `save_widget_config` removed from the route. `dev --debug` and `run --debug` lost the wildcard, and the CLI asks the app for the port instead of hard-coding 9222. Live results: `ping` gave `cdpPort: 9222`. A WebSocket with `Origin: http://evil.test` was rejected, where before it was accepted with `101`. A client without an Origin header worked. With 9222 held by a foreign listener, the app took 54060 and `udtk eval` worked through it. `save_widget_config` over IPC gave `unknown cmd`. `doctor -simulate` without the app gave `FAILED (1 issue detected)`, exit 1. `cargo test -p unidtk --bin udtk`: 10 of 10. `doctor -quick`: all checks passed.
+
+*Remarks of the independent reviewer (GPT-5.6 Sol), accepted for the next slices:* idempotency and request repetition (a `gui` reconnect or a timeout after execution can repeat a side effect, so commands need a class and deduplication by request id); events were not replayed after resubscription (`Bus::last` keeps one value, so a cursor, `resumeFrom`, a gap signal, and a resync are needed); a TOCTOU window in the port choice (a re-verifiable owner marker is needed); a "fourth list" risk (the spec and the handler must be declared together); the inventory must not call the module factories; and the phrase "build-time guarantee of a handler" was wrong, because it is a test.
+
+*Environment found on the way:* a running app holds `tdjson.dll`, `libcrypto`, `libssl`, and `z.dll` from `target\release`, so the release build fails with `os error 32`. Stop the app, build, and start it again.
+
+**Slice S1 (former 10.10).** `udtk gui` added: one CDP session for the batch, steps `js`, `click`, `type`, `press`, `tree`, `wait`, up to 50 steps, a receipt per step, `--json`, and `--force`. `dom`, `act`, and `eval` removed. `harness.js` gained `data-udtk-ref` and the `covering` field, and lost the class selectors. The kernel gained `log_delta`. Live: a batch of two `js` steps with receipts. `tree` returned 29 nodes, all with a `ref`, none with a class locator. A click on `r1` with the menu open was refused with `refused: "occluded"` and `covering: div#menuOverlay (r30)`. `--force` clicked anyway. `cargo test -p unidtk --bin udtk`: 10 of 10. `doctor -quick` passed.
+
+**Slice S2, partial (former 10.11).** `core/api/src/commands.rs` added the types `CommandSpec`, `Access`, and `Door`, so that a write cannot reach the socket by construction. `core/kernel/command_inventory.rs` added 21 commands at that time, compiled into both binaries. `ipc.rs` got a guard before the route. `help --json` returned `protocol: 1`, `cli_commands`, and `app_commands`. Live: `invoke commands` gave 21 records. `invoke log` was refused by policy. `invoke save_widget_config` gave `unknown cmd`. Honest limits left for S3: the handlers were still in a `match`, and module commands were still listed in the kernel.
+
+**Slice S1 addendum (former 10.12).** The reviewer's remarks on idempotency, events, and the port TOCTOU were moved to S4.
+
+**Slice S3, step 1 (former 10.13).** The `match` became a route table, `ROUTES`, with handlers as functions and names taken from inventory constants. `route()` checks the inventory first. Tests: `every_socket_command_has_a_handler`, `every_handler_is_declared_in_the_inventory`, and `route_names_are_unique`. Live: `ping`, `vpn_status`, `log_max_id`, and `log_delta` answered, `log` was refused by policy, `gui js:6*7` gave 42. `cargo test --workspace`: 0 failures, 15 suites green.
+
+**Slice S3, step 2 (former 10.14).** Modules answer for their own commands. The contract gained `HostHandle` and `ModuleIpcFn`, and the kernel holds `MODULE_ROUTES`, addressing a module by id. The modules: `glyph-bar` (`volume_get`), `explorer` (`explorer_drives`, `explorer_places`), `vpn` (`vpn_status`, `vpn_settings`, `vpn_list_servers`), `telegram` (`telegram_status`, `telegram_chats`), and `mp3-player` (`player_status`, `ai_dj_status`, `list_tracks`, `list_playlists`, `get_submodules`). The gate became an automatic test, `router_does_not_name_module_state_types`. Live: all 17 socket commands at that time answered with exit 0. Adding a module command no longer needs a kernel edit.
+
+**Slice S4, step 1 (former 10.15).** Protocol envelope v1: `PROTOCOL = 1`, one function `respond(id, outcome)`, an echoed `id`, and an optional envelope so that the old bridge keeps working. `ping` reports `proto` and `capabilities`. The CLI numbers its requests and checks the reply. Live: a raw request with `"id":42` came back with `"id":42`. `cargo test --workspace`: 0 failures.
+
+**Slice S4, step 2 (former 10.16).** The WebSocket door, `ws.rs`, with a handshake, a per-launch token, a hard timeout, and `wsPort` in `ping` (the token is not reported there). The token reaches the page only through `session_info`. Live: a WebSocket without a handshake was refused with the handshake message. `ping` gave `wsPort: 51090`. The token read through the page was 32 hex characters. The handshake with the token gave `ready`. A `volume_get` after the handshake answered with `id: 7`. The boundary was stated: the token keeps out other processes and web pages, not code inside the process.
+
+**Slice S4, step 3 (former 10.17).** Three Explorer files imported Tauri by a **relative** path, which bypasses the import map. They were switched to the bare specifier `@tauri-apps/api/core`, and a build lint, `lint_ui_imports()`, was added. Negative test: a bypass put back made the build fail with `UI IMPORT ERROR`. The interface tree had 29 nodes and no errors. The Explorer panel itself was not opened in this pass, and the book says so: running it live was left for the next session.
+
+**Slice S5, step 1 (former 10.18).** The defect: `doctor -simulate` clicked the **live** clock widget twice, which called the real `toggleWidget`, collapsed a widget the user had opened, and raced the animation timer. The fix: the click is made on an offscreen copy in the sandbox (`interaction:clickSandboxCopy`). The sandbox lost the class `widget-card`, got `contain: strict`, and is skipped by `getSemanticTree`. The dead `log` calls were removed. Live: `doctor -simulate` gave exit 0. All five renders were `OK`. The tree still had 29 nodes, and the sandbox was not in it. Page errors: 0.
+
+**Acceptance criteria 3 and 4 (former 10.19).** Criterion 3: the test `frontend_invoke_names_are_registered` was added, and it was proved by a negative test (a call to a command that does not exist made it fail). Criterion 4: with the app stopped, `help --json` gave `protocol: 1`, 13 CLI commands, and 21 application commands, and `doctor -modules` exited 0. `cargo test --workspace`: 15 suites, 0 failures, 0 warnings.
+
+**Migration preparation (former 10.20).** An inventory of the four categories of Tauri dependency: commands, events, plugins (`fs`, `opener`, `path`), and assets (`convertFileSrc`). Commands and events are checked by tests. `frontend_listen_names_exist_in_rust` was first written with 10 false positives, because some names are passed on a separate line or are built dynamically. Each was checked in the code, and the criterion was weakened to "the name is alive". Negative test: a renamed listener made the test fail.
+
+**Idempotency as data (former 10.21).** `Idempotency::{Safe, Unsafe}` was added to the contract, set by the constructors, and published as `retry_safe`. Honest note: the invariant held trivially, because the socket had only reads.
+
+**Plan for the migration (former 10.22).** Four discrepancies were found in the code before the migration: the dispatcher applied the socket policy to both doors; the WebSocket had no push and no reconnection; some events bypassed the contract emitter; and some response shapes differed between the doors (`list_tracks`, `get_widget_config`). The steps that followed are in [H4](#h4-migration-of-the-page-to-the-new-door-former-1023-to-1035).
+
+### H4. Migration of the page to the new door (former 10.23 to 10.35)
+
+**Steps 1 and 2 (former 10.23).** Baseline recorded: `cargo test --workspace` with 0 failures, `doctor -quick` with 0, the tree with 29 nodes, and 0 page errors. The facade `core/ui/unidtk-bridge.js` was created, and 13 files were switched to the single import `@unidtk/bridge` (20 import lines). The real Tauri functions stayed private inside the facade. `session_info` always goes through Tauri. The transport is read once. `WS_COMMANDS` was empty. The lint `lint_ui_imports()` covers all UI modules. Live: 29 nodes, 0 errors, and `getTransportState()` gave `{transport: "tauri", migratedCommands: [], sessionInfoCalls: 0}`.
+
+**Steps 3 to 5 (former 10.24).** The transport flag, the WebSocket client inside the facade (one memoised session, the handshake as the first frame, pending requests keyed by id, and separate timeouts). Two blockers were found and fixed. (1) The page's CSP `connect-src` allowed only the TCP door, so `ws://127.0.0.1:*` was added. (2) The first shadow run gave 16 divergences out of 17, all of them key order. The comparison became structural. The handshake timeout was raised to 8 seconds, because a cold page timed out. The first three commands were `player_status`, `vpn_status`, and `telegram_status`. `shadow`: 19 comparisons, 0 divergences. `ws`: 18 commands answered by the socket door. Rollback to `tauri`: verified.
+
+**Step 7, first slice (former 10.25).** Six commands: `player_status`, `vpn_status`, `vpn_list_servers`, `vpn_settings`, `telegram_status`, `ai_dj_status`. A per-command counter, `perCommand`, was added, because "23 comparisons, 0 divergences" was not proof when only two commands had been called. `shadow`: 54 comparisons, 0 divergences. `ws`: 25 calls.
+
+**The seventh command, and two shadow errors (former 10.26).** `get_widget_config` was unified: the socket now returns `null` where there is no configuration, like Tauri. The shadow found: (1) 14 refusals from a 4-second timeout, during a library scan. The timeout was raised to 15 seconds, because the kernel serves one connection in order. (2) A race in the client's `ensureSocket`, which cached the socket and not the promise, so two calls during the handshake opened two connections. The promise is cached now. `shadow`: 34 comparisons, 0 divergences. `ws`: 30 calls.
+
+**The whole read surface (former 10.27).** Three contracts were unified. `telegram_chats` returns an array, as Tauri does. `get_drives` and `get_user_places` take the names that both sides already use. `list_tracks` and `list_playlists` accept `search`, `sort_key`, and `sort_dir`, and return an array. Without this, search and sorting would have stopped working in WS mode only. `shadow`: 49 comparisons, 0 divergences. `ws` with a live scenario of the menu and Explorer: 31 calls, 29 nodes, 0 errors.
+
+**Events (former 10.28).** `core/kernel/events.rs` was created: a global `seq`, a ring of 64 frames per event, state events that keep only the newest frame, an explicit `gap`, and `try_send` delivery. The broker is fed from the same emitter that feeds Tauri, so both doors carry the same events with the same numbers. The push protocol: `subscribe` and `unsubscribe`, the frame `{v, type:"event", event, seq, payload}`, and `gap` on a cursor the ring no longer covers. Three bugs of the instrument were fixed: comparison by position gave false divergences (state events compare by convergence of values, not by order); one comparator per `listen` drained the same buffer twice; and a broker test was flaky. Live: a raw client got snapshot `seq: 1`, and a volume change pushed `seq: 2`. `shadow` (event): 34 comparisons, 0 divergences. The glyph bar, on `ws`, showed 2 segments at 20 percent and 9 at 90 percent after an event delivered by the new door.
+
+**All events through the contract (former 10.29).** Events moved from direct `AppHandle::emit` to `unidtk_api::emit`: the kernel's `explorer-open`, `display-changed`, and `hotkey-pressed`; the Telegram events, through one helper, `TelegramRuntime::emit`; and the player's `audio-bands`, `ai-dj-progress`, `sync-tasks`, and `sync-auto`. The player lost its `AppHandle` parameters (about fifteen of them), and `cargo check` gave zero warnings. The WS writer merges state frames to the newest one per pass. Live: `explorer-open` took the tree from 29 to 39 nodes, with the path visible. A module event, `telegram-connection-state`, arrived with `{"state":"Ready"}` and a real `seq`. The events that play only during playback were verified through the common path, not by observation. `cargo check --release --bins`: 0 warnings.
+
+**Migration complete (former 10.30).** The interface works over the socket: 13 commands and 17 events went through the new door at that time. The remaining Tauri-only calls were `get_folders`, `scan_directory`, `explorer_tabs_get`, `frontend_log`, `telegram_get_config`, and `telegram_debug`. The default stayed `tauri`. Shadow comparison: 65 checks, 0 divergences. Two protocol improvements came out of it: the catch-up frame at subscription is marked `"snapshot": true`, and the comparison is by delivery, with a ring of the last 8 live payloads per event, because the module sends events in batches.
+
+Side findings: a cold build from scratch was impossible (the placeholder workaround, see 14.3), and the installed app held DLLs from the repository (see 14.3).
+
+**Stage 7 closed (former 10.31).** The dispatcher applied the socket policy to both doors. The fix made the door the dispatcher's context: `dispatch(req, door)`, with `Socket` for TCP and `Ui` for WS. The second door was renamed from `Tauri` to `Ui`, because the name must describe who is asking. The three refusals were given distinct reasons. A new kind of command, `read_only_cli`, was added for the kernel's own introspection. Three manifest defects were fixed: the journal write was declared as `log`, while the kernel registers `frontend_log`; the volume was declared as `volume_get`, while the kernel has `get_system_volume`; and the CLI commands were presented as available to the interface. A live probe found that `frontend_log` over WS had no route, although the Tauri twin existed. The test had checked routes only for the socket subset. New guards: `every_command_has_a_handler`, `every_manifest_ui_command_is_registered`, and three policy-refusal tests. Live: a write over the socket was refused, the same write over WS landed in the journal (`udtk logs --source frontend` showed it), `get_system_volume` over WS answered, `ping` over WS was refused, and the old name `volume_get` gave `unknown cmd`. `cargo test --release --workspace`: 0 failures, 40 tests in the kernel, zero warnings.
+
+A note on the tool: PowerShell 5.1 breaks a multi-line `js:` argument, as described in 9.5.
+
+**The first write from the interface (former 10.32).** A trap was found before the first write. `shadow` calls both doors, so for a write the **action** would run twice. Writes therefore have their own list, `WS_WRITES`. They go to the socket only in `ws` mode, and they are verified by their consequence, with a following read. The pilot was `frontend_log`, whose consequence is a journal record. Live: in `shadow`, one journal entry and no double execution. In `ws`, one entry. The interface had 29 nodes and no errors.
+
+**The first module writes (former 10.33).** `set_system_volume` and `set_system_mute` were declared as writes, and migrated. The recipe that followed for each write has four steps: declare the write in the manifest, add a branch in the module's `ipc_call` with the name from the manifest, add a route in the kernel that calls the module, and add the name to `WS_WRITES` and nowhere else. Live: over the socket, refused. Over WS, `set_system_volume {level:30}` answered `{"level":30,"muted":false}`, and an independent read over the socket confirmed it. The original state was restored through the same door and confirmed by a read. An observation: a non-zero volume clears mute, and that was the same on both doors. `cargo test --release --workspace`: 0 failures, 40 in the kernel, zero warnings.
+
+**VPN writes (former 10.34).** `vpn_connect`, `vpn_disconnect`, `vpn_ping_all`, and `vpn_set_auto_connect` were declared as writes and migrated. `vpn_ping_all` is a write although it answers with measurements, because it takes a global in-progress guard and stores results, so the state it leaves behind is observable. `Access` describes what a command does, not what it replies. Live: all four refused over the socket. `vpn_set_auto_connect {enabled:true}` over WS answered `auto_connect: true`, and a read over the socket confirmed it. The original value was restored. The manifest at that time had 27 commands (20 on the socket) and 7 writes, and the runtime matched it. Lesson: `cargo test --release --workspace -j 2` brought down two LTO builds with `0xc000012d`, so the tests run with `-j 1`.
+
+**Doctor without hard-coding (former 10.35).** The fourth list, in `doctor`, is gone. `-env` iterates the manifests of the modules, with the severity from the manifest. It found `telegram:byedpi` (`ciadpi.exe`, Optional), which the old list had not declared. `-simulate` takes its six probes from the inventory (`SIMULATE_PROBES`), and its render functions from each module's `metadata.json` (`simulate: {module, function, sandbox}`, present in six modules: `clock`, `glyph-bar`, `micrographics`, `mp3-player`, `telegram`, `vpn`). The explorer module has no section, because it renders differently, and the absence of a section means that it takes no part in the probe. A build lint, `lint_simulate_metadata`, checks the entries. Tests: `simulate_targets_come_from_metadata`, `env_section_lists_manifest_dependencies`, and `simulate_probes_name_real_socket_commands`. Verified: `cargo test --workspace -j 1` green (CLI 17 of 17, kernel 41 of 41). `cargo check --bins`: zero warnings. `doctor -env` gave `ALL CHECKS PASSED`. `doctor -unknown` exited with 2. The live `-simulate` with CDP was not run in that session, and the next session with the app up had to confirm the probes.
+
+### H5. Corrections made in the rewrite of 2026-11-02
+
+The rewrite was checked line by line against the code. These are the statements of the previous text that the code does not support, and how the book now states them:
+
+| Previous text | What the code says | Now |
+|---|---|---|
+| `udtk dev [--debug]` is a command | There is no arm for `dev` in the dispatcher | Listed as removed (1.4) |
+| `udtk run [args] [--debug]` | `--debug` is refused with an error | Documented as refused (13.1) |
+| `udtk build`: `cargo tauri build` then `cargo build --release --bins`, then copies | One `cargo tauri build --bundles nsis`, then the installer, the hash check, and the restart | Chapter 14 rewritten step by step |
+| The PATH and the tasks use the directory of the CLI | `udtk path` and `udtk tasks register` use `C:\Program Files\UniDTK` | Corrected (1.2, 12.1, 12.3) |
+| 21 application commands | 37 in the inventory: 12 writes, 5 CLI-only reads, 20 reads on both doors | Corrected (2.5, 7) |
+| `help --json` lists 13 CLI commands | The code lists 14 (`doc` and `stop` were added) | Corrected (7) |
+| The splash budget is `min(28, height-2)` | `clamp(height-2, 10, 28)` | Corrected (13.5) |
+| The splash tiers have fixed widths 98, 86, 78, 46, 29 | The widths are computed from the art's geometry, and the height from the budget | Described as computed (13.5) |
+| The handshake deadline is 3 seconds, and the client is also 3 seconds | Server: 3 seconds. Client: 8 seconds for the handshake and 15 seconds per command | Both stated (4.3, 4.6) |
+| The `doctor -simulate` steps include a live click on the clock widget, and a marker in the log | The live click was removed (sandbox copy). The code shows no log marker | Corrected (11.6). The marker is not described |
+| `lint_modules_integrity` fails on a module dependency on the kernel crate | The function checks the registry and `Cargo.toml` membership only. `lint_module_contracts` checks UI metadata | Corrected (15.4, 18.5a) |
+| Task registration runs through elevation (`Start-Process ... -Verb RunAs`) | It first runs `schtasks /create` directly, and elevates only on failure | Corrected (12.1) |
+| `udtk gui js:` goes through the page's own door | It goes through CDP `Runtime.evaluate` | Corrected (3.4) |
+| `doctor -env` validates PE | It checks presence only | Corrected (11.2) |
+| The live checklist uses `cargo build --release --bins` | The rule of AGENTS.md is `udtk build` only | Replaced (Chapter 17) |
+| `make_splash.py --repo <repo> --check` is in the repository | The generator is not in the repository | Flagged (13.5, 18.9) |
+| The build runs with `-j 1` | `.cargo/config.toml` sets `jobs = 2` | Both stated (14, 14.3) |
+
