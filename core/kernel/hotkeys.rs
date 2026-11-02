@@ -13,6 +13,7 @@ use windows::Win32::{
             VK_MENU, VK_R, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
+            PostThreadMessageW, UnhookWindowsHookEx, WM_QUIT,
             CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW,
             GetWindowThreadProcessId, PostMessageW, SetWindowsHookExW,
             TranslateMessage, IsWindow, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_CHAR, WM_KEYDOWN,
@@ -359,23 +360,40 @@ pub fn init(app: AppHandle) {
                 Err(_) => HINSTANCE::default(),
             };
 
-            match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), h_instance, 0) {
-                Ok(_hook) => {
+            let hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), h_instance, 0) {
+                Ok(hook) => {
                     crate::log_line("hotkeys: WH_KEYBOARD_LL dispatcher installed");
+                    hook
                 }
                 Err(err) => {
                     crate::log_line(format!("hotkeys: WH_KEYBOARD_LL hook failed: {err}"));
                     return;
                 }
-            }
+            };
+            HOOK_THREAD.store(windows::Win32::System::Threading::GetCurrentThreadId(), Ordering::SeqCst);
 
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).into() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            // The hook belongs to this thread, so it is released here.
+            let _ = UnhookWindowsHookEx(hook);
         }
     });
+}
+
+/// Thread that owns the keyboard hook; 0 until it is installed.
+static HOOK_THREAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Ask the hook thread to leave its message loop and unhook. Does not wait.
+pub fn shutdown() {
+    let thread = HOOK_THREAD.swap(0, Ordering::SeqCst);
+    if thread != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 #[cfg(test)]
