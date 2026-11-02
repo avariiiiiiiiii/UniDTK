@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
+| **132** | 2026-11-02 | `c265cf2` | Per-theme colors, nesting contract, packs, runtime module switching, 15 GitHub issues, English book | `core/ui/theme.js`, `core/ui/nesting.js`, `core/ui/menu.js`, `core/api/src/lib.rs` |
 | **131** | 2026-10-29 | `3e2ca7e` | Menu redesign: ~420px side panel, desktop layout (16px grid, corners), folders without AppData (Start, dialog, clipboard, BGRA), cancel via toasts, Shell cleanup | [`core/ui/menu.js`](../core/ui/menu.js), [`core/ui/menu.css`](../core/ui/menu.css), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/kernel/start_menu.rs`](../core/kernel/start_menu.rs), [`core/ui/folders.js`](../core/ui/folders.js), [`core/ui/folder-body.js`](../core/ui/folder-body.js), [`core/ui/toast.js`](../core/ui/toast.js) |
 | **130** | 2026-10-28 | `732ffdd` | Menu bugs: profile pills, single write queue, `syncWidgets` without rebuilding the desktop, VPN does not overwrite settings, defaults from the kernel, shortcuts from `Shell` | [`core/ui/menu.js`](../core/ui/menu.js), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/ui/widgets-api.js`](../core/ui/widgets-api.js), [`core/kernel/unidtk_db.rs`](../core/kernel/unidtk_db.rs) |
 | **129** | 2026-10-28 | `f16cedd` | Touchpad scrolling over the shell via raw HID (DirectManipulation does not deliver wheel input over WebView2) | [`core/kernel/touchpad.rs`](../core/kernel/touchpad.rs), [`core/kernel/input.rs`](../core/kernel/input.rs), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js) |
@@ -5263,3 +5264,32 @@ The user, after the release of session 117 (Sea Glass v3 in production): "damn i
 
 ### 118.5 Verification and metrics
 `udtk build`: compilation **8 min 40 s**, NSIS installer built, silent install into `C:\Program Files\UniDTK` (SHA gate), restart, IPC gate. `udtk doctor -ping`: ALL CHECKS PASSED, **RTT 1 ms**. `udtk logs --level ERROR`: empty (5000 entries, all INFO). Live DOM: clock `Ndot, monospace` 56px, digits PHYS 869,140 208×100; the card panel `rgba(15, 18, 30, 0.78)` (dark Classic, not beige sea-glass); `--font-base: 'Geist', sans-serif`; theme `nothing-dark`/Nothing Classic, isBuiltin, schemaVersion normalized; 10 cards: clock 545,28 207×187, glyph 38,214 7×97, micrographics 186,28 931×175, mp3 47,105 227×43, telegram 1125,64 64×593, 5 folders 47,281…516 227×43 (CSS); hidden=`["vpn"]`. Working Set of the unidtk host — **32.7 MB** (fresh start; the WebView2 pool is shared with the system). The analytical verification tooling (ad-hoc PNG scripts: diff, color and brightness scans, column profiles) — temporary files in `Temp\opencode\`, not part of the repository. Screenshot: `Pictures/Screenshots/unidtk_2026-10-24_21-07-58.png`.
+
+## 132. Session 2026-11-01/02 — colors, nesting, packs, GitHub issues, English book
+
+### 132.1 Context and symptoms
+The user reported that colors neither saved nor worked, that VPN lived inside the clock instead of being a widget, that per-module toggles and folder lists would not scale, that the menu, the arrange bar and the add button looked unrelated, and that theme settings named modules. All 16 open GitHub issues were in scope, and issue #2 was decided as: translate everything and write documentation like the Rust Book.
+
+### 132.2 Root causes
+- Colors did not save: `commitLiveChange` wrote redb before it updated `userColors`, proved live (`theme.palette.coral` and the cache held `#123456`, redb `userColors` held `#ffc0ae`). `selectPreset` restored only palette and tints, only for Sea Glass.
+- Colors did not work: measured on about 750 elements, the palette changed 708 in Sea Glass and 6 in Classic; text color changed 43 in Sea Glass, because jelly cards derive ink from their tint, and 737 in Classic.
+- VPN: `modules/clock/ui/widget.js` imported the panel directly, its CSS sat in `micrographics.css`, and `buildWidgetCard` had no VPN branch.
+- Module switches took effect only at startup: there was no stop and restart path, and `begin_shutdown` latches are one-way.
+- A blank desk during this session (from 12:03 on 2026-11-02): a cleanup in `core/ui/menu.js` removed `let panel`, the import threw, and the core never rendered. Tests and a parse check cannot see this; only a live start did.
+
+### 132.3 Architectural decision
+- Colors: `config.colorOverrides` per theme id, written in the same redb write as the theme; `committedTheme` keeps drag values out of saves. The Look pane shows controls by material.
+- Theme contract: modules declare `tints` and `lookOptions` in `metadata.json`; `readableOn` keeps `--on-accent-rgb` at WCAG AA for any accent.
+- Nesting: `core/ui/nesting.js`, `container` and `embeddable`, one level deep, no count limit. `config.nested` is intent and is never trimmed. VPN is the first embeddable module.
+- Lifecycle: `Module::suspend` and `Module::resume`, `set_module_enabled` as the one switch, packs with one state per module. Exit latches stay separate.
+- `README.md` is the book and `udtk doc` opens it. `lint_module_contracts` checks metadata at build time.
+- #15 uses one COM session and a cached endpoint with a device recheck every two seconds, the issue's first option, instead of a callback: it removes the root cause without the callback's threading risks.
+
+### 132.4 Changed files
+[theme.js](../core/ui/theme.js), [nesting.js](../core/ui/nesting.js), [popup.js](../core/ui/popup.js), [menu.js](../core/ui/menu.js), [unidtk-core.js](../core/ui/unidtk-core.js), [widgets-api.js](../core/ui/widgets-api.js), [lib.rs](../core/api/src/lib.rs), [main.rs](../core/kernel/main.rs), [events.rs](../core/kernel/events.rs), [hotkeys.rs](../core/kernel/hotkeys.rs), [vpn-panel.js](../modules/vpn/ui/vpn-panel.js), [vpn.css](../modules/vpn/ui/vpn.css), [glyph_bar.rs](../modules/glyph-bar/rust/glyph_bar.rs), [cli main.rs](../opt/cli/main.rs), [build.rs](../toolchain/build.rs), [README.md](../README.md), and every file under `docs/`.
+
+### 132.5 Verification and metrics
+- `cargo test --release --workspace -j 1`: 236 passed, 0 failed. WebView checks: 46097 theme model, 8 persistence, 19 nesting.
+- Live on the installed build: 8 cards on the desk; one commit held the color in both `theme` and `colorOverrides`; the accent survived Sea Glass to Classic and back; VPN opened inside the clock, on the desk after eject, and inside a folder, then returned to the clock; dragging the player onto the clock marked the host refused, showed the warning and restored the card; `glyph-bar`, `micrographics` and `telegram` switched off and on without a restart, and Telegram stayed `Ready`; packs, the pack popup, the folder popup and 24 tint rows rendered; `udtk doc` produced the book with working chapter links.
+- Not exercised live: switching `mp3-player` and `vpn` off, because music was playing and the VPN state belongs to the user. Multiple nested widgets: VPN is the only embeddable module so far.
+- `udtk doctor -ping`: 4 ms. `unidtk.exe` Working Set: 78 MB; with its WebView2 processes about 1000 MB. `udtk logs --level ERROR`: empty. Screenshots taken with `udtk shot`.
