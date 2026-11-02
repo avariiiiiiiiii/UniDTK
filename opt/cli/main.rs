@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use unidtk_api::ModuleDb;
 
+mod book;
 mod splash;
 mod splash_art;
 
@@ -54,7 +55,7 @@ fn main() {
         "autostart" => autostart_cmd(&args).map_err(|e| (1, e)),
         "tasks" => tasks_cmd(&args).map_err(|e| (1, e)),
         "path" => path_cmd(&args).map_err(|e| (1, e)),
-        "doc" => doc_cmd().map_err(|e| (1, e)),
+        "doc" => doc_cmd(&args).map_err(|e| (1, e)),
         "help" => help_cmd(&args).map_err(|e| (1, e)),
         _ => {
             let h = help();
@@ -1236,12 +1237,8 @@ fn app_command_manifest() -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn help_cmd(args: &[String]) -> Result<String, String> {
-    let json_flag = args.iter().any(|a| a == "--json");
-    if json_flag {
-        let manifest = serde_json::json!({
-            "protocol": 1,
-            "cli_commands": [
+fn cli_commands() -> serde_json::Value {
+    serde_json::json!([
                 { "name": "doctor", "args": "[-kernel] [-modules] [-ping] [-env] [-check] [-quick] [-simulate] [-all]", "desc": "Run non-destructive subsystem, module, environment, and IPC diagnostics" },
                 { "name": "invoke", "args": "<cmd> [json-args]", "desc": "Invoke module or kernel IPC command directly" },
                 { "name": "logs", "args": "[--limit N] [--since ID] [--level LEVEL] [--source SOURCE]", "desc": "Read log records from redb" },
@@ -1251,12 +1248,29 @@ fn help_cmd(args: &[String]) -> Result<String, String> {
                 { "name": "autostart", "args": "[status|enable|disable]", "desc": "Manage the logon autostart task (UniDTK)" },
                 { "name": "tasks", "args": "[status|register [name]|unregister <name>|cleanup-old]", "desc": "Manage Windows Task Scheduler tasks" },
                 { "name": "path", "args": "[status|ensure]", "desc": "Check or register the CLI directory in the User PATH" },
-                { "name": "doc", "desc": "Render the project book and open it in the browser" },
+                { "name": "doc", "args": "[--check]", "desc": "Render the project book and open it in the browser; --check finds what rotted in it" },
                 { "name": "build", "args": "[-j N]", "desc": "Build the release, make the installer, install and verify (stops and restarts the app)" },
                 { "name": "stop", "desc": "Stop the running app (graceful quit, then force) so its files can be replaced" },
                 { "name": "run", "args": "[args...]", "desc": "Launch the app that sits next to this CLI" },
                 { "name": "help", "args": "[--json]", "desc": "Print the command reference (--json emits a machine-readable manifest)" },
-            ],
+    ])
+}
+
+fn cli_command_names() -> Vec<String> {
+    cli_commands()
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["name"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn help_cmd(args: &[String]) -> Result<String, String> {
+    let json_flag = args.iter().any(|a| a == "--json");
+    if json_flag {
+        let manifest = serde_json::json!({
+            "protocol": 1,
+            "cli_commands": cli_commands(),
             "app_commands": app_command_manifest(),
             "note": "app_commands is the application surface (its own inventory); write commands are declared but never served over the socket door.",
         });
@@ -1821,10 +1835,13 @@ const OBSOLETE_TASKS: &[&str] = &[
     "NothingWallpaperXray",
 ];
 
-/// `udtk doc` — the project's `rustup doc`. The book is README.md plus the
-/// markdown it links to; the HTML goes to the cache because Program Files is
-/// read-only. The source is the installed copy, else the checkout.
-fn doc_cmd() -> Result<String, String> {
+/// `udtk doc` — the project's `rustup doc`. The source is the installed copy, else
+/// the checkout; the HTML goes to the cache because Program Files is read-only.
+/// `--check` needs the checkout, since it compares the book with the sources.
+fn doc_cmd(args: &[String]) -> Result<String, String> {
+    if args.iter().any(|a| a == "--check") {
+        return doc_check();
+    }
     let installed = install_dir().join("book");
     let source = if installed.join("README.md").exists() {
         installed
@@ -1834,10 +1851,7 @@ fn doc_cmd() -> Result<String, String> {
     let output = dirs::data_local_dir()
         .ok_or("no local data directory")?
         .join("UniDTK/cache/book");
-    render_book_page(&source, &source.join("README.md"), &output, "index")?;
-    render_book_page(&source, &source.join("AGENTS.md"), &output, "AGENTS")?;
-    render_book_dir(&source, &source.join("docs"), &output)?;
-    let index = output.join("index.html");
+    let index = book::build(&source, &output)?;
     std::process::Command::new("explorer")
         .arg(&index)
         .spawn()
@@ -1845,54 +1859,16 @@ fn doc_cmd() -> Result<String, String> {
     Ok(format!("Book: {}", index.display()))
 }
 
-fn render_book_dir(source: &Path, dir: &Path, output: &Path) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            render_book_dir(source, &path, output)?;
-        } else if path.extension().is_some_and(|ext| ext == "md") {
-            let relative = path.strip_prefix(source).map_err(|e| e.to_string())?.with_extension("");
-            render_book_page(source, &path, output, &relative.to_string_lossy())?;
-        }
+fn doc_check() -> Result<String, String> {
+    let root = find_repo_root().ok_or("udtk doc --check needs a checkout")?;
+    let problems = book::check(&root, &cli_command_names());
+    if problems.is_empty() {
+        Ok("book: ok".to_string())
+    } else {
+        Err(format!("book: {} problem(s)
+{}", problems.len(), problems.join("
+")))
     }
-    Ok(())
-}
-
-fn render_book_page(source: &Path, page: &Path, output: &Path, name: &str) -> Result<(), String> {
-    use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
-    let text = std::fs::read_to_string(page).map_err(|e| format!("{}: {e}", page.display()))?;
-    // Links between chapters name the markdown files; the rendered pages are html.
-    let events = Parser::new_ext(&text, Options::ENABLE_TABLES).map(|event| match event {
-        Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
-            let local = !dest_url.contains("://");
-            let dest_url = match dest_url.split_once(".md") {
-                Some((stem, rest)) if local && (rest.is_empty() || rest.starts_with('#')) => {
-                    let stem = if stem.ends_with("README") { stem.replace("README", "index") } else { stem.to_string() };
-                    CowStr::from(format!("{stem}.html{rest}"))
-                }
-                _ => dest_url,
-            };
-            Event::Start(Tag::Link { link_type, dest_url, title, id })
-        }
-        other => other,
-    });
-    let mut body = String::new();
-    html::push_html(&mut body, events);
-    let title = page.strip_prefix(source).unwrap_or(page).display().to_string();
-    let html = format!(
-        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>{title}</title>\
-         <style>body{{max-width:48rem;margin:2rem auto;padding:0 1rem;font:16px/1.6 system-ui,sans-serif}}\
-         pre{{overflow-x:auto;padding:.75rem;background:#f4f4f4}}table{{border-collapse:collapse}}\
-         td,th{{border:1px solid #ccc;padding:.25rem .5rem}}\
-         @media(prefers-color-scheme:dark){{body{{background:#17181c;color:#e6e6e6}}a{{color:#8ab4f8}}pre{{background:#23252b}}}}</style>\
-         <body>{body}</body></html>"
-    );
-    let target = output.join(format!("{name}.html"));
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    }
-    std::fs::write(&target, html).map_err(|e| format!("{}: {e}", target.display()))
 }
 
 fn find_repo_root() -> Option<std::path::PathBuf> {
@@ -3511,7 +3487,7 @@ USAGE:
   udtk cdp-list
   udtk autostart [status|enable|disable]
   udtk tasks [status|register [name]|unregister <name>|cleanup-old]
-  udtk doc                                Open the project book (README and its chapters)
+  udtk doc [--check]                      Open the project book; --check finds what rotted in it
   udtk path [status|ensure]
   udtk build [-j N] | stop | run [args...]"
         .to_string()

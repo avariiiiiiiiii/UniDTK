@@ -1832,7 +1832,7 @@ mod frontend_contract_tests {
     /// Guards the failure mode where a command is renamed or deleted in the kernel while
     /// the frontend keeps calling it — that surfaces at runtime as an empty widget, not
     /// at build time. It is deliberately a *test*: `generate_handler!` is a macro, so
-    /// `build.rs` cannot read its contents structurally (see `docs/cliudtk.md` §10.8.2).
+    /// `build.rs` cannot read its contents structurally (see the H2 record in `docs/cliudtk.md`).
     #[test]
     fn frontend_invoke_names_are_registered() {
         let registered = registered_commands();

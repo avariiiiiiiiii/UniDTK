@@ -50,8 +50,7 @@ impl AppState {
         )?;
         crate::ai::ai_dj::set_store(ai_dj_store);
         let db = Database::new(ctx.into_db());
-        // Обложки из `<id>.jpg` рядом с треками: вызов при старте библиотеки
-        // был потерян (docs/architecture.md §18.1 → §45.5).
+        // Covers from `<id>.jpg` next to the tracks are repaired once at library start.
         if let Err(error) = db.repair_missing_thumbnails() {
             unidtk_api::log(format!("mp3-player: thumbnail repair failed: {error}"));
         }

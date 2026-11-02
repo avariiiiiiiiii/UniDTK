@@ -4,7 +4,7 @@
  * Why this file exists: the interface used to talk to Tauri from ~13 files, each
  * importing `@tauri-apps/api/core` or a plugin directly. That made the transport
  * impossible to change in one place — which is exactly what the frontend migration
- * (`docs/cliudtk.md` §10.22) needs. The UI imports *this* module; only this module knows
+ * (the H3 record in `docs/cliudtk.md`) needs. The UI imports *this* module; only this module knows
  * how a call reaches the kernel.
  *
  * Rules this file keeps:

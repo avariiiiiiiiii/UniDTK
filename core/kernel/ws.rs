@@ -9,7 +9,7 @@
 //! Trust boundary, stated honestly: the token keeps out other local processes that do
 //! not know it, and any web page that tries to open the socket. It does **not** defend
 //! against code already running inside this process — CDP can read the page's own
-//! token. That is the accepted risk recorded in `docs/cliudtk.md` §10.8, and it is why
+//! token. That is the accepted risk recorded in `docs/cliudtk.md` (6.5), and it is why
 //! the token does not replace the read-only policy on the open door.
 //!
 //! Both doors answer through the same dispatcher (`ipc::IpcServer::dispatch`), so a
