@@ -1,6 +1,6 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
@@ -9,6 +9,47 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::UI::Shell::{DragQueryFileW, DROPFILES, HDROP};
 const CF_HDROP: u32 = 15;
+
+/// Attempts made on `OpenClipboard` while another process holds the clipboard.
+const OPEN_CLIPBOARD_ATTEMPTS: u32 = 10;
+const OPEN_CLIPBOARD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Opens the clipboard, retrying briefly: contention with another process clears
+/// within milliseconds. The attempt count bounds the wait to about 200 ms.
+fn open_clipboard() -> Result<(), String> {
+    retry_open_clipboard(
+        || unsafe { OpenClipboard(HWND(std::ptr::null_mut())) }.map_err(|e| format!("OpenClipboard failed: {e}")),
+        OPEN_CLIPBOARD_ATTEMPTS,
+        OPEN_CLIPBOARD_RETRY_DELAY,
+    )
+}
+
+fn retry_open_clipboard<F>(mut open: F, attempts: u32, delay: std::time::Duration) -> Result<(), String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    let mut last_error = String::new();
+    for attempt in 0..attempts {
+        match open() {
+            Ok(()) => return Ok(()),
+            Err(e) => last_error = e,
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(delay);
+        }
+    }
+    Err(last_error)
+}
+
+/// Frees a global block that was never handed to the clipboard. Once
+/// `SetClipboardData` succeeds the clipboard owns the block, and freeing it again
+/// would be a double free, so the release runs only on failure.
+fn release_unless_owned<F: FnOnce()>(outcome: Result<(), String>, release: F) -> Result<(), String> {
+    if outcome.is_err() {
+        release();
+    }
+    outcome
+}
 
 pub fn copy_files_to_clipboard(paths: &[PathBuf], _cut: bool) -> Result<(), String> {
     if paths.is_empty() {
@@ -28,30 +69,74 @@ pub fn copy_files_to_clipboard(paths: &[PathBuf], _cut: bool) -> Result<(), Stri
     unsafe {
         let h_global = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, total_bytes)
             .map_err(|e| format!("GlobalAlloc failed: {e}"))?;
-        let ptr = GlobalLock(h_global);
-        if ptr.is_null() {
-            return Err("GlobalLock failed".into());
-        }
-
-        let dropfiles = ptr as *mut DROPFILES;
-        (*dropfiles).pFiles = dropfiles_size as u32;
-        (*dropfiles).fWide = true.into();
-
-        let dest = (ptr as *mut u8).add(dropfiles_size) as *mut u16;
-        std::ptr::copy_nonoverlapping(buffer.as_ptr(), dest, buffer.len());
-
-        let _ = GlobalUnlock(h_global);
-
-        OpenClipboard(HWND(std::ptr::null_mut()))
-            .map_err(|e| format!("OpenClipboard failed: {e}"))?;
-        let _ = EmptyClipboard();
-        if let Err(e) = SetClipboardData(CF_HDROP, windows::Win32::Foundation::HANDLE(h_global.0)) {
-            let _ = CloseClipboard();
-            return Err(format!("SetClipboardData failed: {e}"));
-        }
-        let _ = CloseClipboard();
+        let outcome = publish_hdrop(h_global, dropfiles_size, &buffer);
+        release_unless_owned(outcome, || {
+            let _ = GlobalFree(h_global);
+        })
     }
-    Ok(())
+}
+
+/// Fills a DROPFILES block and hands it to the clipboard. Every failure returns
+/// before the clipboard takes ownership, so the caller frees the block.
+unsafe fn publish_hdrop(h_global: HGLOBAL, dropfiles_size: usize, buffer: &[u16]) -> Result<(), String> {
+    let ptr = GlobalLock(h_global);
+    if ptr.is_null() {
+        return Err("GlobalLock failed".into());
+    }
+
+    let dropfiles = ptr as *mut DROPFILES;
+    (*dropfiles).pFiles = dropfiles_size as u32;
+    (*dropfiles).fWide = true.into();
+
+    let dest = (ptr as *mut u8).add(dropfiles_size) as *mut u16;
+    std::ptr::copy_nonoverlapping(buffer.as_ptr(), dest, buffer.len());
+
+    let _ = GlobalUnlock(h_global);
+
+    open_clipboard()?;
+    let result = EmptyClipboard()
+        .map_err(|e| format!("EmptyClipboard failed: {e}"))
+        .and_then(|_| {
+            SetClipboardData(CF_HDROP, HANDLE(h_global.0))
+                .map(|_| ())
+                .map_err(|e| format!("SetClipboardData failed: {e}"))
+        });
+    let _ = CloseClipboard();
+    result
+}
+
+/// Puts plain Unicode text on the clipboard. Used by the kernel's widget copy
+/// action, which runs in a window that never gets OS focus.
+pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let h_global = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2)
+            .map_err(|e| format!("GlobalAlloc failed: {e}"))?;
+        let outcome = publish_text(h_global, &wide);
+        release_unless_owned(outcome, || {
+            let _ = GlobalFree(h_global);
+        })
+    }
+}
+
+unsafe fn publish_text(h_global: HGLOBAL, wide: &[u16]) -> Result<(), String> {
+    let ptr = GlobalLock(h_global);
+    if ptr.is_null() {
+        return Err("GlobalLock failed".into());
+    }
+    std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
+    let _ = GlobalUnlock(h_global);
+
+    open_clipboard()?;
+    let result = EmptyClipboard()
+        .map_err(|e| format!("EmptyClipboard failed: {e}"))
+        .and_then(|_| {
+            SetClipboardData(CF_UNICODETEXT, HANDLE(h_global.0))
+                .map(|_| ())
+                .map_err(|e| format!("SetClipboardData failed: {e}"))
+        });
+    let _ = CloseClipboard();
+    result
 }
 
 pub fn paste_files_from_clipboard() -> Result<Vec<PathBuf>, String> {
@@ -127,5 +212,68 @@ pub fn clear_clipboard() {
             let _ = EmptyClipboard();
             let _ = CloseClipboard();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_publish_releases_the_memory_block() {
+        let mut freed = 0;
+
+        let outcome = release_unless_owned(Err("SetClipboardData failed".to_string()), || freed += 1);
+
+        assert!(outcome.is_err());
+        assert_eq!(freed, 1);
+    }
+
+    #[test]
+    fn successful_publish_never_frees_the_block_the_clipboard_owns() {
+        let mut freed = 0;
+
+        let outcome = release_unless_owned(Ok(()), || freed += 1);
+
+        assert!(outcome.is_ok());
+        assert_eq!(freed, 0, "freeing after SetClipboardData succeeds is a double free");
+    }
+
+    #[test]
+    fn open_retries_while_another_process_holds_the_clipboard() {
+        let mut calls = 0;
+
+        let outcome = retry_open_clipboard(
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err("busy".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            5,
+            std::time::Duration::ZERO,
+        );
+
+        assert!(outcome.is_ok());
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn open_gives_up_after_a_bounded_number_of_attempts() {
+        let mut calls = 0;
+
+        let outcome: Result<(), String> = retry_open_clipboard(
+            || {
+                calls += 1;
+                Err("busy".to_string())
+            },
+            4,
+            std::time::Duration::ZERO,
+        );
+
+        assert!(outcome.is_err());
+        assert_eq!(calls, 4);
     }
 }

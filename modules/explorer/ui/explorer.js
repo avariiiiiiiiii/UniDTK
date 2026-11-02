@@ -13,6 +13,16 @@ const APPEAR_LIMIT = 24;
 const RENDER_FIRST = 48;
 const RENDER_CHUNK = 48;
 
+// File names are untrusted text: they must never be parsed as markup.
+function escapeHtml(text) {
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 class NothingExplorer {
     constructor() {
         this.tabManager = new TabManager(this);
@@ -253,6 +263,23 @@ class NothingExplorer {
         }
     }
 
+    /**
+     * Starts a navigation in `tab` and returns its token. The token is per tab, so a
+     * newer navigation in the same tab makes older ones stale.
+     */
+    _beginNavigation(tab) {
+        tab._navToken = (tab._navToken || 0) + 1;
+        return tab._navToken;
+    }
+
+    /**
+     * A pending navigation may write state or render only while its tab is still the
+     * active tab and no newer navigation has started in that tab.
+     */
+    _isNavigationCurrent(tab, navToken) {
+        return !!tab && tab._navToken === navToken && this.tabManager.getActiveTab() === tab;
+    }
+
     async navigateTo(path, originEl = null, transitionType = null) {
         if (typeof path === 'string') {
             const trimmed = path.trim();
@@ -278,15 +305,14 @@ class NothingExplorer {
             originRect = originEl;
         }
 
-        const navToken = (this._navToken || 0) + 1;
-        this._navToken = navToken;
+        const navToken = this._beginNavigation(tab);
 
         const fileArea = document.getElementById('fileArea');
         const pathChanged = fileArea && tab.path && tab.path !== path;
 
         if (path === '::MY_PC::') {
             tab.path = path;
-            tab.title = 'This PC';
+            tab.title = 'Этот компьютер';
             tab.history.push(path);
             tab.historyIndex = tab.history.length - 1;
             tab.items = [];
@@ -299,11 +325,11 @@ class NothingExplorer {
 
             if (fileArea && originRect && pathChanged) {
                 this.morphToThisPc(originRect, () => {
-                    this.renderMyPc();
+                    if (this._isNavigationCurrent(tab, navToken)) this.renderMyPc();
                 }, originRadius);
             } else if (fileArea && pathChanged) {
                 this.playTabTransition(transitionType || 'up', () => {
-                    this.renderMyPc();
+                    if (this._isNavigationCurrent(tab, navToken)) this.renderMyPc();
                 });
             } else {
                 this.renderMyPc();
@@ -316,7 +342,7 @@ class NothingExplorer {
 
         try {
             const items = await this.scanDirectory(path);
-            if (this._navToken !== navToken) return;
+            if (!this._isNavigationCurrent(tab, navToken)) return;
             const filtered = items.filter(i => String(i?.name || '').toLowerCase() !== 'desktop.ini');
             tab.path = path;
             tab.title = this.tabManager.getFolderName(path);
@@ -338,13 +364,13 @@ class NothingExplorer {
             if (fileArea && originRect && pathChanged) {
                 // True surface morph: blooms out of clicked folder element over the old files
                 this.morphToDirectory(sorted, originRect, () => {
-                    if (this._navToken === navToken) {
+                    if (this._isNavigationCurrent(tab, navToken)) {
                         this.renderFiles(sorted);
                     }
                 }, originRadius);
             } else if (fileArea && pathChanged) {
                 this.playTabTransition(transitionType || 'fade', () => {
-                    if (this._navToken === navToken) {
+                    if (this._isNavigationCurrent(tab, navToken)) {
                         this.renderFiles(sorted);
                     }
                 });
@@ -353,7 +379,9 @@ class NothingExplorer {
             }
         } catch (e) {
             console.error('Navigation error:', e);
-            this.showEmpty(true, String(e?.message || e || 'Cannot access this location'));
+            if (this._isNavigationCurrent(tab, navToken)) {
+                this.showEmpty(true, String(e?.message || e || 'Нет доступа к этому расположению'));
+            }
         } finally {
             this.showLoading(false);
         }
@@ -399,7 +427,7 @@ class NothingExplorer {
                             <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
                         </svg>
                     </div>
-                    <div class="empty-text">This folder is empty</div>
+                    <div class="empty-text">Папка пуста</div>
                 </div>
             `;
         } else if (this.currentView === 'grid') {
@@ -412,10 +440,10 @@ class NothingExplorer {
             list.className = 'file-list';
             list.innerHTML = `
                 <div class="file-header">
-                    <div class="col-name"><span>Name</span></div>
-                    <div class="col-size"><span>Size</span></div>
-                    <div class="col-type"><span>Type</span></div>
-                    <div class="col-modified"><span>Modified</span></div>
+                    <div class="col-name"><span>Имя</span></div>
+                    <div class="col-size"><span>Размер</span></div>
+                    <div class="col-type"><span>Тип</span></div>
+                    <div class="col-modified"><span>Изменён</span></div>
                 </div>
                 <div class="file-list-body"></div>
             `;
@@ -528,10 +556,10 @@ class NothingExplorer {
             list.className = 'file-list';
             list.innerHTML = `
                 <div class="file-header">
-                    <div class="col-name"><span>Name</span></div>
-                    <div class="col-size"><span>Size</span></div>
-                    <div class="col-type"><span>Type</span></div>
-                    <div class="col-modified"><span>Modified</span></div>
+                    <div class="col-name"><span>Имя</span></div>
+                    <div class="col-size"><span>Размер</span></div>
+                    <div class="col-type"><span>Тип</span></div>
+                    <div class="col-modified"><span>Изменён</span></div>
                 </div>
                 <div class="file-list-body"></div>
             `;
@@ -876,7 +904,7 @@ class NothingExplorer {
             if (fileList) fileList.classList.add('hidden');
             emptyState.classList.remove('hidden');
             const txt = emptyState.querySelector('.empty-text');
-            if (txt) txt.textContent = 'No drives or places found';
+            if (txt) txt.textContent = 'Диски и места не найдены';
             return;
         }
 
@@ -896,8 +924,8 @@ class NothingExplorer {
     renderMyPcGrid(container) {
         container.innerHTML = '';
         const sections = [
-            { title: 'Favorites', items: this.getFavoritesItems() },
-            { title: 'Drives', items: this.getDrivesItems() }
+            { title: 'Избранное', items: this.getFavoritesItems() },
+            { title: 'Диски', items: this.getDrivesItems() }
         ];
 
         sections.forEach((section, si) => {
@@ -929,7 +957,7 @@ class NothingExplorer {
                     </div>
                     <div class="file-name" aria-label="${item.name}">${item.name}</div>
                     ${freeSpace ? `<div class="file-size">${freeSpace} free</div>
-                    <div class="drive-bar" aria-label="${freeSpace} free of ${totalSpace}"><span style="width:${item.total_space ? Math.max(4, Math.round(100 * (1 - (item.free_space || 0) / item.total_space))) : 0}%"></span></div>` : ''}
+                    <div class="drive-bar" aria-label="${freeSpace} свободно из ${totalSpace}"><span style="width:${item.total_space ? Math.max(4, Math.round(100 * (1 - (item.free_space || 0) / item.total_space))) : 0}%"></span></div>` : ''}
                 `;
 
                 el.addEventListener('click', (e) => this.selectFile({ ...item, is_dir: true }, e));
@@ -951,8 +979,8 @@ class NothingExplorer {
     renderMyPcList(container) {
         container.innerHTML = '';
         const sections = [
-            { title: 'Favorites', items: this.getFavoritesItems() },
-            { title: 'Drives', items: this.getDrivesItems() }
+            { title: 'Избранное', items: this.getFavoritesItems() },
+            { title: 'Диски', items: this.getDrivesItems() }
         ];
 
         sections.forEach((section, si) => {
@@ -970,8 +998,8 @@ class NothingExplorer {
                     ? (item.icon.includes('/') ? explorerAsset(item.icon) : explorerAsset('icons/ui/' + item.icon))
                     : this.fileIconSrc(item);
 
-                const size = item.free_space && item.total_space ? `${this.formatSize(item.free_space)} free of ${this.formatSize(item.total_space)}` : '—';
-                const type = item.type || (item.total_space ? 'Local Drive' : 'Folder');
+                const size = item.free_space && item.total_space ? `${this.formatSize(item.free_space)} свободно из ${this.formatSize(item.total_space)}` : '—';
+                const type = item.type || (item.total_space ? 'Локальный диск' : 'Папка');
 
                 row.innerHTML = `
                     <div class="col-name">
@@ -1015,7 +1043,7 @@ class NothingExplorer {
                         name: p.name,
                         path: p.path,
                         icon: this.getFolderIcon({ name: p.name, path: p.path }),
-                        type: 'Folder',
+                        type: 'Папка',
                     }));
                 return this._favorites;
             }
@@ -1046,7 +1074,7 @@ class NothingExplorer {
             if (fileList) fileList.classList.add('hidden');
             emptyState.classList.remove('hidden');
             const txt = emptyState.querySelector('.empty-text');
-            if (txt) txt.textContent = 'This folder is empty';
+            if (txt) txt.textContent = 'Папка пуста';
             return;
         }
 
@@ -1201,7 +1229,7 @@ class NothingExplorer {
             this._appearStyle(row, i, 10, 100);
 
             const size = item.is_dir ? '—' : this.formatSize(item.file_size || 0);
-            const type = item.is_dir ? 'Folder' : this.getFileTypeName(item.path);
+            const type = item.is_dir ? 'Папка' : this.getFileTypeName(item.path);
             const date = item.modified_time || '—';
 
             row.innerHTML = `
@@ -1335,11 +1363,11 @@ class NothingExplorer {
             this.previewPanel.showFile(singleItem);
         } else if (this.selectedFiles.size > 1) {
             this.previewPanel.showFile({
-                name: `${this.selectedFiles.size} items selected`,
+                name: `Выбрано: ${this.selectedFiles.size}`,
                 is_dir: true,
                 isDir: true,
                 path: '',
-                size_formatted: `${this.selectedFiles.size} files`
+                size_formatted: `${this.selectedFiles.size} шт.`
             });
         } else {
             this.previewPanel.clear();
@@ -1367,11 +1395,11 @@ class NothingExplorer {
             this.previewPanel.showFile(items[0]);
         } else if (this.selectedFiles.size > 1) {
             this.previewPanel.showFile({
-                name: `${this.selectedFiles.size} items selected`,
+                name: `Выбрано: ${this.selectedFiles.size}`,
                 is_dir: true,
                 isDir: true,
                 path: '',
-                size_formatted: `${this.selectedFiles.size} files`
+                size_formatted: `${this.selectedFiles.size} шт.`
             });
         }
     }
@@ -1423,7 +1451,7 @@ class NothingExplorer {
         if (path === '::MY_PC::') {
             const span = document.createElement('span');
             span.className = 'path-segment active';
-            span.textContent = 'This PC';
+            span.textContent = 'Этот компьютер';
             pathBar.appendChild(span);
             return;
         }
@@ -1469,10 +1497,10 @@ class NothingExplorer {
         const dirs = items.filter(i => i.is_dir).length;
         const files = items.length - dirs;
         let text = '';
-        if (dirs > 0) text += `${dirs} folder${dirs !== 1 ? 's' : ''}`;
+        if (dirs > 0) text += `Папок: ${dirs}`;
         if (dirs > 0 && files > 0) text += ', ';
-        if (files > 0) text += `${files} file${files !== 1 ? 's' : ''}`;
-        if (items.length === 0) text = 'Empty folder';
+        if (files > 0) text += `Файлов: ${files}`;
+        if (items.length === 0) text = 'Папка пуста';
         document.getElementById('statusItems').textContent = text;
 
         const free = document.getElementById('statusFree');
@@ -1493,6 +1521,31 @@ class NothingExplorer {
         } else {
             document.getElementById('loadingOverlay')?.classList.add('hidden');
         }
+    }
+
+    /** User-facing text for a failed file operation. A name clash arrives as "already exists". */
+    _describeFileError(error) {
+        const text = String(error?.message || error || '');
+        if (text.includes('already exists')) return 'элемент с таким именем уже существует';
+        return text;
+    }
+
+    /** Shows a failed file operation in the status bar for a few seconds. */
+    showOperationError(title, detail) {
+        const hint = document.getElementById('statusHint');
+        if (!hint) return;
+        if (!this._operationErrorTimer) {
+            this._statusHintOriginal = hint.textContent;
+        } else {
+            clearTimeout(this._operationErrorTimer);
+        }
+        hint.textContent = detail ? `${title}: ${detail}` : title;
+        hint.style.color = 'rgba(var(--fg-rgb), 0.9)';
+        this._operationErrorTimer = setTimeout(() => {
+            this._operationErrorTimer = null;
+            hint.textContent = this._statusHintOriginal;
+            hint.style.color = '';
+        }, 4000);
     }
 
     showEmpty(show, text) {
@@ -1554,7 +1607,7 @@ class NothingExplorer {
         // Always-present roots
         container.appendChild(
             this.sidebarItemEl({
-                name: 'This PC',
+                name: 'Этот компьютер',
                 path: '::MY_PC::',
                 icon: 'drive.svg',
                 active: true,
@@ -1605,7 +1658,7 @@ class NothingExplorer {
                 name: d.display,
                 path: d.path,
                 icon: 'drive.svg',
-                type: d.is_removable ? 'Removable Drive' : 'Local Drive',
+                type: d.is_removable ? 'Съёмный диск' : 'Локальный диск',
                 free_space: d.free_space,
                 total_space: d.total_space,
             }));
@@ -1804,7 +1857,7 @@ class NothingExplorer {
         const statusHint = document.getElementById('statusHint');
         if (statusHint) {
             const origText = statusHint.textContent;
-            statusHint.textContent = 'Path copied to clipboard';
+            statusHint.textContent = 'Путь скопирован в буфер обмена';
             statusHint.style.color = 'rgba(var(--fg-rgb), 0.9)';
             // Guard against overlapping calls clobbering the hint mid-timeout.
             if (this._statusHintTimer) clearTimeout(this._statusHintTimer);
@@ -1953,7 +2006,7 @@ class NothingExplorer {
         searchInput?.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 searchInput.value = '';
-                document.getElementById('searchResults')?.classList.add('hidden');
+                this.closeSearch();
             }
         });
 
@@ -2193,14 +2246,16 @@ class NothingExplorer {
             path = path.trim() + '\\';
         }
         const fileArea = document.getElementById('fileArea');
+        // Taken before any await: navigations still pending in this tab become stale.
+        const tab = this.tabManager.getActiveTab();
+        const navToken = tab ? this._beginNavigation(tab) : 0;
         if (path === '::MY_PC::') {
-            const tab = this.tabManager.getActiveTab();
             if (tab) {
                 tab.path = path;
                 tab.items = [];
                 if (fileArea && transitionType) {
                     this.playTabTransition(transitionType, () => {
-                        this.renderMyPc();
+                        if (this._isNavigationCurrent(tab, navToken)) this.renderMyPc();
                     }, origin);
                 } else {
                     this.renderMyPc();
@@ -2212,7 +2267,6 @@ class NothingExplorer {
             return;
         }
 
-        const tab = this.tabManager.getActiveTab();
         // Fast path: if tab already has cached items, transition immediately!
         if (tab && Array.isArray(tab.items) && tab.items.length > 0 && tab.path === path) {
             if (tab._sortCol !== this.sortColumn || tab._sortAsc !== this.sortAscending) {
@@ -2235,15 +2289,13 @@ class NothingExplorer {
             this.updateStatusBar(tab.items);
             // Revalidate in background without blocking UI or showing loader
             this.scanDirectory(path).then(items => {
-                const currentTab = this.tabManager.getActiveTab();
-                if (currentTab && currentTab.path === path) {
-                    const filtered = items.filter(i => String(i?.name || '').toLowerCase() !== 'desktop.ini');
-                    currentTab.items = this.sortItems(filtered, this.sortColumn, this.sortAscending);
-                    currentTab._sortCol = this.sortColumn;
-                    currentTab._sortAsc = this.sortAscending;
-                    this.renderFiles(currentTab.items);
-                    this.updateStatusBar(currentTab.items);
-                }
+                if (!this._isNavigationCurrent(tab, navToken) || tab.path !== path) return;
+                const filtered = items.filter(i => String(i?.name || '').toLowerCase() !== 'desktop.ini');
+                tab.items = this.sortItems(filtered, this.sortColumn, this.sortAscending);
+                tab._sortCol = this.sortColumn;
+                tab._sortAsc = this.sortAscending;
+                this.renderFiles(tab.items);
+                this.updateStatusBar(tab.items);
             }).catch(() => {});
             return;
         }
@@ -2251,26 +2303,26 @@ class NothingExplorer {
         this.showLoading(true);
         try {
             const items = await this.scanDirectory(path);
-            const activeTab = this.tabManager.getActiveTab();
-            if (activeTab) {
+            if (this._isNavigationCurrent(tab, navToken)) {
                 const filtered = items.filter(i => String(i?.name || '').toLowerCase() !== 'desktop.ini');
-                activeTab.path = path;
-                activeTab.items = this.sortItems(filtered, this.sortColumn, this.sortAscending);
-                activeTab._sortCol = this.sortColumn;
-                activeTab._sortAsc = this.sortAscending;
+                tab.path = path;
+                tab.items = this.sortItems(filtered, this.sortColumn, this.sortAscending);
+                tab._sortCol = this.sortColumn;
+                tab._sortAsc = this.sortAscending;
                 this.updateSortHeader();
                 if (fileArea && transitionType) {
                     this.playTabTransition(transitionType, () => {
-                        this.renderFiles(activeTab.items);
-                        if (fileArea && typeof activeTab.scrollTop === 'number') fileArea.scrollTop = activeTab.scrollTop;
+                        if (!this._isNavigationCurrent(tab, navToken)) return;
+                        this.renderFiles(tab.items);
+                        if (fileArea && typeof tab.scrollTop === 'number') fileArea.scrollTop = tab.scrollTop;
                     }, origin);
                 } else {
-                    this.renderFiles(activeTab.items);
-                    if (fileArea && typeof activeTab.scrollTop === 'number') fileArea.scrollTop = activeTab.scrollTop;
+                    this.renderFiles(tab.items);
+                    if (fileArea && typeof tab.scrollTop === 'number') fileArea.scrollTop = tab.scrollTop;
                 }
                 this.updatePathBar(path);
                 this.updateNavButtons();
-                this.updateStatusBar(activeTab.items);
+                this.updateStatusBar(tab.items);
             }
         } catch (e) {
             console.error('Navigation error:', e);
@@ -2282,7 +2334,7 @@ class NothingExplorer {
     async handleSearch(query) {
         const container = document.getElementById('searchResults');
         if (!query || query.length < 2) {
-            container.classList.add('hidden');
+            this.closeSearch();
             return;
         }
 
@@ -2292,6 +2344,14 @@ class NothingExplorer {
         container.classList.remove('hidden');
 
         try {
+            // The index covers the folder search was opened in. Rebuilt when the folder changes;
+            // released by closeSearch().
+            const tab = this.tabManager.getActiveTab();
+            if (tab && tab.path !== '::MY_PC::' && this._searchRoot !== tab.path) {
+                this._searchRoot = tab.path;
+                await invoke('build_search_index', { root: tab.path });
+                if (this._searchToken !== searchToken) return;
+            }
             const results = await this.searchFiles(query);
             if (this._searchToken !== searchToken) return;
             this.renderSearchResults(results);
@@ -2300,15 +2360,26 @@ class NothingExplorer {
         }
     }
 
+    /** Hides the results and releases the search index. A new query rebuilds it. */
+    closeSearch() {
+        // Invalidates any query still in flight, so it cannot reopen the results.
+        this._searchToken = (this._searchToken || 0) + 1;
+        document.getElementById('searchResults')?.classList.add('hidden');
+        if (this._searchRoot) {
+            this._searchRoot = null;
+            invoke('clear_search_index').catch(() => {});
+        }
+    }
+
     renderSearchResults(results) {
         const container = document.getElementById('searchResults');
         if (results.length === 0) {
-            container.innerHTML = '<div class="search-no-results">No results found</div>';
+            container.innerHTML = '<div class="search-no-results">Ничего не найдено</div>';
         } else {
             container.innerHTML = results.slice(0, 30).map(r => `
-                <div class="search-result-item" data-path="${r.path}">
-                    <span class="search-result-name">${r.name}</span>
-                    <span class="search-result-path">${r.path}</span>
+                <div class="search-result-item" data-path="${escapeHtml(r.path)}">
+                    <span class="search-result-name">${escapeHtml(r.name)}</span>
+                    <span class="search-result-path">${escapeHtml(r.path)}</span>
                 </div>
             `).join('');
 
@@ -2324,8 +2395,8 @@ class NothingExplorer {
                     if (parentPath) {
                         this.navigateTo(parentPath);
                     }
-                    container.classList.add('hidden');
                     document.getElementById('searchInput').value = '';
+                    this.closeSearch();
                 });
             });
         }
@@ -2406,6 +2477,7 @@ class NothingExplorer {
                     this.refreshCurrent();
                 } catch (e) {
                     console.error('Rename error:', e);
+                    this.showOperationError('Не удалось переименовать', this._describeFileError(e));
                 }
             }
         };
@@ -2470,6 +2542,7 @@ class NothingExplorer {
         const tab = this.tabManager.getActiveTab();
         if (!tab) return;
 
+        const failures = [];
         for (const src of this.clipboard.files) {
             const name = src.split(/[\\/]/).pop();
             const cleanParent = tab.path.replace(/\\+$/, '');
@@ -2487,6 +2560,7 @@ class NothingExplorer {
                 }
             } catch (e) {
                 console.error('Paste error:', e);
+                failures.push(`${name}: ${this._describeFileError(e)}`);
             }
         }
 
@@ -2494,6 +2568,9 @@ class NothingExplorer {
             this.clipboard = { files: [], cut: false };
         }
 
+        if (failures.length > 0) {
+            this.showOperationError('Не удалось вставить', failures.join('; '));
+        }
         this.refreshCurrent();
     }
 

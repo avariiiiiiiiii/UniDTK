@@ -148,12 +148,133 @@ pub fn create_empty_file(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `FILE_ATTRIBUTE_REPARSE_POINT`: symlinks, junctions and mount points.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// True for symlinks and junctions. `Metadata::is_symlink` reports false for
+/// junctions, so the reparse attribute is the only reliable test on Windows.
+#[cfg(windows)]
+pub fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+pub fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Renaming onto an existing path would silently replace it, so the destination
+/// must be free. The one exception is a case-only rename of a file onto itself
+/// (`report.txt` -> `Report.txt`): both names resolve to the same volume and file
+/// index, so the rename changes only the stored case.
+fn check_rename_destination(from: &Path, to: &Path) -> Result<(), String> {
+    if !destination_exists(to) {
+        return Ok(());
+    }
+    if is_case_only_rename(from, to) {
+        return Ok(());
+    }
+    Err(format!("destination already exists: {}", to.display()))
+}
+
+fn destination_exists(to: &Path) -> bool {
+    // symlink_metadata also sees dangling links, which a plain exists() misses.
+    std::fs::symlink_metadata(to).is_ok()
+}
+
+fn is_case_only_rename(from: &Path, to: &Path) -> bool {
+    let (Some(from_name), Some(to_name)) = (from.file_name(), to.file_name()) else {
+        return false;
+    };
+    if from.parent() != to.parent() || !from_name.to_string_lossy().eq_ignore_ascii_case(&to_name.to_string_lossy()) {
+        return false;
+    }
+    same_file(from, to).unwrap_or(false)
+}
+
+/// Two paths name the same file when they report the same volume serial and file index.
+#[cfg(windows)]
+fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
+    let (id_a, id_b) = (file_identity(a)?, file_identity(b)?);
+    Ok(id_a == id_b)
+}
+
+/// Volume serial and 64-bit file index. Rust's own getters are still unstable.
+#[cfg(windows)]
+fn file_identity(path: &Path) -> std::io::Result<(u32, u32, u32)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+    };
+    // Access 0 reads metadata only; the flag is what lets a directory open.
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle() as _), &mut info) }
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+}
+
+#[cfg(not(windows))]
+fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
+    Ok(a == b)
+}
+
 pub fn rename_path(from: &str, to: &str) -> Result<(), String> {
+    let (from, to) = (Path::new(from), Path::new(to));
+    check_rename_destination(from, to)?;
     std::fs::rename(from, to).map_err(|e| format!("rename: {e}"))
 }
 
 pub fn copy_path(from: &str, to: &str) -> Result<(), String> {
-    copy_recursive(Path::new(from), Path::new(to))
+    let (from, to) = (Path::new(from), Path::new(to));
+    // A junction or symlink at the top level is refused outright: silently
+    // copying nothing would look like success.
+    let source_meta = std::fs::symlink_metadata(from).map_err(|e| format!("copy source: {e}"))?;
+    if is_reparse_point(&source_meta) {
+        return Err(format!("cannot copy a link or junction: {}", from.display()));
+    }
+    if from.is_dir() {
+        ensure_not_into_itself(from, to)?;
+    }
+    copy_recursive(from, to)
+}
+
+/// A folder cannot be copied into its own subtree: the walk would keep finding the
+/// copies it is writing. The destination may not exist yet, so the longest existing
+/// ancestor is canonicalized and the missing tail is appended.
+fn ensure_not_into_itself(from: &Path, to: &Path) -> Result<(), String> {
+    let source = from.canonicalize().map_err(|e| format!("copy source: {e}"))?;
+    let destination = canonicalize_for_create(to).map_err(|e| format!("copy destination: {e}"))?;
+    if destination.starts_with(&source) {
+        return Err(format!("cannot copy a folder into itself: {}", from.display()));
+    }
+    Ok(())
+}
+
+fn canonicalize_for_create(path: &Path) -> std::io::Result<PathBuf> {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    while std::fs::symlink_metadata(existing).is_err() {
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                existing = parent;
+            }
+            _ => break,
+        }
+    }
+    let mut resolved = existing.canonicalize()?;
+    for name in missing.iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
 }
 
 fn copy_recursive(from: &Path, to: &Path) -> Result<(), String> {
@@ -161,10 +282,20 @@ fn copy_recursive(from: &Path, to: &Path) -> Result<(), String> {
         std::fs::create_dir_all(to).map_err(|e| format!("copy mkdir: {e}"))?;
         for entry in std::fs::read_dir(from).map_err(|e| format!("copy read_dir: {e}"))? {
             let entry = entry.map_err(|e| format!("copy entry: {e}"))?;
-            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+            let child = entry.path();
+            // Links are skipped: following a junction can loop back into the tree
+            // being copied, or pull in data from outside the selection.
+            let child_meta = std::fs::symlink_metadata(&child).map_err(|e| format!("copy entry: {e}"))?;
+            if is_reparse_point(&child_meta) {
+                continue;
+            }
+            copy_recursive(&child, &to.join(entry.file_name()))?;
         }
         Ok(())
     } else {
+        if destination_exists(to) {
+            return Err(format!("destination already exists: {}", to.display()));
+        }
         if let Some(parent) = to.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("copy parent: {e}"))?;
@@ -230,4 +361,130 @@ pub fn unique_path(dir: &str, name: &str) -> PathBuf {
         }
     }
     candidate
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Scratch directory under the system temp dir, removed on drop (also on panic).
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("unidtk-files-{name}-{}-{nanos}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn path_str(path: &Path) -> &str {
+        path.to_str().unwrap()
+    }
+
+    #[test]
+    fn rename_refuses_to_overwrite_an_existing_file() {
+        let root = Scratch::new("rename-clash");
+        let from = root.0.join("a.txt");
+        let to = root.0.join("b.txt");
+        std::fs::write(&from, "source").unwrap();
+        std::fs::write(&to, "keep me").unwrap();
+
+        let result = rename_path(path_str(&from), path_str(&to));
+
+        assert!(result.is_err(), "rename over an existing file must fail");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "keep me");
+        assert!(from.exists());
+    }
+
+    #[test]
+    fn rename_allows_a_case_only_change_on_the_same_file() {
+        let root = Scratch::new("rename-case");
+        let from = root.0.join("report.txt");
+        let to = root.0.join("Report.txt");
+        std::fs::write(&from, "data").unwrap();
+
+        rename_path(path_str(&from), path_str(&to)).expect("case-only rename must work");
+
+        let names: Vec<String> = std::fs::read_dir(&root.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["Report.txt".to_string()]);
+    }
+
+    #[test]
+    fn copy_refuses_to_overwrite_an_existing_file() {
+        let root = Scratch::new("copy-clash");
+        let from = root.0.join("a.txt");
+        let to = root.0.join("b.txt");
+        std::fs::write(&from, "source").unwrap();
+        std::fs::write(&to, "keep me").unwrap();
+
+        let result = copy_path(path_str(&from), path_str(&to));
+
+        assert!(result.is_err(), "copy over an existing file must fail");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "keep me");
+    }
+
+    #[test]
+    fn copy_refuses_a_folder_into_its_own_subtree() {
+        let root = Scratch::new("copy-subtree");
+        let src = root.0.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub").join("f.txt"), "x").unwrap();
+
+        let result = copy_path(path_str(&src), path_str(&src.join("sub").join("copy")));
+
+        assert!(result.is_err(), "copying a folder into itself must fail");
+        assert!(!src.join("sub").join("copy").exists());
+    }
+
+    #[test]
+    fn copy_creates_missing_parent_folders_for_the_destination() {
+        let root = Scratch::new("copy-nested");
+        let src = root.0.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("f.txt"), "x").unwrap();
+        let dest = root.0.join("new").join("deeper").join("dst");
+
+        copy_path(path_str(&src), path_str(&dest)).expect("copy into a new nested folder must work");
+
+        assert_eq!(std::fs::read_to_string(dest.join("f.txt")).unwrap(), "x");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_skips_junctions_instead_of_following_them() {
+        let root = Scratch::new("copy-junction");
+        let src = root.0.join("src");
+        let outside = root.0.join("outside");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(src.join("real.txt"), "real").unwrap();
+        std::fs::write(outside.join("secret.txt"), "outside").unwrap();
+        let junction = src.join("link");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", path_str(&junction), path_str(&outside)])
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J must create the junction");
+
+        let dest = root.0.join("dst");
+        copy_path(path_str(&src), path_str(&dest)).unwrap();
+
+        assert!(dest.join("real.txt").exists());
+        assert!(!dest.join("link").exists(), "junction must not be copied");
+        std::fs::remove_dir(&junction).unwrap();
+    }
 }

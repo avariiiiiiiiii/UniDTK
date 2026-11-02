@@ -57,7 +57,7 @@ export class TabManager {
             const tab = {
                 id: this.tabCounter,
                 path: String(path),
-                title: title || (String(path) === '::MY_PC::' ? 'This PC' : this.getFolderName(String(path))),
+                title: title || (String(path) === '::MY_PC::' ? 'Этот компьютер' : this.getFolderName(String(path))),
                 history: [String(path)],
                 historyIndex: 0,
                 items: [],
@@ -93,7 +93,7 @@ export class TabManager {
         const tab = {
             id: this.tabCounter,
             path: target,
-            title: target === '::MY_PC::' ? 'This PC' : this.getFolderName(target),
+            title: target === '::MY_PC::' ? 'Этот компьютер' : this.getFolderName(target),
             history: [target],
             historyIndex: 0,
             items: [],
@@ -182,7 +182,7 @@ export class TabManager {
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                 </svg>
                 <span class="tab-title" aria-label="${tab.path}">${tab.title}</span>
-                <button class="tab-close" aria-label="Close tab">
+                <button class="tab-close" aria-label="Закрыть вкладку">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                     </svg>
@@ -233,15 +233,18 @@ export class TabManager {
 
     async showThisPC(transitionType = null, origin = null) {
         const tab = this.getActiveTab();
+        const navToken = tab ? this.explorer._beginNavigation(tab) : 0;
         if (tab) {
             tab.path = '::MY_PC::';
             tab.items = [];
         }
         await this.explorer.getDrives().catch(() => {});
+        // The drive list is awaited: render only if this tab is still the active one.
+        if (tab && !this.explorer._isNavigationCurrent(tab, navToken)) return;
         const fileArea = document.getElementById('fileArea');
         if (fileArea && transitionType && typeof this.explorer.playTabTransition === 'function') {
             this.explorer.playTabTransition(transitionType, () => {
-                this.explorer.renderMyPc();
+                if (!tab || this.explorer._isNavigationCurrent(tab, navToken)) this.explorer.renderMyPc();
             }, origin);
         } else {
             this.explorer.renderMyPc();
@@ -256,7 +259,7 @@ export class TabManager {
     }
 
     getFolderName(path) {
-        if (path === '::MY_PC::') return 'This PC';
+        if (path === '::MY_PC::') return 'Этот компьютер';
         const parts = path.split(/[\\/]/).filter(Boolean);
         if (parts.length === 1 && /^[A-Za-z]:$/.test(parts[0])) {
             return `${parts[0]}\\`;

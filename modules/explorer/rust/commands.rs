@@ -285,17 +285,16 @@ pub fn search_files(
     search: &SharedSearch,
     query: String,
 ) -> Vec<crate::search::SearchResult> {
-    let engine = search.lock().unwrap();
-    engine.search(&query)
+    let mut engine = search.lock().unwrap();
+    engine.search_checked(&query)
 }
 
-pub fn add_to_search_index(
-    search: &SharedSearch,
-    path: String,
-    is_dir: bool,
-) {
+/// Replaces the index with the tree under `root`. The UI calls this when search
+/// opens for a folder, so the index only ever covers one folder at a time.
+pub fn build_search_index(search: &SharedSearch, root: String) {
     let mut engine = search.lock().unwrap();
-    engine.add_path(&path, is_dir, None, None);
+    engine.clear();
+    engine.index_tree(Path::new(&root), crate::search::SEARCH_MAX_DEPTH);
 }
 
 pub fn remove_from_search_index(search: &SharedSearch, path: String) {

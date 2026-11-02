@@ -136,14 +136,16 @@ pub fn calculate_folder_size(path: &Path) -> u64 {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 count += 1;
-                if let Ok(ft) = entry.file_type() {
-                    if ft.is_dir() && !ft.is_symlink() {
-                        stack.push((entry.path(), depth + 1));
-                    } else if ft.is_file() {
-                        if let Ok(meta) = entry.metadata() {
-                            total += meta.len();
-                        }
-                    }
+                // Junctions report as plain directories, so only the reparse attribute
+                // keeps the walk out of them.
+                let Ok(meta) = entry.metadata() else { continue };
+                if crate::files::is_reparse_point(&meta) {
+                    continue;
+                }
+                if meta.is_dir() {
+                    stack.push((entry.path(), depth + 1));
+                } else if meta.is_file() {
+                    total += meta.len();
                 }
             }
         }
@@ -233,6 +235,34 @@ mod tests {
         assert_eq!(normalize_dir_path("C:\\"), PathBuf::from("C:\\"));
         assert_eq!(normalize_dir_path("C:\\Users"), PathBuf::from("C:\\Users"));
         assert_eq!(normalize_dir_path(""), PathBuf::from(""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn folder_size_does_not_count_junction_targets() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("unidtk-fs-size-{}-{nanos}", std::process::id()));
+        let src = root.join("src");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(src.join("own.bin"), [0u8; 10]).unwrap();
+        std::fs::write(outside.join("big.bin"), [0u8; 5000]).unwrap();
+        let junction = src.join("link");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", junction.to_str().unwrap(), outside.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J must create the junction");
+
+        let size = calculate_folder_size(&src);
+        std::fs::remove_dir(&junction).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(size, 10, "only the folder's own bytes count");
     }
 }
 

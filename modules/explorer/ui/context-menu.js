@@ -119,34 +119,34 @@ export class ContextMenu {
                     <div class="cm-row">
                         <div class="cm-item" data-action="open">
                             <img src="${explorerAsset('icons/ui/cm-open.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Open</span>
+                            <span class="cm-label">Открыть</span>
                         </div>
                         <div class="cm-item" data-action="open-terminal">
                             <img src="${explorerAsset('icons/ui/cm-terminal.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Terminal</span>
+                            <span class="cm-label">Терминал</span>
                         </div>
                         <div class="cm-item" data-action="copy-path">
                             <img src="${explorerAsset('icons/ui/cm-copy-path.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Copy Path</span>
+                            <span class="cm-label">Копировать путь</span>
                         </div>
                     </div>
                     <div class="cm-separator"></div>
                     <div class="cm-row">
                         <div class="cm-item" data-action="copy">
                             <img src="${explorerAsset('icons/ui/cm-copy.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Copy</span>
+                            <span class="cm-label">Копировать</span>
                         </div>
                         <div class="cm-item" data-action="cut">
                             <img src="${explorerAsset('icons/ui/cm-cut.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Cut</span>
+                            <span class="cm-label">Вырезать</span>
                         </div>
                         <div class="cm-item" data-action="delete">
                             <img src="${explorerAsset('icons/ui/cm-delete.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Delete</span>
+                            <span class="cm-label">Удалить</span>
                         </div>
                         <div class="cm-item" data-action="rename">
                             <img src="${explorerAsset('icons/ui/cm-rename.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Rename</span>
+                            <span class="cm-label">Переименовать</span>
                         </div>
                     </div>
                 `;
@@ -155,41 +155,41 @@ export class ContextMenu {
                     <div class="cm-row">
                         <div class="cm-item" data-action="open">
                             <img src="${explorerAsset('icons/ui/cm-open.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Open</span>
+                            <span class="cm-label">Открыть</span>
                         </div>
                         <div class="cm-item" data-action="open-with">
                             <img src="${explorerAsset('icons/ui/cm-open-with.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Open with</span>
+                            <span class="cm-label">Открыть с помощью</span>
                         </div>
                         <div class="cm-item" data-action="copy-path">
                             <img src="${explorerAsset('icons/ui/cm-copy-path.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Copy Path</span>
+                            <span class="cm-label">Копировать путь</span>
                         </div>
                     </div>
                     <div class="cm-separator"></div>
                     <div class="cm-row">
                         <div class="cm-item" data-action="copy">
                             <img src="${explorerAsset('icons/ui/cm-copy.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Copy</span>
+                            <span class="cm-label">Копировать</span>
                         </div>
                         <div class="cm-item" data-action="cut">
                             <img src="${explorerAsset('icons/ui/cm-cut.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Cut</span>
+                            <span class="cm-label">Вырезать</span>
                         </div>
                         <div class="cm-item" data-action="delete">
                             <img src="${explorerAsset('icons/ui/cm-delete.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Delete</span>
+                            <span class="cm-label">Удалить</span>
                         </div>
                         <div class="cm-item" data-action="rename">
                             <img src="${explorerAsset('icons/ui/cm-rename.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Rename</span>
+                            <span class="cm-label">Переименовать</span>
                         </div>
                     </div>
                     <div class="cm-separator"></div>
                     <div class="cm-row">
                         <div class="cm-item" data-action="send">
                             <img src="${explorerAsset('icons/ui/cm-send.svg')}" class="cm-icon" alt="">
-                            <span class="cm-label">Send</span>
+                            <span class="cm-label">Отправить</span>
                         </div>
                     </div>
                 `;
@@ -199,49 +199,49 @@ export class ContextMenu {
                 <div class="cm-row">
                     <div class="cm-item" data-action="open-terminal">
                         <img src="${explorerAsset('icons/ui/cm-terminal.svg')}" class="cm-icon" alt="">
-                        <span class="cm-label">Terminal</span>
+                        <span class="cm-label">Терминал</span>
                     </div>
                     <div class="cm-item" data-action="copy-path">
                         <img src="${explorerAsset('icons/ui/cm-copy-path.svg')}" class="cm-icon" alt="">
-                        <span class="cm-label">Copy Path</span>
+                        <span class="cm-label">Копировать путь</span>
                     </div>
                     <div class="cm-item" data-action="paste">
                         <img src="${explorerAsset('icons/ui/cm-paste.svg')}" class="cm-icon" alt="">
-                        <span class="cm-label">Paste</span>
+                        <span class="cm-label">Вставить</span>
                     </div>
                     <div class="cm-item" data-action="refresh">
                         <img src="${explorerAsset('icons/ui/cm-refresh.svg')}" class="cm-icon" alt="">
-                        <span class="cm-label">Refresh</span>
+                        <span class="cm-label">Обновить</span>
                     </div>
                 </div>
                 <div class="cm-separator"></div>
                 <div class="cm-row">
                     <div class="cm-item" data-action="new-folder">
                         <img src="${explorerAsset('icons/ui/cm-new-folder.svg')}" class="cm-icon" alt="">
-                        <span class="cm-label">Folder</span>
+                        <span class="cm-label">Папка</span>
                     </div>
                     <div class="cm-item" data-action="new-file">
                         <img src="${explorerAsset('icons/ui/cm-new-file.svg')}" class="cm-icon" alt="">
-                        <span class="cm-label">File</span>
+                        <span class="cm-label">Файл</span>
                     </div>
                     <div class="cm-item" data-action="select-all">
                         <img src="${explorerAsset('icons/ui/search.svg')}" class="cm-icon" alt="">
-                        <span class="cm-label">Select all</span>
+                        <span class="cm-label">Выбрать всё</span>
                     </div>
                 </div>
                 <div class="cm-separator"></div>
                 <div class="cm-row">
                     <div class="cm-item" data-action="sort-name">
-                        <span class="cm-label">Sort: Name</span>
+                        <span class="cm-label">Сортировка: имя</span>
                     </div>
                     <div class="cm-item" data-action="sort-date">
-                        <span class="cm-label">Sort: Date</span>
+                        <span class="cm-label">Сортировка: дата</span>
                     </div>
                     <div class="cm-item" data-action="sort-size">
-                        <span class="cm-label">Sort: Size</span>
+                        <span class="cm-label">Сортировка: размер</span>
                     </div>
                     <div class="cm-item" data-action="sort-type">
-                        <span class="cm-label">Sort: Type</span>
+                        <span class="cm-label">Сортировка: тип</span>
                     </div>
                 </div>
             `;

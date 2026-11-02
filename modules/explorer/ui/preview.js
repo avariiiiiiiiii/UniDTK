@@ -28,7 +28,7 @@ export class PreviewPanel {
             imgContainer.classList.remove('hidden');
         }
 
-        document.getElementById('metaType').textContent = item.is_dir ? 'Folder' : this.explorer.getFileTypeName(item.path);
+        document.getElementById('metaType').textContent = item.is_dir ? 'Папка' : this.explorer.getFileTypeName(item.path);
         document.getElementById('metaSize').textContent = item.is_dir ? '—' : this.explorer.formatSize(item.file_size || 0);
         document.getElementById('metaModified').textContent = item.modified_time || '—';
         document.getElementById('metaCreated').textContent = item.created_time || '—';
@@ -48,7 +48,7 @@ export class PreviewPanel {
 
         const resultEl = document.getElementById('hashResult');
         resultEl.classList.remove('hidden');
-        resultEl.textContent = 'Calculating...';
+        resultEl.textContent = 'Подсчёт…';
 
         try {
             let hash;
@@ -59,7 +59,7 @@ export class PreviewPanel {
             }
             resultEl.textContent = `${type.toUpperCase()}: ${hash}`;
         } catch (e) {
-            resultEl.textContent = 'Error calculating hash';
+            resultEl.textContent = 'Не удалось вычислить хеш';
         }
     }
 
