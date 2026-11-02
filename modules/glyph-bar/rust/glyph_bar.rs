@@ -16,6 +16,8 @@ use std::{
 use serde::Serialize;
 
 const POLL: Duration = Duration::from_millis(120);
+/// Polls between looking up the default device again: about two seconds.
+const DEVICE_RECHECK_POLLS: u32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,10 +69,34 @@ pub fn start() -> VolumeState {
     }
 }
 
+/// One COM session and one endpoint serve every poll; only the default-device
+/// lookup repeats, so a change of output device is picked up within seconds.
+#[cfg(windows)]
 fn poll_loop(stop: Arc<AtomicBool>) {
+    let _com = match ComSession::enter() {
+        Ok(com) => com,
+        Err(error) => {
+            unidtk_api::log(format!("glyph-bar: {error}"));
+            return;
+        }
+    };
+    let mut endpoint = None;
+    let mut polls = 0u32;
     let mut last: Option<SystemVolume> = None;
     while !stop.load(Ordering::Relaxed) {
-        match read_volume() {
+        if endpoint.is_none() || polls % DEVICE_RECHECK_POLLS == 0 {
+            endpoint = match default_endpoint() {
+                Ok(current) => Some(current),
+                Err(error) => {
+                    unidtk_api::log(format!("glyph-bar: volume poll error: {error}"));
+                    thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+            };
+        }
+        polls = polls.wrapping_add(1);
+        let reading = endpoint.as_ref().map(read_endpoint).expect("endpoint opened above");
+        match reading {
             Ok(current) => {
                 if last != Some(current) {
                     last = Some(current);
@@ -79,6 +105,7 @@ fn poll_loop(stop: Arc<AtomicBool>) {
             }
             Err(error) => {
                 unidtk_api::log(format!("glyph-bar: volume poll error: {error}"));
+                endpoint = None;
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
@@ -86,6 +113,9 @@ fn poll_loop(stop: Arc<AtomicBool>) {
         thread::sleep(POLL);
     }
 }
+
+#[cfg(not(windows))]
+fn poll_loop(_stop: Arc<AtomicBool>) {}
 
 // IPC commands are declared by the kernel, not here: `#[tauri::command]` places
 // a `__cmd__<name>` macro at the crate root and must live in the same crate as
@@ -125,7 +155,12 @@ pub fn set_system_mute(muted: bool) -> Result<SystemVolume, String> {
 }
 
 fn read_volume() -> Result<SystemVolume, String> {
-    with_endpoint(|endpoint| unsafe {
+    with_endpoint(read_endpoint)
+}
+
+#[cfg(windows)]
+fn read_endpoint(endpoint: &windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume) -> Result<SystemVolume, String> {
+    unsafe {
         let scalar = endpoint
             .GetMasterVolumeLevelScalar()
             .map_err(|e| format!("GetMasterVolumeLevelScalar: {e}"))?;
@@ -135,47 +170,67 @@ fn read_volume() -> Result<SystemVolume, String> {
             .as_bool();
         let level = (scalar * 100.0).round().clamp(0.0, 100.0) as u8;
         Ok(SystemVolume { level, muted })
-    })
+    }
+}
+
+#[cfg(not(windows))]
+fn read_endpoint(_endpoint: &()) -> Result<SystemVolume, String> {
+    Err("system volume is only supported on Windows".into())
+}
+
+/// COM for the current thread, released on drop if this session started it.
+#[cfg(windows)]
+struct ComSession {
+    initialized: bool,
+}
+
+#[cfg(windows)]
+impl ComSession {
+    fn enter() -> Result<Self, String> {
+        use windows::Win32::{
+            Foundation::RPC_E_CHANGED_MODE,
+            System::Com::{CoInitializeEx, COINIT_MULTITHREADED},
+        };
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_err() && hr != RPC_E_CHANGED_MODE {
+            return Err(format!("CoInitializeEx failed: {hr:?}"));
+        }
+        Ok(Self { initialized: hr.is_ok() })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ComSession {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
+#[cfg(windows)]
+fn default_endpoint() -> Result<windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume, String> {
+    use windows::Win32::{
+        Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator},
+        System::Com::{CoCreateInstance, CLSCTX_ALL},
+    };
+    unsafe {
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            .map_err(|e| format!("CoCreateInstance MMDeviceEnumerator: {e}"))?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .map_err(|e| format!("GetDefaultAudioEndpoint: {e}"))?;
+        device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|e| format!("Activate IAudioEndpointVolume: {e}"))
+    }
 }
 
 #[cfg(windows)]
 fn with_endpoint<T>(f: impl FnOnce(&windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume) -> Result<T, String>) -> Result<T, String> {
-    use windows::Win32::{
-        Foundation::RPC_E_CHANGED_MODE,
-        Media::Audio::{
-            eConsole, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator,
-            MMDeviceEnumerator,
-        },
-        System::Com::{
-            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
-        },
-    };
-
-    unsafe {
-        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let initialized = hr.is_ok();
-        if hr.is_err() && hr != RPC_E_CHANGED_MODE {
-            return Err(format!("CoInitializeEx failed: {hr:?}"));
-        }
-
-        let result = (|| {
-            let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                    .map_err(|e| format!("CoCreateInstance MMDeviceEnumerator: {e}"))?;
-            let device = enumerator
-                .GetDefaultAudioEndpoint(eRender, eConsole)
-                .map_err(|e| format!("GetDefaultAudioEndpoint: {e}"))?;
-            let endpoint: IAudioEndpointVolume = device
-                .Activate(CLSCTX_ALL, None)
-                .map_err(|e| format!("Activate IAudioEndpointVolume: {e}"))?;
-            f(&endpoint)
-        })();
-
-        if initialized {
-            CoUninitialize();
-        }
-        result
-    }
+    let _com = ComSession::enter()?;
+    let endpoint = default_endpoint()?;
+    f(&endpoint)
 }
 
 #[cfg(not(windows))]
