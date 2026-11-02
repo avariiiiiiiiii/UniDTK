@@ -1,107 +1,109 @@
-# План реализации: Агентное E2E-тестирование, эмуляция пользователя, оптимизация redb и ликвидация дублирующего IPC
+# Implementation Plan: Agent E2E Testing, User Emulation, redb Optimization, and Removal of Duplicate IPC
 
-> **Документ:** `docs/agent-e2e-and-ipc-plan.md`  
-> **Статус:** Утверждённый план архитектурного рефакторинга  
-> **Дата:** 1 сентября 2026 г.  
-
----
-
-## 1. Исходные требования пользователя
-
-1. **Реальное тестирование вместо формального («не для галочки»):**
-   - Тестировать приложение так, как его использует реальный пользователь: через действия в интерфейсе (клики, ввод текста, переключение вкладок), а не через искусственные изолированные вызовы бэкенд-функций.
-2. **Ликвидация тотального хардкода:**
-   - Прекратить писать отдельный `ipc.rs` для каждого модуля и захардкоженные функции (`tg_cmd`, `vpn_cmd`, `vol_cmd`) в CLI.
-   - Избавить архитектуру от тройного дублирования кода (`tauri::command` $\to$ модуль `ipc.rs` $\to$ CLI `main.rs`).
-3. **Приоритет тексту над Vision/скриншотами:**
-   - Модели ИИ работают быстрее, дешевле и точнее с текстом. Скриншоты дороги, многие модели не имеют зрения.
-   - Инспекция UI должна строиться на компактном семантическом дереве элементов (AOM) объемом 300–500 токенов вместо 30 000 токенов сырого HTML.
-4. **Квитанции действий с дельтой логов (Action Receipts):**
-   - Любое действие пользователя через CLI (`shell act click ...`) должно возвращать не просто статус, а подтверждение физического клика, мутации DOM и **все новые логи бэкенда и фронтенда**, возникшие в результате этого действия.
-5. **Один источник правды для логов (никаких вторых буферов):**
-   - «Надо менять того, кто читает, и исправить баг в redb, а не делать второго читателя».
-   - Не плодить параллельные in-memory хранилища логов рядом с `redb`. Исправить алгоритмические баги чтения и записи непосредственно в `shell_db.rs`.
-6. **Каноничное имя команды:**
-   - Использовать понятное имя `shell commands` (а не академическое `capabilities`).
+> **Document:** `docs/agent-e2e-and-ipc-plan.md`  
+> **Status:** Approved architecture refactoring plan  
+> **Date:** 1 September 2026
 
 ---
 
-## 2. Итоги консилиума 10 субагентов-критиков
+## 1. Original User Requirements
 
-В ходе проектирования были последовательно вызваны 10 специализированных субагентов для всесторонней критики плана:
-
-1. **Критик #1 (System Reliability):**
-   - *Вето* на полный отказ от Rust IPC в пользу CDP. Если WebView2 упадет или зависнет, агент ослепнет.
-   - *Консенсус:* Двухуровневая модель: L1 (Rust Core IPC) для данных/демонов/здоровья + L2 (CDP) для эмуляции UI.
-2. **Критик #2 (Security & Privilege Boundaries):**
-   - *Вето* на постоянно открытый порт CDP 9222 с `allow-origins=*` в релизе (уязвимость RCE через браузер пользователя).
-   - *Консенсус:* CDP активируется строго в dev-режиме (`shell dev --debug`) или в сборках с `debug_assertions`.
-3. **Критик #3 (QA & E2E Testing):**
-   - *Вето* на селекторы по CSS-классам (ломаются при редизайне) и паузы `sleep(200)` (конфликтуют со `spring`-анимациями 260/320 мс).
-   - *Консенсус:* Строгий контракт селекторов (`data-testid` и ARIA-роли), предикаты готовности `waitForCondition`, идемпотентность и восстановление состояния (Snapshot/Restore).
-4. **Критик #4 (Frontend Core & Vanilla JS):**
-   - *Консенсус:* Внедрение тестового фасада `window.__SHELL_HARNESS__` с кольцевым буфером ошибок `__SHELL_ERRORS__`.
-   - Внедрение режима **Zero-Motion** (`setMotionScale(0)` в `motion.js`), схлопывающего длительность анимаций в 0 мс для мгновенных тестов.
-5. **Критик #5 (Performance & Low-Resource Systems):**
-   - *Вето* на вызов `node backend/cli/src/shell-cdp.js` (оверхед 180 мс на запуск `node.exe`).
-   - *Консенсус:* Нативный Rust WebSocket клиент в CLI (время выполнения 2–3 мс). Использование нативного `el.checkVisibility()` без Layout Thrashing.
-6. **Критик #6 (Agentic DX & CLI Ergonomics):**
-   - *Консенсус:* Формат ошибок **Diagnostic Triad** (WHAT, WHY, REMEDY), адаптивная вербозность (однострочный статус при успехе), коды возврата 0/1/2/3/4, безусловный запрет интерактивного `stdin`.
-7. **Критик #7 (Windows Subsystems & WorkerW):**
-   - *Консенсус:* Shell работает позади иконок Windows под `WorkerW`. Обязательно умножение координат на `devicePixelRatio` для мониторов 125%/150%. Флаги отключения троттлинга DWM в WebView2 (`--disable-backgrounding-occluded-windows`). Грациозный teardown окна для предотвращения зомби-контейнеров `WorkerW`.
-8. **Критик #8 (Redb & Logging Pipeline):**
-   - Вскрыл фатальный баг в `shell_db.rs:667`: выкачивание всей базы в память через `table.range(..).rev().collect()` перед взятием `take(limit)`.
-   - Вскрыл $O(N)$ перебор в `log_max_id` вместо взятия последнего элемента B-дерева `next_back()`.
-   - Вскрыл двойную запись каждого фронтенд-лога в `main.rs:204`.
-9. **Критик #9 (Microkernel & Dynamic Dispatch):**
-   - Доказал абсурдность параллельного рукописного IPC в каждом модуле при наличии готового `tauri::command`.
-10. **Критик #10 (Главный Арбитр):**
-    - Синтезировал консенсус, сформулировал 10 Инженерных Табу и 3-фазную дорожную карту.
+1. **Real testing instead of a formal check ("not just for show"):**
+   - Test the application the way a real user uses it: through actions in the interface (clicks, typing, switching tabs), not through artificial, isolated calls to backend functions.
+2. **Eliminate total hardcoding:**
+   - Stop writing a separate `ipc.rs` for each module, and stop writing hardcoded functions (`tg_cmd`, `vpn_cmd`, `vol_cmd`) in the CLI.
+   - Remove the triple duplication of code (`tauri::command` $\to$ module `ipc.rs` $\to$ CLI `main.rs`).
+3. **Text takes priority over Vision/screenshots:**
+   - AI models work faster, cheaper, and more accurately with text. Screenshots are expensive, and many models have no vision.
+   - UI inspection must be based on a compact semantic tree of elements (AOM) of 300–500 tokens, instead of 30,000 tokens of raw HTML.
+4. **Action Receipts with a log delta:**
+   - Any user action performed through the CLI (`shell act click ...`) must return more than a status. It must confirm the physical click, the DOM mutations, and **all new backend and frontend logs** produced by that action.
+5. **One source of truth for logs (no second buffers):**
+   - "Change the reader and fix the bug in redb, instead of building a second reader."
+   - Do not create parallel in-memory log stores next to `redb`. Fix the algorithmic read and write bugs directly in `shell_db.rs`.
+6. **Canonical command name:**
+   - Use the clear name `shell commands` (not the academic `capabilities`).
 
 ---
 
-## 3. Ликвидация дублирующего IPC
+## 2. Results of the 10-Subagent Review
 
-### В чем порок текущей системы:
-* **Фронтенд** вызывает бэкенд через `tauri::invoke("vpn_connect")` — это штатный, быстрый, типизированный механизм Tauri.
-* **Модули** содержат файлы `vpn/ipc.rs`, `telegram/ipc.rs`, `volume/ipc.rs`, `explorer/src/ipc.rs`, `music/src/ipc.rs`, где вручную парсят те же самые команды для localhost TCP сокета ядра.
-* **CLI** содержит 1120 строк функций `vpn_cmd`, `tg_cmd`, `vol_cmd`, отправляющих JSON в эти модули.
+During the design, 10 specialized critic subagents were called in sequence to review the plan:
 
-### Целевое решение:
-1. **Удалить модульные файлы `ipc.rs`:**
-   - Бизнес-логика модулей тестируется через реальные действия пользователя в UI (клик по кнопке сети $\to$ UI вызывает `tauri::invoke`).
-2. **Сервисный IPC ядра (`backend/core/ipc.rs`):**
-   Остаётся компактным шлюзом системного мониторинга (только то, что нужно внешнему процессу CLI):
-   - `ping` — проверка доступности ядра.
-   - `logs` — чтение журнала из `redb` (с поддержкой `since_id` для дельты).
-   - `ps` — мониторинг памяти процессов (`shell.exe`, `msedgewebview2.exe`).
-   - `commands` — вывод доступных команд CLI и ядра.
+1. **Critic #1 (System Reliability):**
+   - *Veto* on dropping Rust IPC entirely in favor of CDP. If WebView2 crashes or hangs, the agent goes blind.
+   - *Consensus:* a two-level model: L1 (Rust Core IPC) for data, daemons, and health, plus L2 (CDP) for UI emulation.
+2. **Critic #2 (Security & Privilege Boundaries):**
+   - *Veto* on a permanently open CDP port 9222 with `allow-origins=*` in release builds (an RCE vulnerability through the user's browser).
+   - *Consensus:* CDP is enabled strictly in dev mode (`shell dev --debug`) or in builds with `debug_assertions`.
+3. **Critic #3 (QA & E2E Testing):**
+   - *Veto* on selectors based on CSS classes (they break on redesign) and on `sleep(200)` pauses (they conflict with the 260/320 ms `spring` animations).
+   - *Consensus:* a strict selector contract (`data-testid` and ARIA roles), `waitForCondition` readiness predicates, idempotence, and state recovery (Snapshot/Restore).
+4. **Critic #4 (Frontend Core & Vanilla JS):**
+   - *Consensus:* add a test facade `window.__SHELL_HARNESS__` with a ring buffer of errors, `__SHELL_ERRORS__`.
+   - Add a **Zero-Motion** mode (`setMotionScale(0)` in `motion.js`), which collapses animation durations to 0 ms for instant tests.
+5. **Critic #5 (Performance & Low-Resource Systems):**
+   - *Veto* on calling `node backend/cli/src/shell-cdp.js` (180 ms of overhead to start `node.exe`).
+   - *Consensus:* a native Rust WebSocket client in the CLI (2–3 ms execution time). Use the native `el.checkVisibility()` without layout thrashing.
+6. **Critic #6 (Agentic DX & CLI Ergonomics):**
+   - *Consensus:* a **Diagnostic Triad** error format (WHAT, WHY, REMEDY), adaptive verbosity (a one-line status on success), exit codes 0/1/2/3/4, and an unconditional ban on interactive `stdin`.
+7. **Critic #7 (Windows Subsystems & WorkerW):**
+   - *Consensus:* Shell runs behind the Windows icons, under `WorkerW`. Coordinates must be multiplied by `devicePixelRatio` for 125%/150% monitors. WebView2 flags that disable DWM throttling (`--disable-backgrounding-occluded-windows`). A graceful teardown of the window to prevent zombie `WorkerW` containers.
+8. **Critic #8 (Redb & Logging Pipeline):**
+   - Found a fatal bug in `shell_db.rs:667`: the whole database is pulled into memory with `table.range(..).rev().collect()` before `take(limit)` is applied.
+   - Found an $O(N)$ scan in `log_max_id`, where the last element of the B-tree could be taken with `next_back()` instead.
+   - Found that every frontend log is written twice, at `main.rs:204`.
+9. **Critic #9 (Microkernel & Dynamic Dispatch):**
+   - Showed that a hand-written IPC in each module is absurd when a ready-made `tauri::command` already exists.
+10. **Critic #10 (Chief Arbiter):**
+    - Synthesized the consensus, formulated 10 Engineering Taboos and a 3-phase roadmap.
 
 ---
 
-## 4. Исправление базы данных `redb` (`shell_db.rs`)
+## 3. Removing Duplicate IPC
 
-Вместо создания дублирующего буфера в памяти исправляются алгоритмические ошибки в основном хранилище `shell.redb`:
+### What is wrong with the current system:
+* **The frontend** calls the backend through `tauri::invoke("vpn_connect")`. This is Tauri's standard, fast, typed mechanism.
+* **The modules** contain the files `vpn/ipc.rs`, `telegram/ipc.rs`, `volume/ipc.rs`, `explorer/src/ipc.rs`, and `music/src/ipc.rs`. Each one manually parses the same commands for the core's localhost TCP socket.
+* **The CLI** contains 1,120 lines of the functions `vpn_cmd`, `tg_cmd`, and `vol_cmd`, which send JSON to those modules.
 
-1. **Исправление `list_logs` ([`shell_db.rs:667`](file:///C:/Users/admin/Documents/GitHub/shell/backend/modules/music/src/shell_db.rs#L667)):**
+### Target solution:
+1. **Delete the module files `ipc.rs`:**
+   - Test the module's business logic through real user actions in the UI (a click on the network button $\to$ the UI calls `tauri::invoke`).
+2. **The core's service IPC (`backend/core/ipc.rs`):**
+   It stays as a compact system-monitoring gateway, with only what the external CLI process needs:
+   - `ping`: checks that the core is reachable.
+   - `logs`: reads the journal from `redb` (with `since_id` support for deltas).
+   - `ps`: monitors process memory (`shell.exe`, `msedgewebview2.exe`).
+   - `commands`: lists the CLI and core commands.
+
+---
+
+## 4. Fixing the `redb` Database (`shell_db.rs`)
+
+Instead of building a duplicate in-memory buffer, fix the algorithmic errors in the main store, `shell.redb`:
+
+1. **Fix `list_logs` ([`shell_db.rs:667`](file:///C:/Users/admin/Documents/GitHub/shell/backend/modules/music/src/shell_db.rs#L667)):**
    ```rust
-   // БЫЛО (выкачивало ВСЮ базу данных в RAM):
+   // BEFORE (loaded the ENTIRE database into RAM):
    let range = table.range::<u64>(..).map_err(|e| e.to_string())?;
    let rev: Vec<_> = range.rev().collect();
    for item in rev.into_iter().take(limit) { ... }
 
-   // СТАЛО (ленивый срез с конца за микросекунды):
+   // AFTER (lazy slice from the end, microseconds):
    for item in table.range::<u64>(..)?.rev().take(limit) { ... }
    ```
-2. **Исправление `log_max_id` ([`shell_db.rs:740`](file:///C:/Users/admin/Documents/GitHub/shell/backend/modules/music/src/shell_db.rs#L740)):**
+   The `collect()` call builds a `Vec` containing every entry before `take(limit)` runs. So the whole table is read into memory even when the caller needs only `limit` rows. The reversed iterator does not need that `Vec`: `take(limit)` pulls only the entries it needs from the end.
+2. **Fix `log_max_id` ([`shell_db.rs:740`](file:///C:/Users/admin/Documents/GitHub/shell/backend/modules/music/src/shell_db.rs#L740)):**
    ```rust
-   // БЫЛО (полный скан таблицы O(N)):
+   // BEFORE (full table scan, O(N)):
    for item in table.iter()? { ... }
 
-   // СТАЛО (мгновенный поиск максимума в B-дереве O(1)):
+   // AFTER (instant maximum lookup in the B-tree, O(1)):
    table.range::<u64>(..)?.next_back().map(|(k, _)| k.value()).unwrap_or(0)
    ```
-3. **Нативный range-метод для дельты логов (`get_logs_since`):**
+   `next_back()` takes the last key of the range directly, instead of walking the table from the first entry. If the table is empty, `unwrap_or(0)` returns 0.
+3. **A native range method for the log delta (`get_logs_since`):**
    ```rust
    pub fn get_logs_since(&self, since_id: u64) -> Result<Vec<LogEntry>, String> {
        let mut entries = Vec::new();
@@ -115,96 +117,97 @@
        Ok(entries)
    }
    ```
-4. **Устранение двойной записи в [`main.rs:204`](file:///C:/Users/admin/Documents/GitHub/shell/backend/core/main.rs#L204):**
-   В `frontend_log` убрать дублирующий вызов `log_line(...)`, оставить единую запись `qbc_music_core::logging::log_frontend(...)`.
+   `Bound::Excluded(since_id)` skips the entry the caller already has, so the result holds only the entries written after `since_id`.
+4. **Remove the double write at [`main.rs:204`](file:///C:/Users/admin/Documents/GitHub/shell/backend/core/main.rs#L204):**
+   In `frontend_log`, remove the duplicate `log_line(...)` call and keep the single write, `qbc_music_core::logging::log_frontend(...)`.
 
 ---
 
-## 5. Физическая эмуляция пользователя (CDP Input API)
+## 5. Physical User Emulation (CDP Input API)
 
-### 5-фазный цикл выполнения действия:
-1. **Поиск элемента:** Строго по контракту `data-testid="..."` или `role="..."[name="..."]`.
-2. **Hit-Testing:** Проверка `element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })` и `document.elementFromPoint(x, y)` на отсутствие перекрытия модалками и оверлеями.
-3. **Координатная привязка:** Метод `element.getBoundingClientRect()` возвращает координаты центра в **CSS-пикселях вьюпорта**. В CDP `Input.dispatchMouseEvent` координаты передаются **1:1 без масштабирования**, так как протокол Blink ожидает именно CSS-пиксели (умножение на `devicePixelRatio` нужно только для нативных Win32 `SendInput`, для CDP оно приводит к промаху клика в 1.25–1.5 раза).
-4. **Физическая диспетчеризация Blink:**
+### The 5-phase cycle for performing an action:
+1. **Find the element:** strictly by the contract `data-testid="..."` or `role="..."[name="..."]`.
+2. **Hit-testing:** check `element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })` and `document.elementFromPoint(x, y)` to confirm that no modal or overlay covers the element.
+3. **Coordinate mapping:** `element.getBoundingClientRect()` returns the center coordinates in **CSS pixels of the viewport**. In CDP, `Input.dispatchMouseEvent` takes these coordinates **1:1, without scaling**, because the Blink protocol expects CSS pixels. Multiplying by `devicePixelRatio` is needed only for native Win32 `SendInput`. With CDP, it makes the click miss by a factor of 1.25–1.5.
+4. **Physical dispatch in Blink:**
    - `Input.dispatchMouseEvent` (`type: "mouseMoved"`, `x`, `y`)
    - `Input.dispatchMouseEvent` (`type: "mousePressed"`, `button: "left"`, `clickCount: 1`)
    - `Input.dispatchMouseEvent` (`type: "mouseReleased"`, `button: "left"`)
-5. **Формирование квитанции действия (Action Receipt):**
-   - Координаты попадания и подтверждение клика.
-   - Мутации DOM (изменение классов/атрибутов через MutationObserver).
-   - Дельта логов бэкенда (`redb::get_logs_since(last_id)`).
-   - Ошибки из кольцевого буфера `window.__SHELL_ERRORS__`.
+5. **Build the action receipt (Action Receipt):**
+   - The hit coordinates and confirmation of the click.
+   - DOM mutations (class and attribute changes, observed through MutationObserver).
+   - The backend log delta (`redb::get_logs_since(last_id)`).
+   - Errors from the ring buffer `window.__SHELL_ERRORS__`.
 
 ---
 
-## 6. Нативный Rust WebSocket в CLI и выводы технологического исследования (Research Findings)
+## 6. Native Rust WebSocket in the CLI and Research Findings
 
-По итогам исследования GitHub-экосистемы Tauri 2, форумов и инструментов агентной автоматизации зафиксированы следующие решения:
+Based on research into the Tauri 2 GitHub ecosystem, forums, and agent automation tools, the following decisions were recorded:
 
-1. **Rust CDP Client (`tungstenite` вместо `chromiumoxide` / `headless_chrome`):**
-   - `chromiumoxide` избыточен (приносит тяжелый асинхронный `tokio`, `reqwest`, +20 МБ к бинарнику).
-   - Самодельный WebSocket парсер в `cli/main.rs` зависает на фрагментированных пакетах.
-   - **Выбор:** `tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }` поверх стандартного `std::net::TcpStream`.
-   - Время старта CLI: <3 мс. Размер бинарника: <1.5 МБ. Время компиляции: 1.5 секунды.
-   - Удаляется вспомогательный файл `backend/cli/src/shell-cdp.js` и зависимость от внешнего `node.exe`.
-2. **Семантическое дерево DOM (паттерн Browser-Use & Playwright ARIA Snapshots):**
-   - Сырой метод CDP `Accessibility.getFullAXTree` отвергнут: он возвращает плоский список без координат, z-index и вьюпорта, требуя сотен медленных обращений `DOM.getBoxModel`.
-   - **Выбор:** Инжекция легковесного JS-экстрактора, который нативно обходит интерактивные узлы (`data-testid`, роли ARIA, кнопки, инпуты), проверяет `checkVisibility()` + `elementFromPoint` и формирует компактный текст на 300–500 токенов с порядковыми ID элементов `[1]`, `[2]`.
-3. **Локальный IPC транспорт:**
-   - На текущем этапе сохраняется легковесный localhost TCP (`127.0.0.1:26540`) с JSON-over-line (`\n`), как самый простой и кросс-совместимый.
-   - В перспективе переход на Windows Named Pipes через крейт `interprocess` (`\\.\pipe\shell-ipc`) для исключения коллизий сетевых портов и полного закрытия сетевого стека.
+1. **Rust CDP client (`tungstenite` instead of `chromiumoxide` / `headless_chrome`):**
+   - `chromiumoxide` is excessive. It brings in a heavy async `tokio`, `reqwest`, and about 20 MB added to the binary.
+   - A hand-written WebSocket parser in `cli/main.rs` hangs on fragmented packets.
+   - **Choice:** `tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }` on top of the standard `std::net::TcpStream`.
+   - CLI startup time: <3 ms. Binary size: <1.5 MB. Compile time: 1.5 seconds.
+   - The helper file `backend/cli/src/shell-cdp.js` and the dependency on an external `node.exe` are removed.
+2. **Semantic DOM tree (Browser-Use and Playwright ARIA Snapshots pattern):**
+   - The raw CDP method `Accessibility.getFullAXTree` was rejected. It returns a flat list with no coordinates, z-index, or viewport, and it requires hundreds of slow `DOM.getBoxModel` calls.
+   - **Choice:** inject a lightweight JS extractor that walks the interactive nodes (`data-testid`, ARIA roles, buttons, inputs), checks `checkVisibility()` and `elementFromPoint`, and produces compact text of 300–500 tokens, with ordinal IDs `[1]`, `[2]`.
+3. **Local IPC transport:**
+   - For now, the lightweight localhost TCP (`127.0.0.1:26540`) stays, with JSON-over-line (`\n`), as the simplest and most cross-compatible option.
+   - In the future, move to Windows Named Pipes through the `interprocess` crate (`\\.\pipe\shell-ipc`), to avoid port collisions and fully close the network stack.
 
 ---
 
-## 7. Свод 10 Инженерных Табу
+## 7. The 10 Engineering Taboos
 
-| № | Инженерное Табу | Почему запрещено | Что делаем вместо этого |
+| No. | Engineering Taboo | Why it is forbidden | What we do instead |
 |---|---|---|---|
-| **1** | **Запрет на слепые `sleep(N)`** | Вызывает гонки и флакающие тесты при разной нагрузке CPU. | Режим `Zero-Motion` (`setMotionScale(0)`) + предикаты `waitForCondition`. |
-| **2** | **Запрет на сырой `element.click()`** | Игнорирует перекрытия, z-index и реальную видимость. | Настоящие события CDP `Input.dispatchMouseEvent` с проверкой `elementFromPoint`. |
-| **3** | **Запрет на CSS-селекторы по классам стилей** | Стили меняются при редизайне и ломают автоматизацию. | Строго атрибуты `data-testid` и семантические роли ARIA. |
-| **4** | **Запрет на параллельные in-memory базы логов** | Плодит два источника правды и рассинхрон. | Исправление алгоритмов B-дерева в `redb` (`get_logs_since`, без `.collect()`). |
-| **5** | **Запрет на открытый порт 9222 в релизе** | Критическая RCE-уязвимость для локального браузера. | CDP доступен только по флагу `shell dev --debug` или в dev-сборках. |
-| **6** | **Запрет на хардкод подкоманд модулей в CLI** | Нарушает микроядро, требует пересборки CLI при каждом чихе. | Универсальные команды UI (`shell act`, `shell dom`) и сервисный IPC. |
-| **7** | **Запрет на скармливание LLM сырого HTML (30k токенов)** | Убивает контекст модели и вызывает галлюцинации. | **Compact Semantic Tree** (300–500 токенов только интерактивных узлов). |
-| **8** | **Запрет на внешние рантаймы (Node.js/Python/VBS)** | Ломает автономность утилиты `shell.exe`. | Нативный код на Rust (нативный WebSocket клиент внутри `backend/cli`). |
-| **9** | **Запрет на игнорирование DPI под WorkerW** | На мониторах 125%/150% клик летит мимо кнопки. | Умножение клиентских координат на `window.devicePixelRatio`. |
-| **10**| **Запрет на статус «Done» без Action Receipt** | Нельзя верить тесту на слово. | Проверка квитанции: координаты сошлись, дельта логов чиста, JS-ошибок нет. |
+| **1** | **No blind `sleep(N)`** | Causes races and flaky tests under varying CPU load. | `Zero-Motion` mode (`setMotionScale(0)`) plus `waitForCondition` predicates. |
+| **2** | **No raw `element.click()`** | Ignores overlaps, z-index, and real visibility. | Real CDP events `Input.dispatchMouseEvent`, checked with `elementFromPoint`. |
+| **3** | **No CSS selectors based on style classes** | Styles change in a redesign and break automation. | Only `data-testid` attributes and semantic ARIA roles. |
+| **4** | **No parallel in-memory log databases** | Creates two sources of truth that drift apart. | Fix the B-tree algorithms in `redb` (`get_logs_since`, no `.collect()`). |
+| **5** | **No open port 9222 in release** | A critical RCE vulnerability for a local browser. | CDP is available only with the flag `shell dev --debug` or in dev builds. |
+| **6** | **No hardcoding of module subcommands in the CLI** | Breaks the microkernel and requires a CLI rebuild for every small change. | Universal UI commands (`shell act`, `shell dom`) and the service IPC. |
+| **7** | **No feeding raw HTML (30k tokens) to an LLM** | Exhausts the model's context and causes hallucinations. | **Compact Semantic Tree** (300–500 tokens of interactive nodes only). |
+| **8** | **No external runtimes (Node.js/Python/VBS)** | Breaks the self-contained nature of the `shell.exe` utility. | Native Rust code (a native WebSocket client inside `backend/cli`). |
+| **9** | **No ignoring DPI under WorkerW** | On 125%/150% monitors, the click lands beside the button. | Multiply client coordinates by `window.devicePixelRatio`. |
+| **10**| **No "Done" status without an Action Receipt** | You cannot take a test's word for it. | Check the receipt: the coordinates match, the log delta is clean, and there are no JS errors. |
 
 ---
 
-## 8. Пошаговая Дорожная Карта Реализации
+## 8. Step-by-Step Implementation Roadmap
 
-### Фаза 1: Фундамент рантайма, оптимизация `redb` и нативный WebSocket в CLI
-1. **Оптимизация `shell_db.rs`:**
-   - Заменить `table.range(..).rev().collect()` в `list_logs` на прямой ленивый итератор.
-   - Заменить полный скан таблицы в `log_max_id` на `table.range(..)?.next_back()`.
-   - Добавить метод `get_logs_since(since_id: u64)`.
-   - Устранить двойную запись логов в `main.rs:204`.
-2. **Нативный WebSocket в CLI:**
-   - Подключить `tungstenite` в `backend/cli/Cargo.toml`.
-   - Реализовать функцию прямого выполнения CDP-команд в `backend/cli/src/main.rs`.
-   - Удалить `backend/cli/src/shell-cdp.js`.
-3. **Безопасность и DWM в ядре:**
-   - Ограничить `--remote-debugging-port=9222` дебаг-режимом.
-   - Добавить флаги WebView2 против троттлинга DWM при неактивном рабочем столе.
+### Phase 1: Runtime Foundation, `redb` Optimization, and Native WebSocket in the CLI
+1. **Optimize `shell_db.rs`:**
+   - Replace `table.range(..).rev().collect()` in `list_logs` with a direct lazy iterator.
+   - Replace the full table scan in `log_max_id` with `table.range(..)?.next_back()`.
+   - Add the method `get_logs_since(since_id: u64)`.
+   - Remove the double log write at `main.rs:204`.
+2. **Native WebSocket in the CLI:**
+   - Add `tungstenite` to `backend/cli/Cargo.toml`.
+   - Implement a function that runs CDP commands directly, in `backend/cli/src/main.rs`.
+   - Delete `backend/cli/src/shell-cdp.js`.
+3. **Security and DWM in the core:**
+   - Restrict `--remote-debugging-port=9222` to debug mode.
+   - Add WebView2 flags against DWM throttling when the desktop is inactive.
 
-### Фаза 2: UI Test Harness, Zero-Motion, Семантический DOM и Action Receipts
-1. **Frontend Test Harness:**
-   - Добавить `frontend/core/harness.js` с кольцевым буфером ошибок `window.__SHELL_ERRORS__`.
-   - Подключить переключение `setZeroMotion(true)` через `motion.js`.
-2. **Семантический DOM (`shell dom`):**
-   - Реализовать выгрузку компактного интерактивного дерева (300–500 токенов).
-3. **Физический ввод и квитанции действий (`shell act`):**
-   - Реализовать `shell act click <selector>` с проверкой `elementFromPoint`, нормализацией DPI и захватом дельты логов.
+### Phase 2: UI Test Harness, Zero-Motion, Semantic DOM, and Action Receipts
+1. **Frontend test harness:**
+   - Add `frontend/core/harness.js` with the ring buffer of errors `window.__SHELL_ERRORS__`.
+   - Hook up the switch `setZeroMotion(true)` through `motion.js`.
+2. **Semantic DOM (`shell dom`):**
+   - Implement the export of a compact interactive tree (300–500 tokens).
+3. **Physical input and action receipts (`shell act`):**
+   - Implement `shell act click <selector>` with an `elementFromPoint` check, DPI normalization, and capture of the log delta.
 
-### Фаза 3: Ликвидация дублирующего IPC и чистка CLI
-1. **Удаление модульных `ipc.rs`:**
-   - Удалить `telegram/ipc.rs`, `vpn/ipc.rs`, `volume/ipc.rs`, `explorer/src/ipc.rs`, `music/src/ipc.rs`.
-   - Упростить `backend/core/ipc.rs`: оставить только `ping`, `logs`, `ps`, `commands`.
-2. **Очистка CLI `backend/cli/src/main.rs`:**
-   - Удалить специфичные функции `tg_cmd`, `vpn_cmd`, `vol_cmd`.
-   - Оставить лаконичный набор: `shell doctor`, `shell logs`, `shell ps`, `shell dom`, `shell act`, `shell commands`.
-3. **Верификация по полному чек-листу:**
-   - `cargo check`, `cargo test`, `cargo build`, реальные E2E-действия в рантайме.
+### Phase 3: Removing Duplicate IPC and Cleaning Up the CLI
+1. **Deleting the module `ipc.rs` files:**
+   - Delete `telegram/ipc.rs`, `vpn/ipc.rs`, `volume/ipc.rs`, `explorer/src/ipc.rs`, and `music/src/ipc.rs`.
+   - Simplify `backend/core/ipc.rs`: keep only `ping`, `logs`, `ps`, and `commands`.
+2. **Cleaning up the CLI `backend/cli/src/main.rs`:**
+   - Delete the module-specific functions `tg_cmd`, `vpn_cmd`, and `vol_cmd`.
+   - Keep a lean set: `shell doctor`, `shell logs`, `shell ps`, `shell dom`, `shell act`, `shell commands`.
+3. **Verification against the full checklist:**
+   - `cargo check`, `cargo test`, `cargo build`, and real E2E actions at runtime.

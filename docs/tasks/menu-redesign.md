@@ -1,127 +1,127 @@
 ---
-title: Переделка меню кастомизации — план
+title: Customization menu redesign — plan
 type: task
 project: unidtk
 updated_at: "2026-10-29"
-status: done (реализовано в сессии 131)
+status: done (implemented in session 131)
 ---
 
-# Переделка меню кастомизации — план
+# Customization menu redesign — plan
 
-> **Статус:** выполнено (сессия 131, 2026-10-29). Все этапы реализованы, релиз собран и установлен в `C:\Program Files\UniDTK`, проверен в живом рантайме через CLI.
-> **Основание:** [аудит меню](menu-audit.md) (70 проблем). Баги исправлены в сессии 130, полный редизайн UX, позиций, папок и чистка legacy Shell завершены в сессии 131.
+> **Status:** done (session 131, 2026-10-29). All stages are implemented, the release is built and installed to `C:\Program Files\UniDTK`, and it is verified in the live runtime through the CLI.
+> **Basis:** [menu audit](menu-audit.md) (70 problems). Bugs were fixed in session 130; the full UX redesign, positions, folders and the cleanup of the legacy Shell were completed in session 131.
 
-## 1. Решения пользователя
+## 1. User decisions
 
-| Вопрос | Решение |
+| Question | Decision |
 | :--- | :--- |
-| Форма меню | **Боковая панель справа** (~420 px) поверх живого стола вместо полноэкранной модалки |
-| VPN | **Своя панель VPN**; в меню остаётся только выключение модулей |
-| Поля X/Y | **Убрать совсем** — только расстановка на столе |
-| Код миграции из `%LOCALAPPDATA%\Shell` | **Вычистить** (каталог удалён 2026-10-28, освобождено 6,72 ГБ) |
-| Кнопки на столе | **Только кнопка меню.** Перемещение → в меню («Расставить»); «Сбросить обои» → удалить (не работает); «Выход» → меню и трей |
-| Папки | Человек не должен лезть в AppData — добавление ярлыков без ручного ввода путей |
+| Menu form | **Side panel on the right** (~420 px) over the live desktop, instead of a full-screen modal |
+| VPN | **Its own VPN panel**; the menu keeps only module on/off switches |
+| X/Y fields | **Remove entirely** — placement on the desktop only |
+| Migration code from `%LOCALAPPDATA%\Shell` | **Delete** (directory removed 2026-10-28, 6.72 GB freed) |
+| Buttons on the desktop | **Only the menu button.** Moving → into the menu («Arrange»); «Reset wallpaper» → remove (does not work); «Exit» → menu and tray |
+| Folders | A person should not have to dig into AppData — shortcuts are added without typing paths by hand |
 
-## 2. Целевой UX
+## 2. Target UX
 
-### 2.1 Панель
-- DOM-область внутри того же окна-обоев (не второй `WebviewWindow`): справа, ~420 px, стол рядом виден и живой — цвет, материал, видимость меняются на глазах.
-- Наведение на виджет в списке подсвечивает его на столе.
-- Три раздела по задачам: **Стол**, **Папки**, **Вид**.
-- Фокус переводится в панель при открытии и возвращается на кнопку меню при закрытии; Esc закрывает; `role=dialog`, табы с `tablist/tab/aria-selected`.
+### 2.1 Panel
+- A DOM area inside the same wallpaper window (not a second `WebviewWindow`): on the right, ~420 px. The desktop beside it stays visible and live — color, material and visibility change in front of the user.
+- Hovering a widget in the list highlights it on the desktop.
+- Three sections by task: **Desktop**, **Folders**, **Look**.
+- Focus moves into the panel when it opens and returns to the menu button when it closes. Esc closes the panel. `role=dialog`, tabs with `tablist/tab/aria-selected`.
 
-### 2.2 Раздел «Стол»
-- Список виджетов, у каждого **один** переключатель «Показывать».
-- Кнопка **«Расставить»** → режим расстановки прямо на столе:
-  - панель сворачивается в плашку **«Готово / Отменить»**;
-  - сетка, прилипание к краям экрана и соседним виджетам, за экран утащить нельзя;
-  - **Esc = Отменить** (папки в этом режиме не раскрываются — у Esc один смысл);
-  - перетаскивание на pointer events + `setPointerCapture` (ввод в окно пересылается `PostMessage`, захвата мыши нет — HTML5 drag может не стартовать).
-- Поля X/Y удалены.
-- **Модули** — блок внизу раздела: выключение модуля с объяснением («выключенный модуль не тратит ресурсы») и кнопкой **«Перезапустить сейчас»** с предупреждением, что плеер и Telegram перезапустятся.
-- Строка VPN — «Настроить…» открывает панель VPN (виджет VPN может быть скрыт, иначе до настроек не добраться).
+### 2.2 «Desktop» section
+- The list of widgets; each has **one** "Show" toggle.
+- The **«Arrange»** button switches to arrangement mode directly on the desktop:
+  - the panel collapses into a **«Done / Cancel»** bar;
+  - grid and snapping to screen edges and neighboring widgets; a widget cannot be dragged off-screen;
+  - **Esc = Cancel** (folders do not expand in this mode, so Esc has one meaning);
+  - dragging uses pointer events + `setPointerCapture`. Input to the window is forwarded by `PostMessage`, so there is no mouse capture, and HTML5 drag may not start.
+- The X/Y fields are removed.
+- **Modules** — a block at the bottom of the section: switching a module off, with the explanation «a disabled module uses no resources», and a **«Restart now»** button with a warning that the player and Telegram will restart.
+- The VPN row — «Configure…» opens the VPN panel. The VPN widget may be hidden, otherwise the settings cannot be reached.
 
-### 2.3 Раздел «Папки» — без AppData
-1. **«Добавить из Пуска»** — список установленных программ (`.lnk` из `%ProgramData%` и `%APPDATA%\Microsoft\Windows\Start Menu\Programs`) с поиском и настоящими иконками; имя и иконка подставляются сами. Главный путь для обычного пользователя. UWP без `.lnk` в первой версии не поддерживаются — показываются как недоступные.
-2. **«Выбрать файл или папку…»** — системный диалог Windows вместо ввода пути.
-3. **Перетаскивание** файла из проводника / ссылки из браузера на папку на столе — **только если пройдёт проверка этапа 1** (см. §4).
-4. **Ctrl+V** в раскрытой папке: файл из буфера (CF_HDROP) или ссылка/текст. Имя ссылки — по домену (заголовок страницы получить нечем, см. §4), переименовывается.
-5. **Правка прямо на столе:** в раскрытой папке плитка «+»; правый клик по ярлыку → «Переименовать / Убрать»; порядок — перетаскиванием. Правый клик и перетаскивание — только внутри раскрытой папки, обычные клики виджетов не трогаются.
-6. **«+ Папка»** в режиме расстановки — папка сразу появляется на столе с полем имени и выбором значка.
-7. Ярлык ссылается на **реальный** файл/программу/URL, а не на копию `.lnk` в AppData.
-8. Ярлык на удалённый файл — состояние «недоступен» с действиями **«Найти…»** и **«Убрать»**.
-9. Склонения («1 ярлык / 2 ярлыка / 5 ярлыков»), никаких «redb», «FILE», выпадающего списка типа — тип определяется сам.
+### 2.3 «Folders» section — without AppData
+1. **«Add from Start»** — a list of installed programs (`.lnk` files from `%ProgramData%` and `%APPDATA%\Microsoft\Windows\Start Menu\Programs`) with search and real icons. The name and icon are filled in automatically. This is the main path for an ordinary user. UWP apps without a `.lnk` are not supported in the first version and are shown as unavailable.
+2. **«Choose a file or folder…»** — the Windows system dialog instead of typing a path.
+3. **Drag and drop** a file from Explorer, or a link from a browser, onto a folder on the desktop — **only if the stage 1 check passes** (see §4).
+4. **Ctrl+V** in an open folder: a file from the clipboard (CF_HDROP), or a link/text. The link name comes from its domain (the page title cannot be obtained, see §4), and it can be renamed.
+5. **Editing directly on the desktop:** in an open folder, a «+» tile; right-click on a shortcut → «Rename / Remove»; order is changed by dragging. Right-click and dragging work only inside an open folder; ordinary widget clicks are not affected.
+6. **«+ Folder»** in arrangement mode — the folder appears on the desktop immediately, with a name field and an icon picker.
+7. A shortcut points to the **real** file, program or URL, not to a `.lnk` copy in AppData.
+8. A shortcut to a removed file gets an «unavailable» state with the actions **«Find…»** and **«Remove»**.
+9. Russian plural forms («1 ярлык / 2 ярлыка / 5 ярлыков», i.e. 1 / 2 / 5 shortcuts), no "redb", no "FILE", and no type dropdown — the type is detected automatically.
 
-### 2.4 Раздел «Вид»
-- Две большие карточки тем (Classic / Sea Glass), нарисованные настоящим материалом.
-- **Цвета:** акцент из палитры текущей темы, «Перемешать» с отменой тостом.
-- Всё остальное — в свёрнутой **«Тонкой настройке»**, подписи только по-русски, без английских скобок и жаргона.
+### 2.4 «Look» section
+- Two large theme cards (Classic / Sea Glass), drawn with the real material.
+- **Colors:** the accent from the current theme's palette; «Shuffle» with an undo toast.
+- Everything else goes into a collapsed **«Fine-tuning»** block. Labels are in Russian only, without English parentheses or jargon.
 
-### 2.5 Общие правила
-- Вместо `alert`/`confirm` — один стиль тоста (`role=status`, `aria-live`).
-- Необратимые действия выполняются сразу, 5 секунд их можно **отменить** из тоста; отмена восстанавливает **всё** затронутое (конфиг, позиции, `hidden`, `instances`, записи папок).
-- Enter отправляет формы.
-- Видимый фокус (`:focus-visible`), контраст текста ≥ 4.5:1, цели клика ≥ 24 px — CSS-пункты аудита делаются попутно.
-- Пустые состояния: все виджеты скрыты → подсказка у кнопки меню; пустая папка → плитка «+» с подсказкой; Пуск пуст / поиск ничего не нашёл → сообщение; ошибка загрузки → ошибка с «Повторить», а не ложное «пусто».
+### 2.5 Common rules
+- Instead of `alert`/`confirm`, one toast style (`role=status`, `aria-live`).
+- Irreversible actions execute immediately, and for 5 seconds they can be **undone** from the toast. Undo restores **everything** affected: config, positions, `hidden`, `instances`, folder records.
+- Enter submits forms.
+- Visible focus (`:focus-visible`), text contrast ≥ 4.5:1, click targets ≥ 24 px. The CSS items of the audit are handled along the way.
+- Empty states: all widgets hidden → a hint next to the menu button; empty folder → a «+» tile with a hint; Start list empty or search finds nothing → a message; load error → an error with «Retry», not a false «empty».
 
-## 3. Данные и архитектура
+## 3. Data and architecture
 
-### 3.1 Позиции с привязкой к углу
-- Запись позиции дополняется `anchor ∈ {tl, tr, bl, br}` и смещением; поля виджетов в той же записи (Telegram `activeChatId/expanded`, микрографика `mgScale/mgStyle/mgLayout`, плеер `version/aiDj`…) сохраняются spread'ом.
-- **Миграция без сдвига:** запись без `anchor` читается как `tl` с теми же координатами — визуально ничего не меняется. Ближайший угол вычисляется и пишется только при «Готово» (размер холста известен; временные размеры при сне/смене дисплея не попадают в данные).
-- `telegramDisplayPosition` (пороги 1200 / 1700 px, отступ 12) заменяется обычной привязкой `tr` и удаляется.
-- Расширенные (`.expanded`) карточки пересчитываются отдельно — `relayoutWidgets` их пропускает.
-- Правило §4 архитектуры соблюдается: расстановка только меняет геометрию существующих карточек, `widgetsCanvas` не перерисовывается.
+### 3.1 Positions anchored to a corner
+- A position record is extended with `anchor ∈ {tl, tr, bl, br}` and an offset. Widget fields in the same record (Telegram `activeChatId/expanded`, micrographics `mgScale/mgStyle/mgLayout`, player `version/aiDj`…) are preserved via spread.
+- **Migration without shift:** a record without `anchor` is read as `tl` with the same coordinates, so nothing changes visually. The nearest corner is computed and written only on «Done», when the canvas size is known. Temporary sizes during sleep or display changes do not reach the data.
+- `telegramDisplayPosition` (thresholds 1200 / 1700 px, margin 12) is replaced by ordinary `tr` anchoring and removed.
+- Expanded (`.expanded`) cards are recalculated separately: `relayoutWidgets` skips them.
+- The architecture §4 rule is respected: arrangement only changes the geometry of existing cards, and `widgetsCanvas` is not redrawn.
 
-### 3.2 Папки, Пуск, иконки
-- Перечисление Пуска и иконки — **в ядре**: новый `core/kernel/start_menu.rs`, тонкие `#[tauri::command(async)]` в `main.rs` (команды объявляются только там, где `generate_handler!`); папки уже ядерные (`get_folders/save_folder/delete_folder`).
-- Win32-работа — в рабочем потоке с `CoInitializeEx`, не на UI-потоке (архитектура §3): `IShellLinkW::GetPath` для `.lnk`, `SHCreateItemFromParsingName` + `IShellItemImageFactory::GetImage` → BGRA. Иконки кэшируются в `%LOCALAPPDATA%\UniDTK\cache`; кодировщика PNG нет — отдавать BGRA и рисовать через canvas, без новой зависимости.
-- Список Пуска грузится при открытии раздела, не на старте ядра.
-- Системный диалог — **через команду ядра** (Rust API `tauri-plugin-dialog`): `lint_ui_imports` запрещает UI-файлам импорт мимо `@unidtk/bridge`.
-- Буфер обмена: в `modules/explorer/rust/clipboard.rs` есть только CF_HDROP — дописать чтение `CF_UNICODETEXT` / `UniformResourceLocatorW`.
-- Существующие ярлыки-копии в `UniDTK\folders\*\shortcuts`: одноразовая миграция на старте разворачивает `.lnk` в реальную цель (+ аргументы); цель не найдена → запись остаётся как есть. Файлы-копии удаляются только после проверки.
-- `FolderItem` получает поле иконки (или иконка извлекается по цели на лету с кэшем).
-- Новые чтения — UI-дверь; в `command_inventory.rs` / `WS_COMMANDS` — только если понадобятся из `udtk invoke` (и после shadow-прогона).
+### 3.2 Folders, Start, icons
+- Start menu enumeration and icons live **in the core**: a new `core/kernel/start_menu.rs`, and thin `#[tauri::command(async)]` wrappers in `main.rs` (commands are declared only where `generate_handler!` is). Folders are already in the core (`get_folders/save_folder/delete_folder`).
+- Win32 work runs on a worker thread with `CoInitializeEx`, not on the UI thread (architecture §3): `IShellLinkW::GetPath` for `.lnk`, and `SHCreateItemFromParsingName` + `IShellItemImageFactory::GetImage` → BGRA. Icons are cached in `%LOCALAPPDATA%\UniDTK\cache`. There is no PNG encoder, so BGRA is returned and drawn through canvas, with no new dependency.
+- The Start list loads when the section is opened, not at core startup.
+- The system dialog goes **through a core command** (the Rust API of `tauri-plugin-dialog`). `lint_ui_imports` forbids UI files from importing anything except through `@unidtk/bridge`.
+- Clipboard: `modules/explorer/rust/clipboard.rs` has only CF_HDROP. Add reading of `CF_UNICODETEXT` / `UniformResourceLocatorW`.
+- Existing shortcut copies in `UniDTK\folders\*\shortcuts`: a one-time migration at startup expands each `.lnk` into its real target (plus arguments). If the target is not found, the record stays as it is. Copy files are deleted only after verification.
+- `FolderItem` gets an icon field (or the icon is extracted from the target on the fly, with a cache).
+- New reads go through the UI door. They go into `command_inventory.rs` / `WS_COMMANDS` only if they are needed from `udtk invoke`, and only after a shadow run.
 
-### 3.3 Удаление кнопок и команд
-- `#quitApp`: **сначала** перевести `udtk stop` (`opt/cli/main.rs:1636`, клик по кнопке через CDP) на прямой `invoke("quit_app")`, потом удалить кнопку и обработчик (`index.html:72-76`, `unidtk-core.js:1725-1727`). Команда `quit_app` и пункт трея «Выход» остаются — это запасной выход, если меню сломалось.
-- `#editMode`: удалить кнопку (`index.html:58-63`); вход в расстановку из меню — прямой вызов функции вместо `document.getElementById("editMode").click()` (`menu.js:364-368`). Класс `body.edit-mode` и проверки `editMode` в модулях остаются.
-- `#resetWallpaper` / `reset_wallpaper`: удалить под корень — кнопку (`index.html:66-70`), обработчик (`unidtk-core.js:1729-1731`), команду и регистрацию (`main.rs:232-234`, `generate_handler!`), пункт трея «Сбросить обои». `wallpaper::reset()` при выходе остаётся. JS-вызов и `generate_handler!` удаляются вместе — иначе падает `frontend_invoke_names_are_registered`.
+### 3.3 Removing buttons and commands
+- `#quitApp`: **first** switch `udtk stop` (`opt/cli/main.rs:1636`, which clicks the button through CDP) to a direct `invoke("quit_app")`, and only then remove the button and its handler (`index.html:72-76`, `unidtk-core.js:1725-1727`). The `quit_app` command and the tray item «Exit» stay. They are the fallback exit if the menu breaks.
+- `#editMode`: remove the button (`index.html:58-63`). Entering arrangement from the menu becomes a direct function call instead of `document.getElementById("editMode").click()` (`menu.js:364-368`). The `body.edit-mode` class and the `editMode` checks in modules remain.
+- `#resetWallpaper` / `reset_wallpaper`: remove completely — the button (`index.html:66-70`), the handler (`unidtk-core.js:1729-1731`), the command and its registration (`main.rs:232-234`, `generate_handler!`), and the tray item «Reset wallpaper». `wallpaper::reset()` on exit stays. The JS call and the `generate_handler!` entry are removed together, otherwise `frontend_invoke_names_are_registered` fails.
 
-### 3.4 Вычистка миграции из `Shell`
-- Удалить: `core/api/src/paths.rs` (ветка `old_dir`, маркер `.migrated-from-shell`, `migrate_entry`); `unidtk_db.rs` (legacy-кандидаты `shell.redb`, `rebase_legacy_shortcut_targets` + тест); `main.rs` (fallback `Shell\folders`, вызов переноса ярлыков); `log_store.rs` (`shell_logs.redb`); `module_store.rs` (ветка `legacy_root = …/Shell`); legacy-имя `shell_ai_dj.redb` в `modules/mp3-player/rust/commands.rs` и тест `module_store.rs`; `opt/cli` — `cleanup_legacy_vpn_files` и `"Shell"` в `OBSOLETE_TASKS` — пересмотреть; устаревшие комментарии.
-- **Не трогать:** механизм `StoreSpec::legacy_files` (общий), `core/kernel/library_migration.rs` (миграция таблиц внутри текущей базы, не каталога `Shell`), миграции настроек VPN из `data_dir()`.
+### 3.4 Deleting the migration from `Shell`
+- Remove: `core/api/src/paths.rs` (the `old_dir` branch, the marker `.migrated-from-shell`, `migrate_entry`); `unidtk_db.rs` (the legacy candidates `shell.redb`, `rebase_legacy_shortcut_targets` and its test); `main.rs` (the `Shell\folders` fallback, the shortcut transfer call); `log_store.rs` (`shell_logs.redb`); `module_store.rs` (the `legacy_root = …/Shell` branch); the legacy name `shell_ai_dj.redb` in `modules/mp3-player/rust/commands.rs` and the test in `module_store.rs`; in `opt/cli`, `cleanup_legacy_vpn_files` and `"Shell"` in `OBSOLETE_TASKS` — to be reviewed; outdated comments.
+- **Do not touch:** the `StoreSpec::legacy_files` mechanism (shared), `core/kernel/library_migration.rs` (migration of tables inside the current database, not of the `Shell` directory), and the VPN settings migrations from `data_dir()`.
 
-### 3.5 Движение
-- Панель и тосты — только токены `motion.js` (`DURATIONS`, `--ease-*`), без новых `ease`/`cubic-bezier`.
-- WAAPI-анимации (`animate()`) не подчиняются CSS `prefers-reduced-motion` — опираться на `currentScale` / reduced-motion из `motion.js`.
+### 3.5 Motion
+- The panel and toasts use only the `motion.js` tokens (`DURATIONS`, `--ease-*`), with no new `ease` or `cubic-bezier`.
+- WAAPI animations (`animate()`) do not obey the CSS `prefers-reduced-motion`. They rely on `currentScale` / reduced-motion from `motion.js`.
 
-## 4. Технические риски (проверить до основной работы)
+## 4. Technical risks (check before the main work)
 
-| Риск | Что известно | Проверка |
+| Risk | What is known | Check |
 | :--- | :--- | :--- |
-| **Перетаскивание с рабочего стола** | Критик: drop может поймать слой иконок рабочего стола (`SysListView32`) и создать ярлык на рабочем столе. Против: при скролле тачпадом `WindowFromPoint` над шеллом возвращал наше окно (`Chrome_RenderWidgetHostHWND`). Плюс Tauri по умолчанию перехватывает OLE-drop (`dragDropEnabled`): пути файлов приходят, ссылки из браузера — скорее нет; для обоих нужен свой `IDropTarget` (фича `Win32_System_Ole`). | Лог окна под курсором во время **одного ручного перетаскивания пользователя** + проверка, не появился ли ярлык на рабочем столе. Не работает → пункт 2.3.3 выкидывается. |
-| **Системный диалог за рабочим столом** | Окно — дочернее WorkerW, процесс не получает фокус; диалог может открыться позади или мигать в панели задач. `set_focus` запрещён. | Открыть диалог кликом по столу; при проблеме — без родителя + `SetForegroundWindow` на диалог. |
-| **Ctrl+V** | Цепочки Ctrl+V уже пересылаются (проводник на этом работает); `OpenClipboard(NULL)` работает без фокуса. | Лог `ctrlKey` в раскрытой папке через `udtk gui js`. |
-| **Заголовок страницы** | HTTP-клиента в ядре нет, CSP запрещает внешние `fetch`. | Решено: имя по домену. |
-| **Лимит `architecture.md`** | 326 строк, 29,6 КБ при лимите 30 КБ. | Новые описания ужимать, старые сжимать. |
+| **Dragging from the desktop** | Critic: the drop may be caught by the desktop icon layer (`SysListView32`) and create a shortcut on the desktop. Against: when scrolling with a touchpad, `WindowFromPoint` over the shell returned our window (`Chrome_RenderWidgetHostHWND`). Also, Tauri intercepts OLE drop by default (`dragDropEnabled`): file paths arrive, browser links probably do not. For both, an own `IDropTarget` is needed (feature `Win32_System_Ole`). | A log of the window under the cursor during **one manual drag by the user**, plus a check whether a shortcut appeared on the desktop. If it does not work, item 2.3.3 is dropped. |
+| **System dialog behind the desktop** | The window is a child of WorkerW, and the process does not get focus. The dialog may open behind or flash in the taskbar. `set_focus` is forbidden. | Open the dialog by clicking the desktop. If there is a problem: no parent window + `SetForegroundWindow` on the dialog. |
+| **Ctrl+V** | Ctrl+V chains are already forwarded (Explorer works this way). `OpenClipboard(NULL)` works without focus. | A log of `ctrlKey` in an open folder, via `udtk gui js`. |
+| **Page title** | There is no HTTP client in the core, and CSP forbids external `fetch`. | Decided: the name comes from the domain. |
+| **`architecture.md` limit** | 326 lines, 29.6 KB against a 30 KB limit. | Shorten new descriptions, compress old ones. |
 
-## 5. Этапы
+## 5. Stages
 
-Каждый этап: сборка `udtk build`, живая проверка через CLI (`udtk gui`, `udtk shot`), коммит.
+Each stage: build with `udtk build`, a live check through the CLI (`udtk gui`, `udtk shot`), then a commit.
 
-1. **Проверка рисков §4** — от пользователя одно перетаскивание файла на стол.
-2. **Чистка:** код `Shell`, кнопки на столе, `reset_wallpaper`, путь `udtk stop`.
-3. **Каркас панели:** разделы, тосты с отменой, русские подписи, фокус и клавиатура.
-4. **Расстановка на столе:** сетка, прилипание, привязка к углам, миграция позиций.
-5. **Папки:** Пуск с иконками, диалог, вставка, перетаскивание (если этап 1 прошёл), правка на столе, миграция `.lnk`, недоступные ярлыки.
-6. **«Вид»:** карточки тем, цвета, свёрнутая тонкая настройка.
-7. **Панель VPN.**
-8. **Документация:** `architecture.md` (§1.2 меню, §0/§2 пути, §5.5, §7), `00_master.md`, `cliudtk.md` (путь `udtk stop`, сценарии меню), `AGENTS.md` (упоминания `Shell`), журнал сессий.
+1. **Risk check §4** — from the user, one file dragged onto the desktop.
+2. **Cleanup:** the `Shell` code, the desktop buttons, `reset_wallpaper`, the `udtk stop` path.
+3. **Panel frame:** sections, toasts with undo, Russian labels, focus and keyboard.
+4. **Desktop arrangement:** grid, snapping, corner anchoring, position migration.
+5. **Folders:** Start with icons, the dialog, paste, drag and drop (if stage 1 passed), editing on the desktop, `.lnk` migration, unavailable shortcuts.
+6. **«Look»:** theme cards, colors, collapsed fine-tuning.
+7. **VPN panel.**
+8. **Documentation:** `architecture.md` (§1.2 menu, §0/§2 paths, §5.5, §7), `00_master.md`, `cliudtk.md` (the `udtk stop` path, menu scenarios), `AGENTS.md` (mentions of `Shell`), the session log.
 
-## 6. Критика плана (4 субагента Haiku 5.5) — что учтено
+## 6. Plan critique (4 Haiku 5.5 subagents) — what was taken into account
 
-- **UX:** запасной выход при сломанном меню (трей), сочетание панели с расстановкой, конфликт жестов, пустые и битые состояния, отмена восстанавливает всё, клавиатура и ARIA. Пункт «сначала починить основу» уже закрыт сессией 130.
-- **Win32:** z-order и OLE-drop, перехват drop'а Tauri, диалог и фокус, иконки без новой зависимости, pointer capture вместо HTML5 drag.
-- **Данные:** миграция позиций без сдвига, сохранение полей виджетов, разворот `.lnk`-копий, точный список вычистки `Shell` и что не трогать, `udtk stop` зависит от `#quitApp`.
-- **Архитектура:** Пуск и иконки — в ядре, команды только в крейте ядра, Win32 не на UI-потоке, `lint_ui_imports` для диалога, токены движения и reduced-motion для WAAPI, лимит `architecture.md`.
+- **UX:** a fallback exit if the menu breaks (tray), combining the panel with arrangement, gesture conflicts, empty and broken states, undo restores everything, keyboard and ARIA. The item «first fix the foundation» is already closed by session 130.
+- **Win32:** z-order and OLE drop, interception of the Tauri drop, the dialog and focus, icons without a new dependency, pointer capture instead of HTML5 drag.
+- **Data:** position migration without shift, preservation of widget fields, expansion of `.lnk` copies, the exact list of what to delete from `Shell` and what not to touch, `udtk stop` depends on `#quitApp`.
+- **Architecture:** Start and icons in the core, commands only in the core crate, Win32 not on the UI thread, `lint_ui_imports` for the dialog, motion tokens and reduced-motion for WAAPI, the `architecture.md` limit.

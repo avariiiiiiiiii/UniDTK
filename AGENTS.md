@@ -1,189 +1,192 @@
-# UniDTK — Инструкция для ИИ-агентов (AGENTS.md)
+# UniDTK — Instructions for AI Agents (AGENTS.md)
 
-> **Назначение документа:** Руководство по автономной разработке, обязательному 10-ступенчатому инженерному протоколу, архитектурным стандартам и живой отладке для всех ИИ-агентов в репозитории `UniDTK` (Unified Desktop Täglich Kit).
-
----
-
-## 1. Главные принципы автономной работы
-
-1. **Доводить задачу до конца, не останавливаться на полпути:**
-   - Если пользователь поставил комплексную задачу (оптимизация, рефакторинг, исправление бага), агент обязан исследовать все связанные подсистемы, внести правки, собрать проект, протестировать его и проверить в реальном рантайме.
-   - Не запрашивать подтверждений на очевидные промежуточные шаги (запуск тестов, проверка компиляции, сборка).
-
-2. **Запрет на поверхностную проверку («Компиляция — не конец работы»):**
-   - Успешная компиляция или прохождение пары unit-тестов **НЕ означают**, что задача решена.
-   - Любое изменение в бэкенде, фронтенде, планировщике задач или IPC обязано проходить **полный цикл живой отладки** в рантайме перед сдачей задачи.
-   - Прямые вызовы сырых утилит вроде `cargo check` или `node --check` запрещены — вся сквозная диагностика осуществляется через единый канонический CLI-мост (`udtk doctor`, включая `udtk doctor -check`). Node.js в рантайме и CLI отсутствует полностью.
+> **Purpose of this document:** A guide to autonomous development, the mandatory 10-step engineering protocol, architecture standards, and live debugging for all AI agents in the `UniDTK` repository (Unified Desktop Täglich Kit).
 
 ---
 
-## 2. Протокол выполнения задач (Обязательный 10-ступенчатый цикл)
+## 1. Core principles of autonomous work
 
-Каждая задача в репозитории `UniDTK` обязана проходить следующий строгий протокол:
+1. **Carry the task to the end, do not stop halfway:**
+   - If the user sets a complex task (optimization, refactoring, bug fix), the agent must investigate all related subsystems, make the changes, build the project, test it, and verify it in the live runtime.
+   - Do not ask for confirmation of obvious intermediate steps (running tests, checking compilation, building).
+
+2. **Ban on superficial verification ("Compiling is not the end of the work"):**
+   - A successful compilation or passing a couple of unit tests **does NOT mean** the task is solved.
+   - Any change to the backend, frontend, task scheduler, or IPC must go through a **full live debugging cycle** in the runtime before the task is handed over.
+   - Direct calls to raw utilities such as `cargo check` or `node --check` are forbidden. All end-to-end diagnostics go through the single canonical CLI bridge (`udtk doctor`, including `udtk doctor -check`). Node.js is entirely absent from the runtime and the CLI.
+
+---
+
+## 2. Task execution protocol (mandatory 10-step cycle)
+
+Every task in the `UniDTK` repository must go through the following strict protocol:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ 1. Получить проблему от пользователя (зафиксировать симптомы и ожидания)              │
-│ 2. Выяснить причину самому (исследовать код, логи, системные интерфейсы Win32/DOM)     │
-│ 3. Запустить субагентов для поиска проблемы (подтвердить улику независимым анализом)  │
-│ 4. Убедиться, что найдена корневая и единственная проблема (исключить маскировку)     │
-│ 5. Обсудить план с пользователем (высокоуровнево: архитектура, структура, без низкоур.)│
-│ 6. Обсудить план с 5 субагентами (жесткая критика, поиск уязвимостей, консенсус)      │
-│ 7. Повторно показать план пользователю (указать замечания субагентов, получить аппрув) │
-│ 8. Реализовать план (мало правок — делать самому, масштабный рефакторинг — субагенты)   │
-│ 9. Смерджить ветки в основную (при создании изолированных git-веток влить без хвостов) │
-│ 10. Пересобрать релиз, запустить, замерить через CLI и обновить документацию           │
+│ 1. Receive the problem from the user (record symptoms and expectations)                │
+│ 2. Find the cause yourself (investigate code, logs, Win32/DOM system interfaces)       │
+│ 3. Launch subagents to search for the problem (confirm the evidence independently)     │
+│ 4. Make sure the root and only problem is found (rule out masking)                     │
+│ 5. Discuss the plan with the user (high level: architecture, structure, no low-level)  │
+│ 6. Discuss the plan with 5 subagents (harsh critique, vulnerability search, consensus) │
+│ 7. Show the plan to the user again (state subagent remarks, get approval)              │
+│ 8. Implement the plan (few edits — do them yourself; large refactoring — subagents)    │
+│ 9. Merge branches into the main line (when isolated git branches were created, merge   │
+│    them without leftovers)                                                             │
+│ 10. Rebuild the release, run it, measure via CLI, and update the documentation         │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Подробное описание ступеней:
+### Detailed description of the steps:
 
-1. **Получить проблему от пользователя и сверить с мастердоком:**
-   - Внимательно зафиксировать симптомы, условия воспроизведения и ожидаемый результат. Не начинать хаотичные правки без понимания контекста.
-   - **Обязательно изучить `docs/00_master.md`** — единую точку входа и L1-роутер документации. Запрещено вычитывать исторический лог `docs/sessions.md` целиком на старте; при необходимости контекста читать только последние сессии через срез строк.
-2. **Выяснить причину самому:**
-   - Локализовать проблемный участок в кодовой базе, журнале базы данных `unidtk.redb`, очереди сообщений Win32 или фронтенде.
-3. **Запустить субагентов для поиска проблемы:**
-   - Привлечь независимых субагентов для перепроверки обнаруженных зацепок, чтобы исключить субъективные ошибки и предвзятость.
-4. **Убедиться, что найдена корневая и единственная проблема:**
-   - Доказать причинно-следственную связь фактами и логами. Убедиться, что устраняется первопричина, а не накладывается «пластырь» на симптомы.
-5. **Обсудить план с пользователем (архитектурный фокус):**
-   - Изложить решение на уровне архитектуры, связей между модулями, потокобезопасности и системных контрактов. Избегать перегрузки пользователя простынями низкоуровневого кода.
-6. **Обсудить план с 5 субагентами (всесторонняя критика):**
-   - Запустить 5 независимых субагентов с задачей полностью раскритиковать предложенное решение:
-     - Оценить потокобезопасность и возможные race conditions;
-     - Проверить стабильность Win32 IPC и оконных очередей сообщений;
-     - Проверить влияние на потребление памяти (Working Set) и CPU;
-     - Найти скрытые регрессии во фронтенде и DOM;
-     - Проанализировать граничные условия при холодном старте системы.
-   - Собрать замечания и прийти к консенсусу, скорректировав слабые места.
-7. **Повторно показать доработанный план пользователю:**
-   - Кратко изложить, какие уязвимости выявили субагенты, как план был усилен, и получить окончательное одобрение пользователя на исполнение.
-8. **Реализовать план:**
-   - Если изменений мало: реализовать точечно и аккуратно самому.
-   - Если планируется масштабный рефакторинг или затрагивается несколько подсистем: распределить задачи по изолированным субагентам и git-веткам.
-9. **Смерджить ветки в основную:**
-   - При использовании веток убедиться в отсутствии конфликтов и слить все наработки в основную ветку (`master`/`main`). Не оставлять висячих веток и мусорных файлов.
-10. **Пересобрать релиз, установить в Program Files, запустить, проверить и замерить через CLI, обновить документацию:**
-    - **Сборку релиза и деплой делаем ТОЛЬКО одной командой `udtk build`** (из чекаута, `target\release\udtk.exe`). Запрещено собирать руками `cargo build`, копировать бинарники в `Program Files` или пересобирать отдельными фазами: `udtk build` сам останавливает приложение, одним проходом `cargo tauri build --bundles nsis` собирает все три бинаря и установщик, тихо ставит его в `C:\Program Files\UniDTK`, проверяет установку по SHA-256, перезапускает приложение и гейтит живой IPC. Ручное копирование мимо установщика не перeregистрирует задачи планировщика и ломает правила инсталляции.
-    - Единственная команда сборки: `udtk build [-j N]` (дефолт потоков — из `.cargo/config.toml`; `-j` перебивает через `CARGO_BUILD_JOBS`). Бинарь, с которого запущен `udtk build`, на время сборки сам себя уносит (rename) и восстанавливается после; из `Program Files` самосборка запрещена (ACL).
-    - Канонические бинарники в dev-прогоне: `target/release/unidtk.exe`, `target/release/udtk.exe`, `target/release/vpn-helper.exe`; в поставке — каталог установки `C:\Program Files\UniDTK` (наполняет установщик, ничего руками не копируем).
-    - Запустить приложение (через Task Scheduler `schtasks /run /tn UniDTK` или `udtk run`).
-    - Провести сквозной замер метрик и проверку логов через CLI:
-      - `udtk doctor [--simulate]` — полная диагностика с симуляцией действий пользователя без повреждения данных.
-      - `udtk doctor -ping` — отклик ядра и модулей (зафиксировать время RTT в мс).
-      - `udtk logs --level ERROR` и `udtk logs --source frontend --limit 30` — проверка отсутствия JS-ошибок и исключений рендеринга.
-      - `udtk shot` — **ОБЯЗАТЕЛЬНЫЙ скриншот экрана** через CLI для визуального аудита верстки при любых UI/DOM изменениях (автоматически сохраняется в Pictures/Screenshots с таймстемпом и выводит абсолютный путь; проверяется агентом через `view_file`), проверка отсутствия "Failed to fetch", пустых виджетов и битых стилей. Для бэкенд/CLI задач скриншот выступает базовым sanity-чеком стабильности окна.
-    - **Трехуровневая фиксация документации:**
-      1. **Мастер-журнал сессий (`docs/sessions.md`):** Обязательно зафиксировать сессию в журнале под текущей датой строго по 5-параграфическому стандарту:
-         - *Параграф 1 (Контекст и симптомы):* Суть задачи или симптомы проблемы;
-         - *Параграф 2 (Корневая причина / Root Cause):* Доказанная первопричина на уровне Win32, redb, очередей сообщений или DOM;
-         - *Параграф 3 (Архитектурное решение):* Что сделано концептуально и какие контракты соблюдены;
-         - *Параграф 4 (Изменённые файлы):* Список прямых относительных ссылок на все созданные и изменённые файлы (например, `[00_master.md](docs/00_master.md)`);
-         - *Параграф 5 (Верификация и метрики):* Результаты `udtk doctor`, RTT IPC ping (мс), Working Set RAM (МБ), статус логов и скриншот `udtk shot`.
-         - Добавить строчку в экспресс-индекс в начале `docs/sessions.md` с датой и Git Commit SHA.
-      2. **Мастердок для агентов (`docs/00_master.md`):** Обновить дашборд состояния (активный гейт, статус модулей, метрики) и карту ссылок при появлении новых компонентов или документов.
-      3. **Нормативная архитектура (`docs/architecture.md`):** Актуализировать спецификацию (§1–§15) **только** если задача изменила архитектурные контракты ядра, модулей или хранилищ. Запрещено сбрасывать подневные отладочные логи в `architecture.md`.
-
----
-
-## 3. Команды живой отладки через CLI-мост (`opt/cli`)
-
-В проекте реализован собственный нативный инструмент командной строки (бинарь `udtk`, исходник — `opt/cli/main.rs`, собирается единым Cargo-проектом `toolchain` в `target/release/udtk.exe`), использующий TCP IPC (`127.0.0.1:26540`) и нативный WebSocket CDP на Rust (`tungstenite`) без внешних скриптов и сторонних сред.
-
-### 3.1 Диагностика, компиляция и статус:
-* `udtk doctor [-kernel|-modules|-ping|-env|-check|-quick|-simulate|-all]` (или готовый `target/release/udtk.exe doctor ...`)  
-  Комплексная диагностика: компиляция, наличие DLL (`libmpv-2.dll`, `tdjson.dll`, `sing-box.exe`), переменные `.env`, статус задач Task Scheduler, доступность IPC ядра и безопасная симуляция пользователя (`--simulate`).
-* `udtk doctor -check` — контроль компиляции бэкенда через CLI-мост (запускает проверку сборки, идёт десятки секунд, а не мгновенно).
-* `udtk doctor -ping` — проверка отклика IPC-сервера ядра.
-* `udtk invoke <cmd> [json-args]` — прямой вызов команды ядра или модуля по имени из манифеста (`player_status`, `vpn_status`, `telegram_status`, `log_stats`, …).
-  **`invoke` — это сокетная дверь, и она read-only по построению.** Команды, объявленные в контракте как `write` (запись в журнал, громкость, будущие VPN/Telegram/проводник), по ней **не** обслуживаются: отказ с причиной «changes state, and write commands stay on the UI door» — это норма, а не поломка. Запись ходит только через дверь интерфейса (Tauri или аутентифицированный WebSocket); из CLI её проверяют косвенно, через `udtk gui js:…` или по следствию (`udtk logs`). Полный список — `udtk help --json`.
-* `udtk logs [--limit N] [--since ID] [--level LEVEL] [--source SOURCE]` — выборка записей системного журнала ядра и фронтенда из базы `redb`.
-* `udtk path [status|ensure]` — проверка и регистрация `udtk.exe` в пользовательском Windows `PATH`.
-
-### 3.2 Управление задачами Windows Task Scheduler и автозапуском:
-* `udtk tasks status` — проверка состояния всех зарегистрированных задач Windows.
-* `udtk tasks register [all|name]` — генерация XML и регистрация задач с автоматическим повышением привилегий через UAC:
-  - `UniDTK` — автозапуск оболочки при входе пользователя (`InteractiveToken`, unelevated).
-  - `UniDTKSingbox` — повышенный хелпер TUN-адаптера Sing-Box (`HighestAvailable`).
-  - `UniDTKVpnStop` — повышенный хелпер остановки процессов VPN (`HighestAvailable`).
-* `udtk tasks cleanup-old` — автоматический поиск и удаление устаревших задач (`NothingWallpaper*`).
-* `udtk autostart [status|enable|disable]` — быстрое управление задачей входа в систему.
-
-### 3.3 Управление жизненным циклом и сборка:
-* `udtk build [-j N]` — **единственная команда релиз-сборки**: останавливает приложение, одним проходом `cargo tauri build --bundles nsis` собирает все три бинаря и NSIS-установщик, тихо ставит его в `C:\Program Files\UniDTK`, проверяет установку по SHA-256, перезапускает приложение и гейтит живой IPC. `-j` перебивает число потоков (`CARGO_BUILD_JOBS`); из `Program Files` самосборка запрещена (ACL).
-* `udtk stop` — аккуратная остановка приложения (сначала его собственный `quit_app` через CDP, затем принудительное завершение того, что держит DLL, и `schtasks /end` повышенных хелперов) — чтобы файлы можно было заменить.
-* `udtk run [args...]` — запуск установленного приложения (оно лежит в том же каталоге, что и CLI: в поставке — `C:\Program Files\UniDTK`, в dev-прогоне — `target\release`). Флаг `--debug` удалён: CDP включён всегда, порт узнаётся через `udtk doctor -ping`.
-* Dev-вход без CLI-команды: `cd toolchain && cargo tauri dev` (команда `udtk dev` удалена).
-
-**Порядок релизной сборки (проверено на практике).** Сборку и деплой делает **только** `udtk build`. Приложение обязано быть остановлено к моменту замены файлов (иначе `os error 32` без имени файла); функцию остановки выполняет `udtk build` сам. Сборка тяжёлая: thin-LTO упирается в память, поэтому потоки заданы в `.cargo/config.toml` (`[build] jobs`), а стек компилятора — `RUST_MIN_STACK=134217728`; `-j N` перебивает через `CARGO_BUILD_JOBS`. Тесты: `cargo test --release --workspace -j 1` (`-j 2` роняет две LTO-сборки разом, `0xc000012d`). На **пустом** `target/` сборка невозможна без обхода: `build.rs` требует `../target/release/udtk.exe` и `vpn-helper.exe` (лечится пустыми заглушками, которые cargo затем перезаписывает).
-
-**Состояние переезда интерфейса** (один контракт, две двери, свой протокол, флаги транспорта `tauri`/`shadow`/`ws`) — `docs/cliudtk.md`, там же критерии приёмки и отчёты по срезам.
-
-### 3.4 Визуальный и DOM-контроль через CDP:
-* `udtk gui tree` — компактное семантическое дерево интерактивных элементов WebView2.
-* `udtk gui click:<target> | type:<target>:<text> | press:<key>` — физическая эмуляция ввода с квитанцией, дельтой логов и отказом при перекрытой цели.
-* `udtk gui js:<expr>` — выполнение произвольного JavaScript в контексте активного WebView2.
-* `udtk shot [path] [--json]` — создание скриншота экрана через CDP (по умолчанию сохраняет в Pictures/Screenshots с локальным таймстемпом и выводит абсолютный путь).
-* `udtk cdp-list` — список активных страниц и мишеней CDP.
-* `udtk help --json` — машиночитаемый манифест команд CLI-моста.
+1. **Receive the problem from the user and check it against the master doc:**
+   - Carefully record the symptoms, reproduction conditions, and expected result. Do not start chaotic edits without understanding the context.
+   - **Study `docs/00_master.md` mandatorily** — the single entry point and the L1 documentation router. Reading the historical log `docs/sessions.md` in full at the start is forbidden; when context is needed, read only the latest sessions via a line slice.
+2. **Find the cause yourself:**
+   - Localize the problem area in the codebase, the `unidtk.redb` database log, the Win32 message queue, or the frontend.
+3. **Launch subagents to search for the problem:**
+   - Bring in independent subagents to re-check the leads found, to rule out subjective errors and bias.
+4. **Make sure the root and only problem is found:**
+   - Prove the cause-and-effect link with facts and logs. Make sure the root cause is removed, not a "band-aid" laid over the symptoms.
+5. **Discuss the plan with the user (architecture focus):**
+   - Present the solution at the architecture level: links between modules, thread safety, and system contracts. Avoid overloading the user with walls of low-level code.
+6. **Discuss the plan with 5 subagents (full critique):**
+   - Launch 5 independent subagents with the task of fully critiquing the proposed solution:
+     - Evaluate thread safety and possible race conditions;
+     - Check the stability of Win32 IPC and window message queues;
+     - Check the impact on memory consumption (Working Set) and CPU;
+     - Find hidden regressions in the frontend and DOM;
+     - Analyze boundary conditions during a cold system start.
+   - Collect the remarks, reach consensus, and correct the weak points.
+7. **Show the revised plan to the user again:**
+   - Briefly report which vulnerabilities the subagents found and how the plan was strengthened, and obtain the user's final approval to execute.
+8. **Implement the plan:**
+   - If the changes are few: implement them precisely and carefully yourself.
+   - If a large refactoring is planned or several subsystems are affected: distribute the tasks to isolated subagents and git branches.
+9. **Merge the branches into the main line:**
+   - When branches are used, make sure there are no conflicts and merge all work into the main branch (`master`/`main`). Leave no dangling branches or junk files.
+10. **Rebuild the release, install into Program Files, run, verify and measure via CLI, update the documentation:**
+    - **The release build and deployment are done ONLY with the single command `udtk build`** (from the checkout, `target\release\udtk.exe`). It is forbidden to build by hand with `cargo build`, to copy binaries into `Program Files`, or to rebuild in separate phases. `udtk build` stops the application itself, in one pass `cargo tauri build --bundles nsis` builds all three binaries and the installer, silently installs it into `C:\Program Files\UniDTK`, verifies the installation by SHA-256, restarts the application, and gates on live IPC. Manual copying that bypasses the installer does not re-register the scheduler tasks and breaks the installation rules.
+    - The only build command: `udtk build [-j N]` (the default thread count comes from `.cargo/config.toml`; `-j` overrides it via `CARGO_BUILD_JOBS`). The binary from which `udtk build` is launched moves itself aside (rename) during the build and is restored afterwards; self-build from `Program Files` is forbidden (ACL).
+    - Canonical binaries in a dev run: `target/release/unidtk.exe`, `target/release/udtk.exe`, `target/release/vpn-helper.exe`; in the shipped product — the install directory `C:\Program Files\UniDTK` (filled by the installer; nothing is copied by hand).
+    - Launch the application (via Task Scheduler `schtasks /run /tn UniDTK` or `udtk run`).
+    - Run an end-to-end measurement of metrics and a log check via the CLI:
+      - `udtk doctor [--simulate]` — full diagnostics with simulated user actions, without damaging data.
+      - `udtk doctor -ping` — responsiveness of the core and modules (record the RTT in ms).
+      - `udtk logs --level ERROR` and `udtk logs --source frontend --limit 30` — check for the absence of JS errors and rendering exceptions.
+      - `udtk shot` — **MANDATORY screenshot** via the CLI for a visual layout audit on any UI/DOM change (saved automatically to Pictures/Screenshots with a timestamp, prints the absolute path; checked by the agent via `view_file`), and a check for the absence of "Failed to fetch", empty widgets, and broken styles. For backend/CLI tasks the screenshot serves as a basic sanity check of window stability.
+    - **Three-level documentation record:**
+      1. **Master session log (`docs/sessions.md`):** Every session must be recorded in the log under the current date, strictly following the 5-paragraph standard:
+         - *Paragraph 1 (Context and symptoms):* The essence of the task or the symptoms of the problem;
+         - *Paragraph 2 (Root cause):* The proven primary cause at the level of Win32, redb, message queues, or DOM;
+         - *Paragraph 3 (Architecture decision):* What was done conceptually and which contracts were kept;
+         - *Paragraph 4 (Changed files):* A list of direct relative links to all created and changed files (for example, `[00_master.md](docs/00_master.md)`);
+         - *Paragraph 5 (Verification and metrics):* Results of `udtk doctor`, IPC ping RTT (ms), Working Set RAM (MB), log status, and the `udtk shot` screenshot.
+         - Add a line to the express index at the top of `docs/sessions.md` with the date and the Git commit SHA.
+      2. **Master doc for agents (`docs/00_master.md`):** Update the status dashboard (active gate, module status, metrics) and the link map when new components or documents appear.
+      3. **Normative architecture (`docs/architecture.md`):** Update the specification (§1–§15) **only** if the task changed the architecture contracts of the core, modules, or storage. Dumping day-by-day debugging logs into `architecture.md` is forbidden.
 
 ---
 
-## 4. Архитектурные правила (`docs/architecture.md`)
+## 3. Live debugging commands via the CLI bridge (`opt/cli`)
 
-1. **Микроядро и изоляция модулей:**
-   - Ядро (`core/kernel`) — только каркас: диспетчер IPC-сервера, шина событий, системный трей, хранилища (`unidtk.redb`, `unidtk_logs.redb`) и привязка окна к рабочему столу (`wallpaper.rs`).
-   - Контракт модулей — `core/api` (пакет `unidtk-api`): трейт `Module`, сервисы (лог, события, пути) и `ModuleDb`. Контракт **не имеет права** зависеть от `tauri`, `redb` или Win32.
-   - Модули — вертикальные слайсы `modules/<id>/{rust,ui}`: `clock`, `explorer`, `glyph-bar`, `mp3-player`, `telegram`, `vpn`. Изолированы и независимы друг от друга: `rust/` — бэкенд-половина, `ui/` — фронтенд-половина одного модуля, разносить их по разным модулям запрещено.
-   - Модуль, ставший отдельным крейтом, **не зависит от крейта ядра**: контракт `unidtk-api` для него обязателен, а типы Tauri-хоста (`AppHandle`, `Emitter`, `async_runtime`) допустимы — четыре модуля из пяти уже их используют, и владение своим рантаймом это предполагает. Проверка — `lint_modules_integrity()` в `toolchain/build.rs`. Взаимодействие между модулями — исключительно через события контракта (`unidtk_api::emit` / `subscribe` / `state`), а не вызовы друг друга: Cargo не должен позволить ссылку модуль→модуль.
-   - `#[tauri::command]` объявляются **только в том крейте, где стоит `generate_handler!`** (ядро). Нельзя помечать команду `pub` в крейте-библиотеке: макрос экспортирует `__cmd__<name>` в корень крейта и возникает коллизия `E0255`. Модуль отдаёт обычные функции, ядро делает тонкие обёртки.
+The project implements its own native command-line tool (binary `udtk`, source `opt/cli/main.rs`, built by the single Cargo project `toolchain` into `target/release/udtk.exe`). It uses TCP IPC (`127.0.0.1:26540`) and a native WebSocket CDP in Rust (`tungstenite`), without external scripts or third-party environments.
 
-2. **Хранилища `redb`:**
-   - Полный отказ от SQLite и сторонних C/FFI зависимостей (`rusqlite`, `libsqlite3-sys`).
-   - Данные пользователя (треки, плейлисты, история, AI DJ, конфигурации, настройки виджетов) — в `%LOCALAPPDATA%\UniDTK\unidtk.redb` через чистые Rust-транзакции.
-   - Логи — отдельный файл `%LOCALAPPDATA%\UniDTK\unidtk_logs.redb` (асинхронная очередь, один коммит на батч, `WARN/ERROR` не теряются).
-   - Модули не получают сырой движок базы (`raw_db`): состояние, которое должно жить в общей базе, хранится через `ModuleDb`, которому ядро само выделяет срез ключей `mods/<id>/…` (первый потребитель — библиотека `mp3-player`); остальное модуль держит в своих файлах данных или в памяти.
+### 3.1 Diagnostics, compilation, and status:
+* `udtk doctor [-kernel|-modules|-ping|-env|-check|-quick|-simulate|-all]` (or the built `target/release/udtk.exe doctor ...`)  
+  Comprehensive diagnostics: compilation, presence of DLLs (`libmpv-2.dll`, `tdjson.dll`, `sing-box.exe`), `.env` variables, Task Scheduler task status, core IPC availability, and safe user simulation (`--simulate`).
+* `udtk doctor -check` — checks backend compilation via the CLI bridge (runs a build check, takes tens of seconds, not instant).
+* `udtk doctor -ping` — checks the responsiveness of the core IPC server.
+* `udtk invoke <cmd> [json-args]` — direct call of a core or module command by its name from the manifest (`player_status`, `vpn_status`, `telegram_status`, `log_stats`, …).
+  **`invoke` is a socket door, and it is read-only by design.** Commands declared in the contract as `write` (writing to the log, volume, future VPN/Telegram/explorer operations) are **not** served through it. A refusal with the reason "changes state, and write commands stay on the UI door" is the norm, not a fault. Writes go only through the interface door (Tauri or an authenticated WebSocket); from the CLI they are checked indirectly, via `udtk gui js:…` or by their effects (`udtk logs`). Full list — `udtk help --json`.
+* `udtk logs [--limit N] [--since ID] [--level LEVEL] [--source SOURCE]` — selects records of the core and frontend system log from the `redb` database.
+* `udtk path [status|ensure]` — checks and registers `udtk.exe` in the user's Windows `PATH`.
+* `udtk doc` — renders the project book (README.md and the markdown it links to) to HTML in the cache and opens it, as `rustup doc` opens the Rust documentation.
 
-3. **Неблокирующий запуск и интеграция с `WorkerW`:**
-   - Категорически запрещено выполнять блокирующие вызовы Win32 (`SendMessageTimeoutW`, поиск окон) на главном UI-потоке Tauri. Опрос готовности рабочего стола (`Progman`/`WorkerW`) выполняется строго в фоновом рабочем потоке.
-   - Главный UI-поток привлекается ровно один раз через `run_on_main_thread` для вызова `SetParent` и отображения окна (`window.show()`).
+### 3.2 Managing Windows Task Scheduler tasks and autostart:
+* `udtk tasks status` — checks the state of all registered Windows tasks.
+* `udtk tasks register [all|name]` — generates the XML and registers tasks with automatic privilege elevation via UAC:
+  - `UniDTK` — automatic start of the shell at user logon (`InteractiveToken`, unelevated).
+  - `UniDTKSingbox` — elevated helper for the Sing-Box TUN adapter (`HighestAvailable`).
+  - `UniDTKVpnStop` — elevated helper that stops VPN processes (`HighestAvailable`).
+* `udtk tasks cleanup-old` — automatically finds and deletes obsolete tasks (`NothingWallpaper*`).
+* `udtk autostart [status|enable|disable]` — quick management of the logon task.
 
-4. **Сохранение DOM-состояния и запрет мерцания (`relayoutWidgets`):**
-   - Запрещено выполнять грубый сброс DOM-дерева (`widgetsCanvas.innerHTML = ""`) при событиях изменения геометрии окна, перемещения между мониторами или `display-changed`.
-   - Изменение размеров и привязка обслуживаются мягкой функцией `relayoutWidgets()`, сохраняющей экземпляры виджетов, состояние плеера, сетевые соединения и пользовательский ввод.
+### 3.3 Lifecycle management and build:
+* `udtk build [-j N]` — **the only release build command**: stops the application, in one pass `cargo tauri build --bundles nsis` builds all three binaries and the NSIS installer, silently installs it into `C:\Program Files\UniDTK`, verifies the installation by SHA-256, restarts the application, and gates on live IPC. `-j` overrides the thread count (`CARGO_BUILD_JOBS`); self-build from `Program Files` is forbidden (ACL).
+* `udtk stop` — graceful stop of the application (first its own `quit_app` via CDP, then forced termination of whatever holds the DLLs, and `schtasks /end` for the elevated helpers) — so that the files can be replaced.
+* `udtk run [args...]` — launches the installed application (it lives in the same directory as the CLI: in the shipped product `C:\Program Files\UniDTK`, in a dev run `target\release`). The `--debug` flag has been removed: CDP is always enabled, and the port is discovered via `udtk doctor -ping`.
+* Dev entry without a CLI command: `cd toolchain && cargo tauri dev` (the `udtk dev` command has been removed).
 
-5. **Канонические токены движения (`core/ui/motion.js`):**
-   - Все анимации в виджетах и оверлеях строятся исключительно на стандартизированных токенах:
-     - Кривые (easings): `standard` (`0.4, 0, 0.2, 1`), `spring` (`0.34, 1.56, 0.64, 1`), `expo`/`expoOut` (`0.30, 0.95, 0.35, 1.00`), `expoOutRev`/`surfaceExit` (`0.38, 0.05, 0.45, 1.00`), `smooth` (`0.25, 0.1, 0.25, 1`), `snap`, `content`.
-     - Длительности (durations): `hover` (120ms), `transient` (220ms), `motion` (300ms), `layout` (340ms).
-   - Источник истины длительностей — `setMotionScale()`; CSS-значения в `:root` (`core/ui/styles.css`) — только fallback.
-   - `prefers-reduced-motion` обязателен. Реализован так, чтобы не затирать пользовательскую шкалу: разделены `userScale` (выбор пользователя) и `currentScale` (эффективная, `0.01` при reduced-motion).
-   - Запрещено хардкодить произвольные `cubic-bezier` и случайные тайминги в CSS — все переменные берутся из `:root`.
+**Release build order (verified in practice).** Only `udtk build` builds and deploys. The application must be stopped before the files are replaced (otherwise `os error 32` without a file name); `udtk build` performs the stop itself. The build is heavy: thin LTO is memory-hungry, so the thread count is set in `.cargo/config.toml` (`[build] jobs`), and the compiler stack is `RUST_MIN_STACK=134217728`; `-j N` overrides via `CARGO_BUILD_JOBS`. Tests: `cargo test --release --workspace -j 1` (`-j 2` brings down two LTO builds at once, `0xc000012d`). On an **empty** `target/` the build is impossible without a workaround: `build.rs` requires `../target/release/udtk.exe` and `vpn-helper.exe` (fixed with empty placeholder files, which cargo then overwrites).
 
-6. **Нативные хелперы в Windows Task Scheduler (никаких терминальных врапперов):**
-   - Все фоновые задачи (`UniDTK`, `UniDTKSingbox`, `UniDTKVpnStop`, `SecondDisplayHost`) запускаются строго как нативные бинарники напрямую с аргументами и флагом `<Hidden>true</Hidden>`.
-   - Категорически запрещено использовать `powershell.exe`, `cmd.exe` или `.vbs` для скрытия окон, так как консольная подсистема Windows гарантированно порождает мелькание черного окна на экране.
-   - Именно поэтому VPN-хелпер (`vpn-helper.exe`, `modules/vpn/helper/main.rs` — второй бинарник модуля `vpn`) — отдельный GUI-subsystem бинарник, а не VBS-цепочка: он же обеспечивает остановку VPN за время, укладывающееся в лимит выключения Windows.
+**Interface migration status** (one contract, two doors, own protocol, transport flags `tauri`/`shadow`/`ws`) — `docs/cliudtk.md`, which also holds the acceptance criteria and reports per slice.
 
-7. **Плоский корень репозитория (без вложенной папки):**
-   - Проект лежит прямо в корне репозитория (`Cargo.toml`, `Cargo.lock`, `core/`, `modules/`, `opt/`, `toolchain/`, `docs/`, `assets/`, `scheduler-tasks/`, `tests/`, `target/`, `.cargo/`). Промежуточной папки-обёртки быть не должно.
+### 3.4 Visual and DOM control via CDP:
+* `udtk gui tree` — a compact semantic tree of the interactive elements of WebView2.
+* `udtk gui click:<target> | type:<target>:<text> | press:<key>` — physical input emulation with a receipt, a log delta, and a refusal when the target is covered.
+* `udtk gui js:<expr>` — runs arbitrary JavaScript in the context of the active WebView2.
+* `udtk shot [path] [--json]` — takes a screenshot of the screen via CDP (by default saves to Pictures/Screenshots with a local timestamp and prints the absolute path).
+* `udtk cdp-list` — lists the active pages and CDP targets.
+* `udtk help --json` — the machine-readable manifest of the CLI bridge commands.
 
-8. **Программа — в Program Files, данные — в AppData:**
-   - Установленное приложение целиком живёт в `C:\Program Files\UniDTK` (установщик в режиме `perMachine`): `unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `sing-box.exe`, нативные DLL, `models/`, `modules/`, `scheduler-tasks/`. Каталог доступен только на чтение: **приложение не пишет рядом с собой ничего** (журнал, кэш, состояние — всё в каталоге данных).
-   - Всё изменяемое — в `%LOCALAPPDATA%\UniDTK`: базы (`unidtk.redb`, `unidtk_logs.redb`), `logs/`, `cache/`, `tdlib/` (сессия Telegram), `music/`. Roaming (`%APPDATA%`) не используется вообще, LocalLow — тоже: в конфигах лежат абсолютные пути и `cookies_browser`, такому конфигу нельзя «ехать» с профилем.
-   - Раскладку знает **только** контракт (`unidtk_api::paths`) и ядро. Модуль не собирает пути сам и не открывает базы сам: он объявляет хранилище (`ModuleContext::store` + `StoreSpec`) и работает с выданным `ModuleDb`. Поэтому переезд каталогов не задевает ни один модуль.
-   - `target/` — сборочный кэш, и единственный **артефакт поставки** — установщик (`target/release/bundle/`). `udtk run` запускает приложение из того же каталога, где лежит сам CLI, а не ищет бинарник по репозиторию.
-   - Зашитых абсолютных путей в репозитории быть не должно: шаблоны задач (`scheduler-tasks/*.xml`) содержат `@INSTALL_DIR@`, подстановку делает регистрация. Задачи и PATH ставит установщик (`toolchain/windows/hooks.nsh` → `udtk tasks register all` / `udtk path ensure`), а не первый запуск приложения.
+---
 
-9. **Двухуровневая фиксация документации (Мастердок SSOT + Журнал сессий):**
-   - **`docs/00_master.md` (Мастердок для агентов / MOC):** Единая входная точка в базу знаний репозитория. Содержит экспресс-дашборд статуса, метрики рантайма, L1-роутер документации и топологию модулей. Обновляется при смене активного фокуса, добавлении модулей или документов.
-   - **`docs/sessions.md` (Мастер-журнал сессий по дням):** Хронологический бортовой журнал всех инженерных сессий (Newest First). Каждая сессия фиксируется строго по 5-параграфическому стандарту:
-     1. *Контекст и симптомы задачи;*
-     2. *Доказанная корневая причина (Win32, DOM, redb, race conditions);*
-     3. *Архитектурное решение и инварианты;*
-     4. *Изменённые файлы (прямые относительные ссылки вида `[name](path)`);*
-     5. *Верификация в рантайме (вызовы CLI `udtk`, RTT IPC ping, Working Set RAM, статус логов, скриншот `udtk shot`).*
-     - Обязательно вносится запись в экспресс-индекс в начале файла с датой и Git Commit SHA.
-   - **`docs/architecture.md` (Нормативная архитектурная книга):** Строгий неизменяемый стандарт ядра, контракта `unidtk-api`, хранилищ `redb`, интеграции с Win32 WorkerW и дизайн-системы Nothing OS. **Категорически запрещено** сбрасывать подневные отладочные логи и багфиксы в `architecture.md` — файл поддерживается компактным (<350 строк, <30 КБ, чтение за один tool-call) и актуализируется только при изменении фундаментальных системных контрактов.
+## 4. Architecture rules (`docs/architecture.md`)
 
+1. **Microkernel and module isolation:**
+   - The core (`core/kernel`) is only the frame: the IPC server dispatcher, the event bus, the system tray, storage (`unidtk.redb`, `unidtk_logs.redb`), and the attachment of the window to the desktop (`wallpaper.rs`).
+   - The module contract is `core/api` (package `unidtk-api`): the `Module` trait, services (log, events, paths), and `ModuleDb`. The contract **must not** depend on `tauri`, `redb`, or Win32.
+   - Modules are vertical slices `modules/<id>/{rust,ui}`: `clock`, `explorer`, `glyph-bar`, `mp3-player`, `telegram`, `vpn`. They are isolated and independent of each other: `rust/` is the backend half, `ui/` is the frontend half of one module; splitting them across different modules is forbidden.
+   - A module that is a separate crate **does not depend on the core crate**: the `unidtk-api` contract is mandatory for it, and the Tauri host types (`AppHandle`, `Emitter`, `async_runtime`) are allowed — four of the five modules already use them, and owning its own runtime presupposes this. The check is `lint_modules_integrity()` in `toolchain/build.rs`. Interaction between modules is exclusively through the contract's events (`unidtk_api::emit` / `subscribe` / `state`), not by calling each other: Cargo must not allow a module→module reference.
+   - `#[tauri::command]` is declared **only in the crate where `generate_handler!` is placed** (the core). A command must not be marked `pub` in a library crate: the macro exports `__cmd__<name>` to the crate root and a collision `E0255` occurs. A module exposes plain functions; the core makes thin wrappers.
+
+2. **`redb` storage:**
+   - Complete rejection of SQLite and third-party C/FFI dependencies (`rusqlite`, `libsqlite3-sys`).
+   - User data (tracks, playlists, history, AI DJ, configurations, widget settings) — in `%LOCALAPPDATA%\UniDTK\unidtk.redb` via pure Rust transactions.
+   - Logs — a separate file `%LOCALAPPDATA%\UniDTK\unidtk_logs.redb` (asynchronous queue, one commit per batch, `WARN/ERROR` are not lost).
+   - Modules do not receive the raw database engine (`raw_db`): state that must live in the shared database is stored via `ModuleDb`, to which the core itself allocates a key slice `mods/<id>/…` (the first consumer is the `mp3-player` library); everything else the module keeps in its own data files or in memory.
+
+3. **Non-blocking startup and integration with `WorkerW`:**
+   - It is strictly forbidden to run blocking Win32 calls (`SendMessageTimeoutW`, window search) on the Tauri main UI thread. Polling the readiness of the desktop (`Progman`/`WorkerW`) is done strictly on a background worker thread.
+   - The main UI thread is used exactly once, via `run_on_main_thread`, to call `SetParent` and show the window (`window.show()`).
+
+4. **Preserving DOM state and preventing flicker (`relayoutWidgets`):**
+   - It is forbidden to perform a blunt reset of the DOM tree (`widgetsCanvas.innerHTML = ""`) on window geometry changes, moves between monitors, or `display-changed` events.
+   - Resizing and anchoring are handled by the gentle function `relayoutWidgets()`, which keeps widget instances, player state, network connections, and user input.
+
+5. **Canonical motion tokens (`core/ui/motion.js`):**
+   - All animations in widgets and overlays are built exclusively on standardized tokens:
+     - Easings: `standard` (`0.4, 0, 0.2, 1`), `spring` (`0.34, 1.56, 0.64, 1`), `expo`/`expoOut` (`0.30, 0.95, 0.35, 1.00`), `expoOutRev`/`surfaceExit` (`0.38, 0.05, 0.45, 1.00`), `smooth` (`0.25, 0.1, 0.25, 1`), `snap`, `content`.
+     - Durations: `hover` (120 ms), `transient` (220 ms), `motion` (300 ms), `layout` (340 ms).
+   - The source of truth for durations is `setMotionScale()`; the CSS values in `:root` (`core/ui/styles.css`) are only a fallback.
+   - `prefers-reduced-motion` is mandatory. It is implemented so that it does not overwrite the user's scale: `userScale` (the user's choice) and `currentScale` (the effective one, `0.01` under reduced motion) are kept separate.
+   - Hardcoding arbitrary `cubic-bezier` values and random timings in CSS is forbidden — all variables are taken from `:root`.
+
+6. **Native helpers in Windows Task Scheduler (no terminal wrappers):**
+   - All background tasks (`UniDTK`, `UniDTKSingbox`, `UniDTKVpnStop`, `SecondDisplayHost`) run strictly as native binaries directly, with arguments and the `<Hidden>true</Hidden>` flag.
+   - It is strictly forbidden to use `powershell.exe`, `cmd.exe`, or `.vbs` to hide windows, because the Windows console subsystem is guaranteed to flash a black window on screen.
+   - That is why the VPN helper (`vpn-helper.exe`, `modules/vpn/helper/main.rs` — the second binary of the `vpn` module) is a separate GUI-subsystem binary, not a VBS chain: it also stops the VPN within the Windows shutdown time limit.
+
+7. **Flat repository root (no nested folder):**
+   - The project lies directly in the repository root (`Cargo.toml`, `Cargo.lock`, `core/`, `modules/`, `opt/`, `toolchain/`, `docs/`, `assets/`, `scheduler-tasks/`, `tests/`, `target/`, `.cargo/`). There must be no intermediate wrapper folder.
+
+8. **Program in Program Files, data in AppData:**
+   - The installed application lives entirely in `C:\Program Files\UniDTK` (installer in `perMachine` mode): `unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `sing-box.exe`, native DLLs, `models/`, `modules/`, `scheduler-tasks/`. The directory is read-only: **the application writes nothing next to itself** (log, cache, state — everything goes to the data directory).
+   - Everything mutable is in `%LOCALAPPDATA%\UniDTK`: databases (`unidtk.redb`, `unidtk_logs.redb`), `logs/`, `cache/`, `tdlib/` (Telegram session), `music/`. Roaming (`%APPDATA%`) is not used at all, and neither is LocalLow: configs contain absolute paths and `cookies_browser`, so such a config must not travel with the profile.
+   - Only the contract (`unidtk_api::paths`) and the core know the layout. A module does not build paths itself and does not open databases itself: it declares a store (`ModuleContext::store` + `StoreSpec`) and works with the issued `ModuleDb`. That is why moving the directories affects no module.
+   - `target/` is the build cache, and the only **shipped artifact** is the installer (`target/release/bundle/`). `udtk run` launches the application from the same directory where the CLI itself lives, rather than searching for the binary in the repository.
+   - The repository must contain no hardcoded absolute paths: task templates (`scheduler-tasks/*.xml`) contain `@INSTALL_DIR@`, which registration substitutes. Tasks and PATH are set up by the installer (`toolchain/windows/hooks.nsh` → `udtk tasks register all` / `udtk path ensure`), not by the first launch of the application.
+
+9. **Two-level documentation record (master SSOT + session log):**
+   - **`docs/00_master.md` (master doc for agents / MOC):** The single entry point into the repository's knowledge base. It contains the express status dashboard, runtime metrics, the L1 documentation router, and the module topology. It is updated when the active focus changes, or when modules or documents are added.
+   - **`docs/sessions.md` (master session log by day):** The chronological on-board log of all engineering sessions (newest first). Each session is recorded strictly by the 5-paragraph standard:
+     1. *Task context and symptoms;*
+     2. *Proven root cause (Win32, DOM, redb, race conditions);*
+     3. *Architecture decision and invariants;*
+     4. *Changed files (direct relative links of the form `[name](path)`);*
+     5. *Runtime verification (`udtk` CLI calls, IPC ping RTT, Working Set RAM, log status, `udtk shot` screenshot).*
+     - An entry in the express index at the top of the file, with the date and the Git commit SHA, is mandatory.
+   - **`docs/architecture.md` (normative architecture book):** A strict, unchanging standard for the core, the `unidtk-api` contract, the `redb` stores, integration with Win32 WorkerW, and the Nothing OS design system. **Dumping day-by-day debugging logs and bug fixes into `architecture.md` is strictly forbidden** — the file is kept compact (under 350 lines, under 30 KB, readable in one tool call) and is updated only when fundamental system contracts change.
+
+Session log entries and all documentation are written in English.

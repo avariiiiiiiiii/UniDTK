@@ -1,58 +1,58 @@
-# Архитектура топиков форумов, сообществ Telegram и управления зависимостями
+# Architecture of Forum Topics, Telegram Communities and Dependency Management
 
-> **Статус документа:** Принято и внедрено  
-> **Дата:** 2026-09-01  
-> **Связанные компоненты:** `backend/modules/telegram`, `frontend/modules/telegram`, `backend/toolchain/build.rs`, `backend/cli`
-
----
-
-## 1. Контекст и проблематика
-
-В предыдущей версии виджета Telegram в Shell группы с топиками (форумы TDLib) и сообщества каналов/групп (Community Hubs, например `Re:Zero | Элиор`) отображались как обычные плоские чаты.
-
-### Требования пользователя:
-1. **Форумы и топики**: При клике на группу с топиками левый список чатов должен сворачиваться в компактную полосу аватаров (rail), освобождая место под колонку топиков (200px), при этом правая область сообщений (тред) не должна сбрасываться или перезагружаться.
-2. **Сообщества каналов (Communities)**: Сообщества (как `Re:Zero | Элиор`), объединяющие несколько связанных каналов и групп, должны работать аналогично топикам: центральная колонка отображает список связанных подчатов (например, `Re:Zero / Аниме 3 сезон`, `Re:Zero | Элиор`, `Ледяной лес Элиор`), клик по которым переключает активный тред на этот канал.
-3. **Запрет на ручные копирования**: Все бинарные зависимости (`tdjson.dll`, `libmpv-2.dll`, `xray.exe`) хранятся в канонической папке `backend/opt/` и автоматически переносятся сборочной системой `build.rs` в `target/release/` при вызове `cargo build`.
-4. **Механизм обновления зависимостей**: Наличие единого автоматизированного инструмента для проверки и обновления нативных библиотек.
+> **Document status:** Accepted and implemented  
+> **Date:** 2026-09-01  
+> **Related components:** `backend/modules/telegram`, `frontend/modules/telegram`, `backend/toolchain/build.rs`, `backend/cli`
 
 ---
 
-## 2. Обновление TDLib до версии 1.8.67
+## 1. Context and problem statement
 
-### 2.1 Нативные бинарники
-Из официального NuGet-репозитория `tdlib.native.win-x64` (версия 1.8.67 от 26 августа 2026 г.) загружены актуальные 64-битные библиотеки Windows:
-* `backend/opt/tdlib-native/win32-x64/tdjson.dll` (27.5 МБ)
+In the previous version of the Telegram widget in Shell, groups with topics (TDLib forums) and channel/group communities (Community Hubs, e.g. `Re:Zero | Элиор`) were shown as ordinary flat chats.
+
+### User requirements:
+1. **Forums and topics**: when a group with topics is clicked, the left chat list must collapse into a compact strip of avatars (rail), freeing space for a topic column (200px), while the right message area (the thread) must not be reset or reloaded.
+2. **Channel communities (Communities)**: communities (such as `Re:Zero | Элиор`) that group several related channels and groups must work like topics: the middle column shows the list of related subchats (e.g. `Re:Zero / Аниме 3 сезон`, `Re:Zero | Элиор`, `Ледяной лес Элиор`), and clicking one switches the active thread to that channel.
+3. **No manual copying**: all binary dependencies (`tdjson.dll`, `libmpv-2.dll`, `xray.exe`) are kept in the canonical folder `backend/opt/` and are copied automatically by the build system `build.rs` into `target/release/` when `cargo build` runs.
+4. **Dependency update mechanism**: a single automated tool for checking and updating the native libraries.
+
+---
+
+## 2. Updating TDLib to version 1.8.67
+
+### 2.1 Native binaries
+The current 64-bit Windows libraries were downloaded from the official NuGet repository `tdlib.native.win-x64` (version 1.8.67, dated 26 August 2026):
+* `backend/opt/tdlib-native/win32-x64/tdjson.dll` (27.5 MB)
 * `backend/opt/tdlib-native/win32-x64/libcrypto-3-x64.dll`
 * `backend/opt/tdlib-native/win32-x64/libssl-3-x64.dll`
 * `backend/opt/tdlib-native/win32-x64/z.dll`
 
-### 2.2 Поддержка Telegram Communities на уровне ядра
-Бинарный файл TDLib 1.8.67 нативно включает в себя сущности Communities:
+### 2.2 Telegram Communities support at the core level
+The TDLib 1.8.67 binary natively includes the Communities entities:
 * `updateCommunity`, `updateCommunityFullInfo`, `loadCommunityFullInfo`
 * `dialogPeerCommunity`
 * `linked_community_id`, `on_update_channel_linked_community_id`
 
 ---
 
-## 3. Автоматизация сборки (`backend/toolchain/build.rs`)
+## 3. Build automation (`backend/toolchain/build.rs`)
 
-В файл сборки `backend/toolchain/build.rs` интегрирована процедура `copy_native_binaries`:
-* Сканирует директории:
+The build file `backend/toolchain/build.rs` integrates the `copy_native_binaries` procedure:
+* Scans the directories:
   * `backend/opt/tdlib-native/win32-x64/`
   * `backend/opt/libmpv/`
   * `backend/opt/xray/`
-* При сборке проверяет наличие и временные метки каждого файла `*.dll` и `*.exe`.
-* Если файл отсутствует или обновлен, он автоматически копируется в целевую директорию (`target/release/` или `target/debug/`) рядом с `shell.exe`.
-* Манифест `backend/toolchain/tauri.conf.json` обновлен новыми библиотеками OpenSSL 3 и zlib.
+* For each `*.dll` and `*.exe` file, checks existence and timestamps during the build.
+* If a file is missing or outdated, it is automatically copied into the target directory (`target/release/` or `target/debug/`) next to `shell.exe`.
+* The manifest `backend/toolchain/tauri.conf.json` was updated with the new OpenSSL 3 and zlib libraries.
 
 ---
 
-## 4. Бэкенд-реализация (`backend/modules/telegram/telegram.rs`)
+## 4. Backend implementation (`backend/modules/telegram/telegram.rs`)
 
-### 4.1 Распознавание супергрупп-форумов и сообществ
-В TDLib JSON API форумы не содержат поля `chat.is_forum`. Актуальное свойство — `chat.view_as_topics: bool`.
-В `parse_chat`:
+### 4.1 Detecting supergroup forums and communities
+In the TDLib JSON API, forums do not contain a `chat.is_forum` field. The current property is `chat.view_as_topics: bool`.
+In `parse_chat`:
 ```rust
 let is_forum = chat
     .get("view_as_topics")
@@ -61,16 +61,16 @@ let is_forum = chat
     .or_else(|| chat.get("is_forum").and_then(Value::as_bool))
     .unwrap_or(false);
 ```
-Также извлекаются поля `linked_community_id` и флаг наличия подчатов `has_subchats`.
+The `linked_community_id` field and the `has_subchats` flag (indicating the presence of subchats) are also extracted.
 
-### 4.2 Fallback для подчатов сообществ в `get_forum_topics`
-Когда пользователь открывает сообщество (например, канал `Re:Zero | Элиор`), прямой запрос TDLib `getForumTopics` возвращает `400: The chat is not a forum`, поскольку это сущность сообщества.
-В `get_forum_topics` реализован интеллектуальный fallback:
-* Если `getForumTopics` возвращает ошибку или пустой массив, ядро проверяет базу загруженных чатов `inner.chats`.
-* Находятся все каналы и группы, связанные с родительским сообществом:
+### 4.2 Fallback for community subchats in `get_forum_topics`
+When the user opens a community (for example the channel `Re:Zero | Элиор`), a direct TDLib `getForumTopics` request returns `400: The chat is not a forum`, because this is a community entity.
+`get_forum_topics` implements an intelligent fallback:
+* If `getForumTopics` returns an error or an empty array, the core checks the loaded chat database `inner.chats`.
+* It finds all channels and groups linked to the parent community:
   * `c.linked_community_id == parent_id`
-  * Совпадение префикса/тега сообщества (например, чат `Ледяной лес Элиор` и канал `Re:Zero / Аниме 3 сезон`).
-* Найденные подчаты оборачиваются в формат `forumTopics` с передачей `subchat_id`:
+  * A match of the community prefix/tag (e.g. the chat `Ледяной лес Элиор` and the channel `Re:Zero / Аниме 3 сезон`).
+* The found subchats are wrapped into the `forumTopics` format, passing `subchat_id`:
 ```rust
 json!({
     "info": {
@@ -87,56 +87,56 @@ json!({
 
 ---
 
-## 5. Фронтенд-реализация (`widget.js` & `styles.css`)
+## 5. Frontend implementation (`widget.js` & `styles.css`)
 
-### 5.1 Трехколоночная сетка
-В `frontend/styles.css` определен режим `.tg-layout.forum-topics`:
-* Сетка: `grid-template-columns: 46px 200px minmax(0, 1fr)`.
-* **Колонка 1 (`.tg-chat-list`)**: сжимается до 46px, строки чатов центрируются, текстовые блоки (`.tg-row-main`, `.tg-row-unread`, `.tg-row-time`) скрываются, остаётся компактный рейл аватаров скроллируемого списка чатов.
-* **Колонка 2 (`.tg-topics-list`)**: ширина 200px. Содержит шапку с кнопкой «← Все чаты» (`data-action="back-to-chats"`), названием родительской группы/сообщества и интерактивным списком топиков/подчатов.
-* **Колонка 3 (`.tg-thread`)**: занимает всю оставшуюся ширину. Не сбрасывается при открытии топиков, сохраняя непрерывность восприятия.
+### 5.1 Three-column grid
+`frontend/styles.css` defines the `.tg-layout.forum-topics` mode:
+* Grid: `grid-template-columns: 46px 200px minmax(0, 1fr)`.
+* **Column 1 (`.tg-chat-list`)**: shrinks to 46px, chat rows are centered, the text blocks (`.tg-row-main`, `.tg-row-unread`, `.tg-row-time`) are hidden, leaving a compact rail of avatars in the scrollable chat list.
+* **Column 2 (`.tg-topics-list`)**: 200px wide. Contains a header with the button `← Все чаты` ("← All chats", `data-action="back-to-chats"`), the name of the parent group/community, and an interactive list of topics/subchats.
+* **Column 3 (`.tg-thread`)**: takes all remaining width. It is not reset when topics are opened, which keeps the reading flow continuous.
 
-### 5.2 Кэширование сообщений по топикам
-* Сообщения кэшируются под ключом `chatId::threadId` (для топиков) и `chatId` (для подчатов и обычных чатов).
-* При выборе топика в `refreshTelegramMessages` передается целочисленный `threadId`, а результат сохраняется в изолированном сегменте кэша.
+### 5.2 Caching messages per topic
+* Messages are cached under the key `chatId::threadId` (for topics) and `chatId` (for subchats and ordinary chats).
+* When a topic is selected, `refreshTelegramMessages` receives an integer `threadId`, and the result is stored in an isolated cache segment.
 
-### 5.3 Навигация назад
-* Клик на кнопку «← Все чаты» сбрасывает `telegramRuntime.forumOpenChatId = null`.
-* Сетка виджета возвращается в двухколоночный вид (`.forum-topics` удаляется), а список чатов разворачивается обратно.
+### 5.3 Back navigation
+* Clicking the `← Все чаты` ("← All chats") button resets `telegramRuntime.forumOpenChatId = null`.
+* The widget grid returns to the two-column view (`.forum-topics` is removed), and the chat list expands back.
 
 ---
 
-## 6. Авто-обновление зависимостей (`scripts/update-deps.ps1`)
+## 6. Automatic dependency updates (`scripts/update-deps.ps1`)
 
-Создан скрипт автоматического обновления нативных бинарников:
+A script for automatic updating of the native binaries was created:
 
 ```powershell
-# Только проверка актуальности версий:
+# Check versions only:
 .\scripts\update-deps.ps1 -CheckOnly
 
-# Обновление TDLib из NuGet:
+# Update TDLib from NuGet:
 .\scripts\update-deps.ps1 -Component tdlib
 
-# Обновление всех компонентов (TDLib, libmpv, Xray) + вызов shell doctor:
+# Update every component (TDLib, libmpv, Xray), then run shell doctor:
 .\scripts\update-deps.ps1 -All
 ```
 
-### Источники обновления:
-1. **TDLib**: официальный NuGet `tdlib.native.win-x64` -> `backend/opt/tdlib-native/win32-x64/`.
+### Update sources:
+1. **TDLib**: official NuGet `tdlib.native.win-x64` -> `backend/opt/tdlib-native/win32-x64/`.
 2. **libmpv**: GitHub Releases `shinchiro/mpv-winbuild-cmake` -> `backend/opt/libmpv/`.
 3. **Xray**: GitHub Releases `XTLS/Xray-core` -> `backend/opt/xray/`.
 
 ---
 
-## 7. Протокол верификации и результаты
+## 7. Verification protocol and results
 
-Верификация проведена в соответствии с 5-ступенчатым протоколом сквозного контроля:
+Verification was performed according to the 5-step end-to-end check protocol:
 
-| Этап | Команда / Метод | Результат |
+| Stage | Command / Method | Result |
 | :--- | :--- | :--- |
-| **1. Статический контроль** | `cargo check`, `node --check` | Без ошибок (0 предупреждений) |
-| **2. Полная сборка** | `cargo build --release` | Код возврата 0 (2м 30с) |
-| **3. Диагностика рантайма** | `shell doctor` | Все DLL обнаружены, IPC активен |
-| **4. Тестирование форумов** | `shell act click "qbc"` -> `shell act click "General"` | 4 топика открыты в колонке, сообщения ветки General загружены |
-| **5. Тестирование сообществ** | `shell act click "Re:Zero \| Элиор"` -> `shell act click "Ледяной лес Элиор"` | 3 канала сообщества отображены в колонке, открыт подчат `Ледяной лес Элиор` |
-| **6. Навигация назад** | `shell act click "Назад к чатам"` | Плавное закрытие колонки топиков, возврат списка чатов |
+| **1. Static check** | `cargo check`, `node --check` | No errors (0 warnings) |
+| **2. Full build** | `cargo build --release` | Exit code 0 (2m 30s) |
+| **3. Runtime diagnostics** | `shell doctor` | All DLLs found, IPC active |
+| **4. Forum testing** | `shell act click "qbc"` -> `shell act click "General"` | 4 topics opened in the column, messages of the General thread loaded |
+| **5. Community testing** | `shell act click "Re:Zero \| Элиор"` -> `shell act click "Ледяной лес Элиор"` | 3 community channels shown in the column, the subchat `Ледяной лес Элиор` opened |
+| **6. Back navigation** | `shell act click "Назад к чатам"` | Smooth closing of the topic column, return to the chat list |

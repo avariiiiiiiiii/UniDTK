@@ -1,14 +1,14 @@
-# `udtk` — CLI-мост UniDTK
+# `udtk` — the UniDTK CLI bridge
 
-Справочник по нативному CLI-мосту проекта **UniDTK** (Unified Desktop Täglich Kit): команды, флаги, внутреннее устройство, контур диагностики и правила, которые обязан соблюдать каждый модуль.
+Reference for the native CLI bridge of the **UniDTK** project (Unified Desktop Täglich Kit): its commands, flags, internals, the diagnostic loop, and the rules every module must follow.
 
-> Источник истины — `opt/cli/main.rs` (+ `opt/cli/splash.rs`, `opt/cli/splash_art.rs`). Документ описывает состояние на 18.09.2026 (после сессий 58–60).
+> Source of truth — `opt/cli/main.rs` (+ `opt/cli/splash.rs`, `opt/cli/splash_art.rs`). This document describes the state as of 18.09.2026 (after sessions 58–60).
 
 ---
 
-## 1. Что это и где лежит
+## 1. What it is and where it lives
 
-`udtk` — второй бинарник единственного Cargo-проекта `toolchain/` (там же `unidtk` и `vpn-helper`):
+`udtk` is the second binary of the single Cargo project `toolchain/` (alongside `unidtk` and `vpn-helper`):
 
 ```toml
 [[bin]] name = "unidtk"     path = "../core/kernel/main.rs"
@@ -16,137 +16,137 @@
 [[bin]] name = "vpn-helper" path = "../modules/vpn/helper/main.rs"
 ```
 
-* Сборка: `cargo build --release --bins` из корня репозитория (артефакты Cargo сам кладёт в единый `target/release/`, задаваемый `.cargo/config.toml`).
-* В поставке CLI и приложение лежат **рядом**: `C:\Program Files\UniDTK\{unidtk.exe, udtk.exe, vpn-helper.exe, sing-box.exe, …}`.
-* Внешних зависимостей и скриптовых обёрток нет — вся работа с ядром и фронтендом идёт на нативном Rust.
+* Build: `cargo build --release --bins` from the repository root. Cargo places the artifacts into the single `target/release/` directory, which `.cargo/config.toml` sets.
+* In a shipped install, the CLI and the app sit **next to each other**: `C:\Program Files\UniDTK\{unidtk.exe, udtk.exe, vpn-helper.exe, sing-box.exe, …}`.
+* There are no external dependencies and no script wrappers. All work with the kernel and the frontend runs on native Rust.
 
-### Транспорт
+### Transport
 
-| Канал | Адрес | Кто поднимает | Что даёт |
+| Channel | Address | Who starts it | What it provides |
 |---|---|---|---|
-| IPC (TCP, JSON-строки) | `127.0.0.1:26540` | `unidtk.exe` (ядро) | `invoke`, `logs`, `doctor -ping/-simulate`, baseline `log_max_id` |
-| CDP (HTTP + WebSocket) | порт выбирает приложение (обычно `127.0.0.1:9222`), публикуется в IPC `ping` → `cdpPort` | WebView2, включён всегда | `gui`, `dom`, `eval`, `shot`, `cdp-list`, CDP-часть `doctor -simulate` |
+| IPC (TCP, JSON lines) | `127.0.0.1:26540` | `unidtk.exe` (kernel) | `invoke`, `logs`, `doctor -ping/-simulate`, baseline `log_max_id` |
+| CDP (HTTP + WebSocket) | the app picks the port (usually `127.0.0.1:9222`), published in the IPC `ping` reply → `cdpPort` | WebView2, always enabled | `gui`, `dom`, `eval`, `shot`, `cdp-list`, the CDP part of `doctor -simulate` |
 
-Таймауты IPC: подключение 500 мс, чтение/запись 2500 мс. Запрос — одна JSON-строка `{"cmd": …, "args": …}`, ответ — `{"ok": true, "result": …}` либо `{"ok": false, "error": …}`.
+IPC timeouts: connect 500 ms, read/write 2500 ms. A request is one JSON line `{"cmd": …, "args": …}`. The reply is `{"ok": true, "result": …}` or `{"ok": false, "error": …}`.
 
-### Коды возврата
+### Exit codes
 
-| Код | Значение |
+| Code | Meaning |
 |---|---|
-| `0` | Успех (в т.ч. `doctor`: все проверки пройдены) |
-| `1` | Ошибка выполнения / недоступный IPC / удалённая команда / провал `doctor` |
-| `2` | Некорректные аргументы: неизвестная команда, неизвестный флаг `doctor` |
+| `0` | Success (for `doctor`: all checks passed) |
+| `1` | Execution error / unreachable IPC / remote command failed / `doctor` failure |
+| `2` | Invalid arguments: unknown command, unknown `doctor` flag |
 
-Неизвестные флаги `doctor` отклоняются строго (whitelist `ALLOWED_DOCTOR_FLAGS`) — никакого «молча проигнорирую».
+Unknown `doctor` flags are rejected strictly (whitelist `ALLOWED_DOCTOR_FLAGS`). Nothing is "silently ignored".
 
 ---
 
-## 2. Сводка команд
+## 2. Command summary
 
-| Команда | Назначение | Требует запущенного приложения |
+| Command | Purpose | Requires the running app |
 |---|---|---|
-| `udtk` (без аргументов) | Печать брендового сплэша + карта команд | нет |
-| `udtk doctor [флаги]` | Комплексная неразрушающая диагностика (компилятор, зависимости, ядро, модули, IPC, симуляция) | частично (`-ping`, `-simulate`) |
-| `udtk invoke <cmd> [json]` | Прямой вызов IPC-команды ядра/модуля | да |
-| `udtk logs [фильтры]` | Выборка журнала из `unidtk_logs.redb` через IPC | да |
-| `udtk gui [шаги]` | Управление страницей одной CDP-сессией: `js:`, `click:`, `type:`, `press:`, `tree`, `wait:` | да (+CDP) |
-| `udtk shot [path] [--json] [-q]` | Скриншот через CDP (по умолчанию `Pictures/Screenshots`) | да (+CDP) |
-| `udtk cdp-list` | Список CDP-мишеней/страниц | да (+CDP) |
-| `udtk tasks [status\|register\|unregister\|cleanup-old]` | Управление задачами Windows Task Scheduler | нет |
-| `udtk autostart [status\|enable\|disable]` | Быстрое управление автозапуском (`UniDTK`) | нет |
-| `udtk path [status\|ensure]` | Проверка/регистрация каталога CLI в User PATH | нет |
-| `udtk build` | Полная релизная сборка + раскладка ресурсов | нет |
-| `udtk dev [--debug]` | `cargo tauri dev` (+ CDP на 9222) | нет |
-| `udtk run [args…] [--debug]` | Запуск приложения из каталога, где лежит сам CLI | нет |
-| `udtk help [--json]` | Текст помощи; `--json` — машинный манифест команд | нет |
+| `udtk` (no arguments) | Prints the branded splash and the command map | no |
+| `udtk doctor [flags]` | Comprehensive non-destructive diagnostics (compiler, dependencies, kernel, modules, IPC, simulation) | partly (`-ping`, `-simulate`) |
+| `udtk invoke <cmd> [json]` | Direct call of a kernel/module IPC command | yes |
+| `udtk logs [filters]` | Reads log entries from `unidtk_logs.redb` over IPC | yes |
+| `udtk gui [steps]` | Drives the page through a single CDP session: `js:`, `click:`, `type:`, `press:`, `tree`, `wait:` | yes (+CDP) |
+| `udtk shot [path] [--json] [-q]` | Screenshot via CDP (default `Pictures/Screenshots`) | yes (+CDP) |
+| `udtk cdp-list` | Lists CDP targets/pages | yes (+CDP) |
+| `udtk tasks [status\|register\|unregister\|cleanup-old]` | Manages Windows Task Scheduler tasks | no |
+| `udtk autostart [status\|enable\|disable]` | Quick control of autostart (`UniDTK`) | no |
+| `udtk path [status\|ensure]` | Checks/registers the CLI directory in the User PATH | no |
+| `udtk build` | Full release build + resource layout | no |
+| `udtk dev [--debug]` | `cargo tauri dev` (+ CDP on 9222) | no |
+| `udtk run [args…] [--debug]` | Starts the app from the directory that holds the CLI itself | no |
+| `udtk help [--json]` | Help text; `--json` gives the machine-readable command manifest | no |
 
-Отсутствующие команды:
+Commands that no longer exist:
 
-* `udtk ping` и `udtk status` больше не существуют — ни самих команд, ни алиасов, ни редиректов: обе отдают `error: unknown command: …` + справку в stderr и завершаются с кодом 2. Пинг живёт только как флаг `doctor -ping`.
-* `udtk check` тоже удалён — вместо него `udtk doctor -check` (иначе `error: unknown command: check`, exit 2).
-* `udtk commands` удалён — машинный манифест переехал во флаг `udtk help --json` (иначе `error: unknown command: commands`, exit 2).
-* Алиасы `-h` и `--help` тоже убраны: справка вызывается только как `udtk help` (голый `udtk` печатает сплэш, а `udtk -h` — `unknown command`, exit 2).
-* Лишние синонимы флагов `doctor` убраны: `-cargo`/`--cargo` (дубль `-check`) и `-sim`/`--sim` (дубль `-simulate`), а также исторические `-app`/`--app` и `-ipc`/`--ipc`. У каждого флага остаётся ровно пара `-x`/`--x`; всё остальное → `error: unrecognized flag '…'`, exit 2.
+* `udtk ping` and `udtk status` are gone. There is no command, alias, or redirect for either. Both print `error: unknown command: …` plus help to stderr and exit with code 2. Ping lives only as the flag `doctor -ping`.
+* `udtk check` was removed too. Use `udtk doctor -check` instead (otherwise `error: unknown command: check`, exit 2).
+* `udtk commands` was removed. The machine manifest moved to the flag `udtk help --json` (otherwise `error: unknown command: commands`, exit 2).
+* The aliases `-h` and `--help` were removed. Help is invoked only as `udtk help`. A bare `udtk` prints the splash, while `udtk -h` gives `unknown command`, exit 2.
+* Redundant `doctor` flag synonyms were removed: `-cargo`/`--cargo` (a duplicate of `-check`) and `-sim`/`--sim` (a duplicate of `-simulate`), as well as the historical `-app`/`--app` and `-ipc`/`--ipc`. Each flag keeps exactly one `-x`/`--x` pair. Anything else gives `error: unrecognized flag '…'`, exit 2.
 
 ---
 
-## 3. `udtk doctor` — контур диагностики
+## 3. `udtk doctor` — the diagnostic loop
 
-Единая точка проверки здоровья. Никакой «живой телеметрии» с захардкоженными переменными ядра: всё строится на декларативных манифестах модулей и полиморфных вызовах контракта `unidtk-api`.
+A single health-check entry point. There is no "live telemetry" with hardcoded kernel variables. Everything is built from declarative module manifests and polymorphic calls of the `unidtk-api` contract.
 
-### 3.1 Флаги
+### 3.1 Flags
 
-| Флаг (алиасы) | Секция | Что делает |
+| Flag (aliases) | Section | What it does |
 |---|---|---|
-| `-check`, `--check` | compiler & build | `cargo check` в `toolchain/` |
-| `-env`, `--env` | dependencies & DLLs | Наличие `libmpv-2.dll`, `tdjson.dll`, `sing-box.exe`, `vpn-helper.exe`, `ciadpi.exe` (ByeDPI, Optional — из манифеста telegram); `.env`; веса `opt/models/discogs-maest-129e/{model.onnx,model.onnx.data}`; состояние задач планировщика + детект устаревших |
-| `-kernel`, `--kernel` | kernel diagnostics | Сухая эмуляция подсистем ядра (см. 3.3) |
-| `-modules`, `--modules` | modules diagnostics | Декларативные зависимости + жизненный цикл всех модулей (см. 3.4) |
-| `-ping`, `--ping` | runtime & IPC | TCP-опрос ядра (500 мс) + телеметрия `log_stats` |
-| `-quick`, `--quick` | — | Быстрый прогон без компиляции: `env + kernel + modules + ping` |
-| `-simulate`, `--simulate` | user simulation | Сквозная симуляция действий и CDP-прогон функций рендеринга (см. 3.2) |
-| `-all`, `--all` | всё | Комплексный аудит (режим по умолчанию) |
+| `-check`, `--check` | compiler & build | `cargo check` in `toolchain/` |
+| `-env`, `--env` | dependencies & DLLs | Presence of `libmpv-2.dll`, `tdjson.dll`, `sing-box.exe`, `vpn-helper.exe`, `ciadpi.exe` (ByeDPI, Optional, from the telegram manifest); `.env`; weights `opt/models/discogs-maest-129e/{model.onnx,model.onnx.data}`; state of scheduler tasks + detection of stale ones |
+| `-kernel`, `--kernel` | kernel diagnostics | Dry emulation of the kernel subsystems (see 3.3) |
+| `-modules`, `--modules` | modules diagnostics | Declarative dependencies + life cycle of all modules (see 3.4) |
+| `-ping`, `--ping` | runtime & IPC | TCP poll of the kernel (500 ms) + `log_stats` telemetry |
+| `-quick`, `--quick` | — | Quick run without compilation: `env + kernel + modules + ping` |
+| `-simulate`, `--simulate` | user simulation | End-to-end simulation of actions and a CDP run of the rendering functions (see 3.2) |
+| `-all`, `--all` | everything | Full audit (default mode) |
 
-Полный whitelist лежит в `ALLOWED_DOCTOR_FLAGS`; всё, что не в нём (в т.ч. исторический `-app`), отвергается с кодом 2.
+The full whitelist lives in `ALLOWED_DOCTOR_FLAGS`. Anything not in it (including the historical `-app`) is rejected with code 2.
 
-### 3.2 Логика выбора секций
+### 3.2 Section selection logic
 
-* Если передан **любой** селективный флаг и нет `-all`/`-quick` — выполняются **ровно выбранные** секции.
-* Иначе при `-quick` — `env + kernel + modules + ping`.
-* Иначе (по умолчанию или `-all`) — `compiler + env + kernel + modules + ping`, а `-simulate` добавляется только при явном флаге.
+* If **any** selective flag is passed and there is no `-all`/`-quick`, exactly **the chosen** sections run.
+* Otherwise, with `-quick`: `env + kernel + modules + ping`.
+* Otherwise (default or `-all`): `compiler + env + kernel + modules + ping`. `-simulate` is added only when requested explicitly.
 
-Итог: `[✓] UniDTK doctor: ALL CHECKS PASSED` (exit 0) либо `[!] UniDTK doctor: FAILED (N issues detected)` (exit 1). Сбой модуля в фазе life-cycle при этом не роняет процесс — он попадает в отчёт как `[FAIL]`/`[WARN]`.
+Result: `[✓] UniDTK doctor: ALL CHECKS PASSED` (exit 0) or `[!] UniDTK doctor: FAILED (N issues detected)` (exit 1). A module failure in the life-cycle phase does not bring the process down. It is reported as `[FAIL]`/`[WARN]`.
 
-### 3.3 Секция ядра (`-kernel`)
+### 3.3 Kernel section (`-kernel`)
 
-Пять проверок на базе контракта `unidtk-api`, все — в памяти, без диска:
+Five checks built on the `unidtk-api` contract. All of them run in memory, with no disk access:
 
-1. `kernel:in_memory_db` — контракт `ModuleDb` на `InMemoryModuleDb`: CRUD, префиксный `kv_list`, `kv_count`, удаление.
-2. `kernel:event_bus` — loopback шины событий: `emit` → `state` возвращает отправленное значение.
-3. `kernel:system_paths` — резолв `install_dir`, `data_dir_view` (без создания!), `logs_dir`, `cache_dir`.
-4. `kernel:task_templates` — подстановка `@INSTALL_DIR@` и пользователя в XML-шаблонах задач (заглушек не должно остаться).
-5. `kernel:capture_logger` — изоляция thread-local буфера перехвата логов.
+1. `kernel:in_memory_db` — the `ModuleDb` contract on `InMemoryModuleDb`: CRUD, prefix `kv_list`, `kv_count`, deletion.
+2. `kernel:event_bus` — loopback of the event bus: `emit` → `state` returns the sent value.
+3. `kernel:system_paths` — resolution of `install_dir`, `data_dir_view` (without creating anything!), `logs_dir`, `cache_dir`.
+4. `kernel:task_templates` — substitution of `@INSTALL_DIR@` and the user name in the task XML templates (no placeholders may remain).
+5. `kernel:capture_logger` — isolation of the thread-local log-capture buffer.
 
-### 3.4 Секция модулей (`-modules`)
+### 3.4 Modules section (`-modules`)
 
-Модули берутся из единого реестра `core/kernel/registry.rs::all_modules()` — не из ручного `vec![Box::new(…)]` в CLI. Каждый прогон состоит из четырёх фаз:
+Modules are taken from the single registry `core/kernel/registry.rs::all_modules()`, not from a hand-written `vec![Box::new(…)]` in the CLI. Each run consists of four phases.
 
-**Фаза 1 — декларативный манифест `module.dependencies()`.** Для каждой записи проверяется носитель:
+**Phase 1 — declarative manifest `module.dependencies()`.** For each entry, the carrier is checked:
 
-* `DynamicLibrary { file_name, companions, min_bytes }` — `resolve_binary` + `validate_pe_x64` (MZ, PE-сигнатура, `Machine == 0x8664`, минимальный размер) + наличие компаньонов (например, OpenSSL для TDLib).
-* `Executable { file_name, probe_args }` — присутствие + необязательная смоук-проба (`CREATE_NO_WINDOW`, перехват stdout/stderr, сторож 1500 мс).
-* `ModelAsset { relative_path, min_bytes, companion_files }` — граф ONNX, минимальный размер и внешние веса (`.data`) со своими минимумами.
-* `WindowsTask { task_name, require_elevated }` — регистрация задачи в Task Scheduler.
+* `DynamicLibrary { file_name, companions, min_bytes }` — `resolve_binary` + `validate_pe_x64` (MZ, PE signature, `Machine == 0x8664`, minimum size) + presence of companions (for example, OpenSSL for TDLib).
+* `Executable { file_name, probe_args }` — presence + an optional smoke probe (`CREATE_NO_WINDOW`, capture of stdout/stderr, a 1500 ms watchdog).
+* `ModelAsset { relative_path, min_bytes, companion_files }` — the ONNX graph, its minimum size, and external weights (`.data`) with their own minimums.
+* `WindowsTask { task_name, require_elevated }` — registration of the task in Task Scheduler.
 
-**Фаза 2 — сухой `init`.** Модуль инициализируется в `ModuleContext::new_diagnostic(id, InMemoryModuleDb)` в отдельном потоке под `catch_unwind` + `recv_timeout(2000 мс)`; логи захватываются `capture_logs_unwind` и не теряются даже при панике. При таймауте поток остаётся detached без блокирующего `join`.
+**Phase 2 — dry `init`.** The module is initialized in `ModuleContext::new_diagnostic(id, InMemoryModuleDb)` in a separate thread, under `catch_unwind` + `recv_timeout(2000 ms)`. Logs are captured by `capture_logs_unwind` and are not lost even on panic. On timeout the thread stays detached, without a blocking `join`.
 
-**Фаза 3 — `shutdown` по LIFO** с бюджетом 1500 мс.
+**Phase 3 — `shutdown` in LIFO order**, with a 1500 ms budget.
 
-**Фаза 4 — перекрёстная сверка диска и реестра:** каталог `modules/*/rust/Cargo.toml`, которого нет среди активных модулей, помечается как `orphan Rust module … missing from registry!` и валит проверку.
+**Phase 4 — cross-check of disk and registry.** A directory `modules/*/rust/Cargo.toml` that has no counterpart among the active modules is flagged as `orphan Rust module … missing from registry!` and fails the check.
 
-Особенности `-env`, важные для точности: PE-валидация и версии выполняются в модульной фазе; секция окружения ограничена проверкой наличия файлов.
+Notes on `-env` that matter for accuracy: PE validation and version checks run in the module phase. The environment section is limited to checking that files are present.
 
-### 3.5 Симуляция (`-simulate`)
+### 3.5 Simulation (`-simulate`)
 
-1. IPC Ping + запись метки в журнал.
-2. Здоровье `unidtk_logs.redb` (`log_stats`).
-3. Аудит необработанных исключений фронтенда (`logs level=ERROR`, источники `frontend`/`webview`).
-4. Валидация JSON-конфигурации сетки виджетов (`get_widget_config`).
-5. Безопасный read-only опрос рантаймов VPN и Telegram.
-6. CDP-прогон функций рендеринга в скрытом `simulation-sandbox` DOM: `renderClock`, `initVpnPanel`, `renderMusicPlayer`, `renderGlyphBar`, `renderTelegramWidget` — с замером времени.
-7. Клик по живому виджету часов (expand/collapse) и аудит DOM на карточки с `"Failed to fetch"`.
+1. IPC ping + writing a marker into the log.
+2. Health of `unidtk_logs.redb` (`log_stats`).
+3. Audit of uncaught frontend exceptions (`logs level=ERROR`, sources `frontend`/`webview`).
+4. Validation of the widget grid JSON config (`get_widget_config`).
+5. A safe read-only poll of the VPN and Telegram runtimes.
+6. A CDP run of the rendering functions in the hidden `simulation-sandbox` DOM: `renderClock`, `initVpnPanel`, `renderMusicPlayer`, `renderGlyphBar`, `renderTelegramWidget`, with timing.
+7. A click on the live clock widget (expand/collapse) and a DOM audit for cards showing `"Failed to fetch"`.
 
-Без работающего приложения/`CDP` секция деградирует до `[INFO] CDP simulation unavailable (…)`, а не падает.
+Without a running app / `CDP`, the section degrades to `[INFO] CDP simulation unavailable (…)` instead of failing.
 
 ---
 
-## 4. Команды детально
+## 4. Commands in detail
 
 ### `invoke`
 ```bash
 udtk invoke <cmd> [json-args]
 ```
-Прямой вызов IPC-команды. `json-args` — объект, например:
+Direct call of an IPC command. `json-args` is an object, for example:
 ```bash
 udtk invoke logs '{"limit":10,"level":"ERROR"}'
 udtk invoke vpn_status
@@ -156,1017 +156,1018 @@ udtk invoke vpn_status
 ```bash
 udtk logs [--limit N] [--since ID] [--level LEVEL] [--source SOURCE]
 ```
-По умолчанию `--limit 50`. Источник (`--source frontend|backend|…`) и уровень передаются как строки.
+The default is `--limit 50`. The source (`--source frontend|backend|…`) and the level are passed as strings.
 
 ### `gui`
 ```bash
 udtk gui [--json] [--force] <step>...
-# шаги:
-#   js:<expr>             — произвольный JS, возвращает значение
-#   click:<target>        — физический клик (move → press → release)
-#   type:<target>:<text>  — клик для фокуса + Input.insertText
-#   press:<key>           — нажатие клавиши: keyDown/rawKeyDown + keyUp с key,
-#                            code, windowsVirtualKeyCode и модификаторами;
-#                            формат press:<mod>+<key> (ctrl|shift|alt|meta);
-#                            печатные символы несут text и вставляются один раз;
-#                            неизвестная или не-ASCII клавиша → refused без отправки
-#   tree                  — семантическое дерево harness (бывший `dom`)
-#   wait:<ms>             — пауза, максимум 10 000 мс
+# steps:
+#   js:<expr>             — arbitrary JS, returns the value
+#   click:<target>        — physical click (move → press → release)
+#   type:<target>:<text>  — click to focus + Input.insertText
+#   press:<key>           — key press: keyDown/rawKeyDown + keyUp with key,
+#                            code, windowsVirtualKeyCode and modifiers;
+#                            format press:<mod>+<key> (ctrl|shift|alt|meta);
+#                            printable characters carry text and are inserted once;
+#                            an unknown or non-ASCII key → refused without sending
+#   tree                  — semantic tree of the harness (formerly `dom`)
+#   wait:<ms>             — pause, at most 10 000 ms
 ```
 
-Объединяет прежние `dom` + `eval` + `act`. Ключевое отличие от них — **одна CDP-сессия на весь батч**: раньше каждый вызов открывал новый WebSocket (один клик стоил пять рукопожатий), теперь хендшейк один, а шаги идут по нему подряд (максимум 50 шагов в батче).
+It merges the former `dom` + `eval` + `act`. The key difference from them is **one CDP session for the whole batch**. Previously every call opened a new WebSocket, so a single click cost five handshakes. Now the handshake happens once, and the steps run over that one connection in sequence (at most 50 steps per batch).
 
-Цель шага разрешает сам harness: значение `r<N>` — стабильная ссылка (переживает перерисовку), дальше `@testid`, позиционный `id`, доступное имя или CSS-селектор. Координаты — CSS-пиксели из `getBoundingClientRect()` и передаются **1:1** (умножение на `devicePixelRatio` даёт промах 1.25–1.5×).
+The harness itself resolves the step target. The value `r<N>` is a stable reference that survives re-rendering. After it come `@testid`, a positional `id`, an accessible name, or a CSS selector. Coordinates are CSS pixels from `getBoundingClientRect()`, and they are passed **1:1**. Multiplying by `devicePixelRatio` would miss by a factor of 1.25–1.5×.
 
-**Перекрытие — это отказ, а не «предупреждение».** Если центр цели накрыт другим элементом, шаг возвращает `ok: false`, `refused: "occluded"` и `covering: {tag, id, testid, ref}` — то есть имя того, кто перекрыл; клик не отправляется. `--force` снимает запрет и кликает принудительно.
+**Occlusion is a refusal, not a "warning".** If the center of the target is covered by another element, the step returns `ok: false`, `refused: "occluded"` and `covering: {tag, id, testid, ref}`. That gives the name of the element that covers it, and the click is not sent. `--force` lifts the restriction and clicks anyway.
 
-Квитанция на **каждый** шаг: `kind`, `ok`, `value` (для `js`/`tree`), `hit_point`, `covering`, `refused` (причина отказа: `occluded`, `unknown-key`, `non-ascii`, `unknown-modifier`, `empty-key`), `key` (для `press` — объект `{key, code, vk, text, modifiers, event}`, где `event` — фактически отправленный тип: `keyDown` с текстом или `rawKeyDown` без), `text` (для `type`), `log_delta` (дельта журнала ядра через `log_delta`, один IPC-раунд на шаг), `ui_errors` (ошибки страницы, буфер очищается) и `duration_ms`. `--json` отдаёт `{ok, steps:[…]}`; в текстовом режиме — построчный отчёт, а любой провал даёт exit 1.
+Every step produces a receipt: `kind`, `ok`, `value` (for `js`/`tree`), `hit_point`, `covering`, `refused` (the refusal reason: `occluded`, `unknown-key`, `non-ascii`, `unknown-modifier`, `empty-key`), `key` (for `press`, an object `{key, code, vk, text, modifiers, event}`, where `event` is the event type actually sent: `keyDown` with text, or `rawKeyDown` without), `text` (for `type`), `log_delta` (the delta of the kernel journal from `log_delta`, one IPC round trip per step), `ui_errors` (page errors, the buffer is cleared) and `duration_ms`. `--json` returns `{ok, steps:[…]}`. In text mode it prints a line-by-line report, and any failure gives exit 1.
 
-**`press:` эмулирует US-клавиатуру** и не зависит от системной раскладки: `code` всегда физический (`KeyA`, `Digit1`), `vk` — виртуальный код клавиши. Канонические имена — строго DOM `key` (`Escape`, `ArrowLeft`, `Enter`): алиасы вроде `Esc`/`Left` отказываются, чтобы на capability оставалось одно имя. Русские буквы не эмулируются (нет ни `code`, ни `vk`) — текст вводится шагом `type:`. Клавиши, которые раньше через CLI были инертны (`Delete`, `Backspace`, `F2`, `F5`), теперь **реально действуют** на странице: на живых данных в проверках их не гоняйте.
+**`press:` emulates a US keyboard** and does not depend on the system layout. `code` is always physical (`KeyA`, `Digit1`), and `vk` is the virtual key code. Canonical names are strictly the DOM `key` values (`Escape`, `ArrowLeft`, `Enter`). Aliases such as `Esc`/`Left` are refused, so that each capability has exactly one name. Russian letters are not emulated (there is neither `code` nor `vk` for them). Text is entered with the `type:` step. Keys that used to be inert through the CLI (`Delete`, `Backspace`, `F2`, `F5`) now **really act** on the page. Do not run them in checks against live data.
 
 ### `shot`
 ```bash
 udtk shot [path] [--json|-j] [-q|--quiet] [-o|--output <path>]
 ```
-По умолчанию — `Pictures/Screenshots/unidtk_YYYY-MM-DD_HH-MM-SS.png` (через `SHGetKnownFolderPath`, с fallback на `Pictures/Screenshots` и `%TEMP%`). Проверяется PNG-сигнатура и минимальный размер (≥1 КиБ). `-q` печатает только путь. При недоступном CDP подсказка различает «приложение не запущено» и «ядро есть, CDP нет».
+The default is `Pictures/Screenshots/unidtk_YYYY-MM-DD_HH-MM-SS.png`, resolved through `SHGetKnownFolderPath`, with fallbacks to `Pictures/Screenshots` and `%TEMP%`. The PNG signature and a minimum size (≥1 KiB) are checked. `-q` prints only the path. When CDP is unreachable, the hint distinguishes "the app is not running" from "the kernel is up, CDP is not".
 
 ### `help`
 ```bash
 udtk help [--json]
 ```
-Без флага — человекочитаемая справка. С `--json` — полный машинный манифест всех команд (15 записей), синхронизированный с диспетчером и `help()`. Обе формы дают идентичный текст для человека; раньше для JSON была отдельная команда `commands`, теперь это флаг.
+Without the flag, it prints human-readable help. With `--json`, it prints the full machine manifest of all commands (15 entries), synchronized with the dispatcher and `help()`. Both forms produce identical text for a person. Previously JSON had its own command, `commands`. Now it is a flag.
 
 ### `tasks` / `autostart` / `path`
 
-| Задача | XML-шаблон | Описание | Привилегии |
+| Task | XML template | Description | Privileges |
 |---|---|---|---|
-| `UniDTK` | `UniDTKTask.xml` | Логон-автозапуск оболочки | Unelevated (`InteractiveToken`) |
-| `UniDTKSingbox` | `UniDTKSingboxTask.xml` | Хелпер TUN Sing-Box | Elevated (`HighestAvailable`) |
-| `UniDTKVpnStop` | `UniDTKVpnStopTask.xml` | Хелпер остановки VPN | Elevated |
+| `UniDTK` | `UniDTKTask.xml` | Shell autostart at logon | Unelevated (`InteractiveToken`) |
+| `UniDTKSingbox` | `UniDTKSingboxTask.xml` | Sing-Box TUN helper | Elevated (`HighestAvailable`) |
+| `UniDTKVpnStop` | `UniDTKVpnStopTask.xml` | VPN stop helper | Elevated |
 
-* `udtk tasks register [all|UniDTK|UniDTKSingbox|UniDTKVpnStop|autostart]` — подстановка `@INSTALL_DIR@` и текущего пользователя в UTF-16 XML, регистрация через `schtasks`, при необходимости — через UAC (`Start-Process … -Verb RunAs`). Требует `vpn-helper.exe` рядом с приложением.
-* `udtk tasks unregister <all|name>` / `cleanup-old` (устаревшие: `NothingWallpaper*`).
-* `udtk autostart [status|enable|disable]` — обёртка над задачей `UniDTK`.
-* `udtk path [status|ensure]` — прописывает в User PATH ровно один каталог: тот, где лежит сам `udtk.exe` (никаких копий бинарника в данных).
+* `udtk tasks register [all|UniDTK|UniDTKSingbox|UniDTKVpnStop|autostart]` substitutes `@INSTALL_DIR@` and the current user into the UTF-16 XML, and registers the task through `schtasks`. If needed, it goes through UAC (`Start-Process … -Verb RunAs`). It requires `vpn-helper.exe` next to the app.
+* `udtk tasks unregister <all|name>` / `cleanup-old` (stale tasks: `NothingWallpaper*`).
+* `udtk autostart [status|enable|disable]` is a wrapper over the `UniDTK` task.
+* `udtk path [status|ensure]` writes exactly one directory into the User PATH: the one that contains `udtk.exe` itself. No copies of the binary are made in the data directories.
 
 ### `build` / `dev` / `run`
 
-* `build`: `cargo tauri build` → `cargo build --release --bins` → копирование `libmpv-2.dll` и весов ONNX в `target/release` → `prune_stale_resources` (удаление модулей, которых больше нет в исходниках, чтобы не появилась вторая карточка виджета).
-* `dev [--debug|-d]`: при `--debug` раскладывает DLL/модели. CDP приложение включает само и порт выбирает тоже само — CLI его не задаёт и не расширяет список разрешённых origin.
-* `run [args…] [--debug|-d]`: запускает **только** `unidtk.exe` из каталога рядом с CLI (`paths::install_dir()`), подгружает `.env`, ставит `CREATE_NO_WINDOW`. `--debug` ставит только маркеры `UNIDTK_DEBUG`/`SHELL_DEBUG` — аргументами WebView2 (включая CDP-порт) владеет ядро. Никакого поиска «какого-нибудь» бинарника по репозиторию.
+* `build`: `cargo tauri build` → `cargo build --release --bins` → copying `libmpv-2.dll` and the ONNX weights into `target/release` → `prune_stale_resources` (removes modules that no longer exist in the sources, so that a second widget card does not appear).
+* `dev [--debug|-d]`: with `--debug`, it lays out the DLLs and models. The app enables CDP itself and picks the port itself. The CLI does not set the port and does not extend the list of allowed origins.
+* `run [args…] [--debug|-d]`: starts **only** `unidtk.exe` from the directory next to the CLI (`paths::install_dir()`), loads `.env`, and sets `CREATE_NO_WINDOW`. `--debug` only sets the markers `UNIDTK_DEBUG`/`SHELL_DEBUG`. The kernel owns the WebView2 arguments (including the CDP port). There is no search for "some" binary in the repository.
 
 ---
 
-## 5. Сплэш (`udtk` без аргументов)
+## 5. Splash (`udtk` with no arguments)
 
-`opt/cli/splash.rs` + сгенерированный `opt/cli/splash_art.rs` (**не править руками**; регенерация — `docs/unidtkascii.md` §5, проверка `make_splash.py --repo <repo> --check`).
+`opt/cli/splash.rs` plus the generated `opt/cli/splash_art.rs`. **Do not edit by hand.** Regeneration is `docs/unidtkascii.md` §5, and the check is `make_splash.py --repo <repo> --check`.
 
-* **Четыре тира** по ширине **и** высоте окна (пороги выводятся из ширины арта): `≥98` колонок и высота `≥29` — XL-эмблема `48×21` (сплэш `27` строк); `≥86` — `36×16`; `≥78` — компактная `28×12`; иначе эмблема над вордмарком с лестницей усечений, `<46` — строка `UniDTK` вместо блочного вордмарка, `<29` — текстовый режим. Бюджет строк `min(28, высота−2)`, высота — из `srWindow` (переопределяется `LINES`).
-* Эмблема: металлический Уроборос (титан `#C3D0DE→#5A6678`), ледяной Сатурн (`#C6EEFF→#367CB0`) с кольцами, защитная небесная маска не даёт цветам змея протечь на кольца. Поверх геометрии тело змея модулируется байтом `shade` (`128` = нейтрально, шаг `8`, диапазон `80…176`) — яркость, снятая с исходной живописи уробороса (`docs/unidtkascii.md` §4.7); планета, кольца и фон модулируются никогда.
-* Вордмарк `UniDTK`: `Uni` — хром, `DTK` — цвета флага Германии (графит/рот/гольд).
-* Цвет включается только при TTY или `FORCE_COLOR`/`CLICOLOR_FORCE`, отключается `NO_COLOR` и `TERM=dumb`; ширина берётся из `COLUMNS`, высота из `LINES`, на Windows — `GetConsoleScreenBufferInfo` + **проверяемое** включение VT-режима и CP65001 (провал = plain-вывод вместо сырых ESC).
-* Правая колонка выравнивается по **динамически вычисленной** максимальной ширине эмблемы (`display_width`), а не по константе `geo.cols` — иначе строки стека «съезжали» влево.
-* Внизу — карта команд: `control · telemetry · ui · system`; на узких окнах список переносится с отступом `13` колонок (раньше строка `system …` рвалась ниже `57` колонок).
-* Тесты (13 в `splash.rs`): все тиры вписаны в ширину **и** высоту (`24`/`30`, ширины `120…30`), plain-вывод без escape-последовностей и идентичен цветному после снятия SGR, изоляция зон планета/кольца/тело (сумма зон == площадь блока), согласие строк/`shade`/`geo.cols` + алфавит только брайль, нейтральность и квантование `shade`, наличие фото-текстуры, длина строк вордмарка = 46, строгое выравнивание правой колонки, перенос карты команд, превышение XL-тира на высоком окне.
+* **Four tiers** by width **and** height. The thresholds derive from the art width. `≥98` columns and height `≥29` give the XL emblem `48×21` (the splash is 27 lines). `≥86` gives `36×16`. `≥78` gives the compact `28×12`. Otherwise the emblem sits above the wordmark, with a ladder of truncations. `<46` gives the `UniDTK` line instead of the block wordmark, and `<29` gives text mode. The line budget is `min(28, height−2)`. The height comes from `srWindow` (overridden by `LINES`).
+* Emblem: a metallic Ouroboros (titanium `#C3D0DE→#5A6678`), an icy Saturn (`#C6EEFF→#367CB0`) with rings. A protective sky mask keeps the serpent's colors from leaking onto the rings. On top of the geometry, the serpent's body is modulated by the byte `shade` (`128` is neutral, step `8`, range `80…176`). That is brightness taken from the original Ouroboros painting (`docs/unidtkascii.md` §4.7). The planet, the rings and the background are never modulated.
+* The `UniDTK` wordmark: `Uni` in chrome, `DTK` in the colors of the German flag (graphite/red/gold).
+* Color is enabled only on a TTY or with `FORCE_COLOR`/`CLICOLOR_FORCE`. It is disabled by `NO_COLOR` and `TERM=dumb`. The width comes from `COLUMNS` and the height from `LINES`. On Windows, it uses `GetConsoleScreenBufferInfo` plus a **verified** enabling of VT mode and CP65001. If that fails, the output is plain text instead of raw ESC sequences.
+* The right column is aligned to the **dynamically computed** maximum width of the emblem (`display_width`), not to the constant `geo.cols`. Otherwise the stack's lines "slid" to the left.
+* At the bottom is the command map: `control · telemetry · ui · system`. In narrow windows the list wraps with an indent of `13` columns. Previously the `system …` line broke below `57` columns.
+* Tests (13 in `splash.rs`): all tiers fit the width **and** the height (`24`/`30`, widths `120…30`). Plain output has no escape sequences and matches the colored output after SGR is stripped. Planet, ring and body zones are isolated (the sum of the zones equals the block area). The rows, the `shade` values and `geo.cols` agree, and the alphabet is braille only. `shade` is neutral and quantized. The photo texture is present. The wordmark lines are 46 characters long. The right column is strictly aligned. The command map wraps. The XL tier is exceeded on a tall window.
 
 ---
 
-## 6. Правила для модулей (контракт и инвентарь)
+## 6. Rules for modules (contract and inventory)
 
-1. **Никакого теневого тестового кода в модулях.** Метод `diagnostic_checks` из трейта `Module` удалён. Диагностика — декларативная.
-2. **Зависимости объявляются данными**, а не кодом:
+1. **No shadow test code in modules.** The `diagnostic_checks` method was removed from the `Module` trait. Diagnostics are declarative.
+2. **Dependencies are declared as data**, not as code:
    ```rust
    fn dependencies(&self) -> &'static [manifest::ModuleDependency] { &[] }
    ```
-   Типы — `DependencySeverity::{Mandatory, Optional}`, `DependencyKind::{DynamicLibrary, Executable, ModelAsset, WindowsTask}`.
-3. **Единый реестр.** Модуль регистрируется в `core/kernel/registry.rs` (`all_modules()`, `ALL_MODULE_IDS`) и подключается в `toolchain/Cargo.toml`. Реестр используют и ядро, и CLI — дублирования списка нет.
-4. **Build-linter инвентаря.** `toolchain/build.rs::lint_modules_integrity()` на этапе сборки сканирует `../modules/*/rust/Cargo.toml`; модуль на диске вне реестра/манифеста валит сборку с `BUILD INTEGRITY ERROR`.
-5. **Zero Disk Pollution.** Диагностика не создаёт каталоги данных (`paths::data_dir_view()` вместо `data_dir()`) и работает на `InMemoryModuleDb`.
-6. **Безопасный жизненный цикл.** `init` в диагностическом режиме однократен и без фоновых потоков; `shutdown(budget)` укладывается в бюджет (для VPN-хелпера это критично при выключении Windows).
-7. **Панки не теряются.** `capture_logs_unwind` возвращает логи, накопленные до паники.
+   The types are `DependencySeverity::{Mandatory, Optional}` and `DependencyKind::{DynamicLibrary, Executable, ModelAsset, WindowsTask}`.
+3. **A single registry.** A module is registered in `core/kernel/registry.rs` (`all_modules()`, `ALL_MODULE_IDS`) and wired into `toolchain/Cargo.toml`. Both the kernel and the CLI use the registry, so there is no duplicated list.
+4. **Build linter for the inventory.** `toolchain/build.rs::lint_modules_integrity()` runs at build time and scans `../modules/*/rust/Cargo.toml`. A module on disk that is outside the registry/manifest fails the build with `BUILD INTEGRITY ERROR`.
+5. **Zero disk pollution.** Diagnostics do not create data directories (`paths::data_dir_view()` is used instead of `data_dir()`) and run on `InMemoryModuleDb`.
+6. **Safe life cycle.** `init` in diagnostic mode runs once and starts no background threads. `shutdown(budget)` fits within its budget. For the VPN helper this is critical at Windows shutdown.
+7. **Panics are not lost.** `capture_logs_unwind` returns the logs accumulated before the panic.
 
 ---
 
-## 7. Известные расхождения (технический долг)
+## 7. Known discrepancies (technical debt)
 
-* `-env` в секции окружения проверяет только наличие DLL/бинарников, без PE-валидации (она живёт в фазах модулей) — при чтении отчёта это стоит держать в голове.
+* The environment section of `-env` checks only the presence of DLLs and binaries, without PE validation. PE validation lives in the module phases. Keep this in mind when reading the report.
 
-Legacy-имя `shell` в CLI вычищено: строки `usage:`, подсказки `shot`/`cdp_get`, doc-комментарии, сообщения тестов и шапка файла теперь говорят `udtk`/UniDTK. Осознанно оставлены только `shell32` (Win32 API) и env-ключ `SHELL_DEBUG`; глобал `__SHELL_HARNESS__`, задачи `Shell*` в `OBSOLETE_TASKS` и чистка каталога `%LOCALAPPDATA%\Shell` удалены вместе с миграцией из него (сессия 131).
-
----
-
-## 8. Что изменилось 17.09.2026 (сессии 58–60)
-
-**Коммит `c3c7070` — `feat(kernel,cli)`:**
-
-* Удалён захардкоженный `udtk status` (и `udtk ping`): агрегирующая функция `status_snapshot()` в `core/kernel/ipc.rs` ликвидирована, чтобы новый модуль не заставлял править ядро.
-* `doctor` переписан на строгий whitelist флагов; `--app` заменён на `-ping`. Позже лишние синонимы вычищены: остались только пары `-x`/`--x` (без `-ipc`, `-cargo`, `-sim`), а дублирующая команда `udtk check` удалена в пользу `udtk doctor -check`.
-* Появился декларативный манифест `core/api/src/manifest.rs` и `Module::dependencies()`.
-* Удалён `diagnostic_checks` из модулей; введены `ModuleRunMode`, `ModuleContext::new_diagnostic`, `InMemoryModuleDb`, `capture_logs`, `capture_logs_unwind`, `CheckStatus`/`CheckResult`.
-* Добавлен `core/kernel/registry.rs` и build-linter `lint_modules_integrity()`.
-* CLI получил `validate_pe_x64`, `run_executable_probe`, `run_module_checks` (4 фазы), `run_kernel_checks`, `run_ping_check`.
-* Сплэш: редизайн `splash_art.rs`/`splash.rs` — `UniDTK` смешанным регистром, `DTK` в цветах немецкого флага, титановый Уроборос с чешуёй, изолированный Сатурн.
-
-**Коммит `afdd2e4` — `fix(cli,ui)`:**
-
-* `side_by_side` считает ширину эмблемы динамически → правая колонка строго выровнена по единой оси; добавлен регрессионный тест выравнивания.
-* Снят paint-клиппинг попапа библиотеки (`contain: none !important` для `.music-widget`) — попап больше не обрезает шапку и крестик.
+The legacy name `shell` was removed from the CLI. The `usage:` lines, the `shot`/`cdp_get` hints, doc comments, test messages and the file header now say `udtk`/UniDTK. Only `shell32` (the Win32 API) and the env key `SHELL_DEBUG` are kept on purpose. The global `__SHELL_HARNESS__`, the `Shell*` tasks in `OBSOLETE_TASKS`, and the cleanup of the `%LOCALAPPDATA%\Shell` directory were removed together with the migration from that directory (session 131).
 
 ---
 
-## 9. Чеклист живой верификации
+## 8. What changed on 17.09.2026 (sessions 58–60)
 
-После любой правки CLI / ядра / модулей:
+**Commit `c3c7070` — `feat(kernel,cli)`:**
+
+* The hardcoded `udtk status` (and `udtk ping`) was removed. The aggregating function `status_snapshot()` in `core/kernel/ipc.rs` was eliminated, so that a new module would not force kernel edits.
+* `doctor` was rewritten around a strict flag whitelist. `--app` was replaced by `-ping`. Later the redundant synonyms were cleaned out: only the `-x`/`--x` pairs remain (without `-ipc`, `-cargo`, `-sim`), and the duplicate command `udtk check` was removed in favor of `udtk doctor -check`.
+* A declarative manifest `core/api/src/manifest.rs` and `Module::dependencies()` were added.
+* `diagnostic_checks` was removed from the modules. `ModuleRunMode`, `ModuleContext::new_diagnostic`, `InMemoryModuleDb`, `capture_logs`, `capture_logs_unwind`, `CheckStatus`/`CheckResult` were introduced.
+* Added `core/kernel/registry.rs` and the build linter `lint_modules_integrity()`.
+* The CLI gained `validate_pe_x64`, `run_executable_probe`, `run_module_checks` (4 phases), `run_kernel_checks`, `run_ping_check`.
+* Splash: a redesign of `splash_art.rs`/`splash.rs`. `UniDTK` in mixed case, `DTK` in the colors of the German flag, a titanium Ouroboros with scales, an isolated Saturn.
+
+**Commit `afdd2e4` — `fix(cli,ui)`:**
+
+* `side_by_side` computes the emblem width dynamically, so the right column is strictly aligned to a single axis. A regression test for the alignment was added.
+* The paint clipping of the library popup was removed (`contain: none !important` for `.music-widget`). The popup no longer clips the header and the close button.
+
+---
+
+## 9. Live verification checklist
+
+After any change to the CLI, the kernel, or the modules:
 
 ```bash
 cargo test --bin udtk
 cargo build --release --bins
 
 udtk doctor -quick          # env + kernel + modules + ping
-udtk doctor -all            # комплексный аудит
-udtk doctor -unknown        # ожидаем exit 2 и ошибку флага
-udtk logs --level ERROR     # ожидаем [] или разобранные причины
-udtk shot                   # обязательный визуальный аудит вёрстки
+udtk doctor -all            # comprehensive audit
+udtk doctor -unknown        # expect exit 2 and a flag error
+udtk logs --level ERROR     # expect [] or the parsed causes
+udtk shot                   # mandatory visual audit of the layout
 ```
 
-`cargo test --workspace` перед сдачей — обязателен (сейчас 66 passed / 0 failed). Прямые вызовы `cargo check` / `node --check` в обход CLI-моста запрещены: сквозная диагностика идёт через `udtk doctor` (в т.ч. `udtk doctor -check`).
+`cargo test --workspace` is mandatory before handing off (currently 66 passed / 0 failed). Direct calls of `cargo check` / `node --check` that bypass the CLI bridge are prohibited. End-to-end diagnostics go through `udtk doctor` (including `udtk doctor -check`).
 
 ---
 
-## 10. План: единый контракт команд, две двери и `udtk gui`
+## 10. Plan: one command contract, two doors, and `udtk gui`
 
-Статус: **версия 3** — после критики шести субагентов и двух раундов диалога с седьмым (итог диалога — §10.8, он обязателен к исполнению). Начинаем со среза S0 (§10.8.3).
+Status: **version 3**. This version comes after the critique by six subagents and two rounds of dialogue with a seventh. The outcome of the dialogue is §10.8, which must be executed. We start with slice S0 (§10.8.3).
 
-### 10.1 Проблема
+### 10.1 The problem
 
-Командная поверхность приложения продублирована **трижды**, все три списка рукописные и расходятся:
+The application's command surface is duplicated **three times**. All three lists are handwritten and drift apart:
 
-1. `core/kernel/ipc.rs::route()` — `match cmd` на ~20 веток, ядро знает типы модулей (`vpn::VpnRuntime`, `telegram::TelegramRuntime`, `music::commands::AppState`).
-2. Ответ IPC-команды `commands` — ещё один список тех же имён, синхронизируется вручную.
-3. `#[tauri::command]` (~30 функций в `core/kernel/main.rs`) + единый `generate_handler!` — вторая, независимая поверхность для веб-интерфейса.
+1. `core/kernel/ipc.rs::route()`: a `match cmd` with about 20 arms. The kernel knows the module types (`vpn::VpnRuntime`, `telegram::TelegramRuntime`, `music::commands::AppState`).
+2. The response of the IPC command `commands`: yet another list of the same names, synchronized by hand.
+3. `#[tauri::command]` (about 30 functions in `core/kernel/main.rs`) plus the single `generate_handler!`: a second, independent surface for the web interface.
 
-Отдельно `doctor -simulate` содержит **четвёртый** рукописный список — пять функций рендера, зашитых строкой JS в `opt/cli/main.rs`.
+Separately, `doctor -simulate` contains a **fourth** handwritten list: five render functions hardcoded as a JS string in `opt/cli/main.rs`.
 
-Добавление команды в модуль требует правок ядра в трёх местах. Это тот же антипаттерн, что устранён в `status_snapshot` и `diagnostic_checks`.
+Adding a command in a module requires kernel edits in three places. This is the same anti-pattern that was eliminated in `status_snapshot` and `diagnostic_checks`.
 
-### 10.2 Зафиксированные решения
+### 10.2 Recorded decisions
 
-- **`udtk gui`** — единая команда управления страницей, объединяет `dom` + `eval` + `act`.
-- **Один контракт + две двери, фронт целиком на нашем протоколе (решение владельца).** Tauri-транспорт команд убирается, страница ходит в нашу дверь. Следствие: аутентификация двери **обязательна** — сокет loopback без пароля, а WebSocket-дверь достижима из любой веб-страницы (у WS нет CORS). Принятая схема: CLI (Rust) — именованный канал с проверкой процесса-клиента (`GetNamedPipeClientProcessId` + цепочка родителя), WebView — WebSocket на loopback с токеном, выдаваемым на каждый запуск, проверкой origin и обязательным первым кадром-рукопожатием. Честная граница: это защищает от веб-страниц и чужих пользователей, но **не** от malware того же пользователя (файл токена и память процесса ему доступны) — это осознанно принятый риск.
-- **Манифест — статический сборочный артефакт, скомпилированный и в ядро, и в CLI.** Материализация модулей ради списка запрещена: `registry::all_modules()` в ядре дала бы вторые экземпляры (повторный авто-коннект VPN, второй TDLib, гонка с отложенным bootstrap плеера).
-- **Модуль объявляет метаданные декларативно** — `macro_rules!`-списком в своём крейте, по образцу `dependencies()`. Ядро и CLI читают их через реестр указателей на функции, без инстанцирования.
-- **Рукописные обёртки `#[tauri::command]` остаются в ядре.** Они несут Tauri-инъекцию (`State`/`AppHandle`), которую модуль выразить не может; генерируется только список имён и раскрытие `generate_handler!`.
-- **Одна таблица маршрутизации** вместо трёх списков + проверка сборки «у каждого объявленного spec есть обработчик».
-- **Линкерная магия не используется** (`inventory`/`linkme`): на MSVC `/OPT:REF` вырезает нереференсные секции.
-- **Заимствуем приёмы, а не зависимости.** Ориентир — `agent-browser` (Rust + CDP, ссылки на элементы из снимка) и Chrome DevTools MCP (точечные запросы по CDP вместо полного снапшота после каждого действия).
-- **Разделение слоёв.** Бизнес-логика — модули; ядро — транспорт, роутинг, инвентарь; CLI — тонкий клиент. Логика в CLI не оседает.
+- **`udtk gui`**: a single page-control command that merges `dom` + `eval` + `act`.
+- **One contract, two doors, the front end entirely on our protocol (the owner's decision).** The Tauri command transport is removed, and the page goes through our door. Consequence: authentication of the door is **mandatory**. A loopback socket without a password gives no protection, and the WebSocket door is reachable from any web page (WS has no CORS). The adopted scheme: the CLI (Rust) uses a named pipe with a check of the client process (`GetNamedPipeClientProcessId` + the parent chain). The WebView uses a WebSocket on loopback with a token issued on each launch, a check of the origin, and a mandatory first handshake frame. Honest boundary: this protects against web pages and other users, but **not** against malware running as the same user, since the token file and the process memory are available to it. This is a deliberately accepted risk.
+- **The manifest is a static build artifact, compiled into both the kernel and the CLI.** Materializing modules just to build the list is forbidden. `registry::all_modules()` in the kernel would produce second instances: a repeated VPN auto-connect, a second TDLib, a race with the deferred bootstrap of the player.
+- **A module declares its metadata declaratively**, as a `macro_rules!` list in its own crate, following the pattern of `dependencies()`. The kernel and the CLI read it through a registry of function pointers, without instantiation.
+- **The handwritten `#[tauri::command]` wrappers stay in the kernel.** They carry the Tauri injection (`State`/`AppHandle`) that a module cannot express. Only the list of names and the expansion of `generate_handler!` are generated.
+- **One routing table** instead of three lists, plus a build check that "every declared spec has a handler".
+- **Linker magic is not used** (`inventory`/`linkme`). On MSVC, `/OPT:REF` strips unreferenced sections.
+- **We borrow techniques, not dependencies.** The reference points are `agent-browser` (Rust + CDP, element references taken from a snapshot) and Chrome DevTools MCP (targeted CDP queries instead of a full snapshot after every action).
+- **Separation of layers.** Business logic lives in the modules. The kernel does transport, routing, and inventory. The CLI is a thin client. Logic does not settle into the CLI.
 
-### 10.3 Решения по модулям и открытые вопросы
+### 10.3 Module decisions and open questions
 
-**Принято:**
+**Accepted:**
 
-- **Модуль владеет своим рантайм-состоянием.** Ядро перестаёт называть типы модулей (`VpnRuntime`, `TelegramRuntime`, `AppState`) — состояние живёт в модуле, обработчик достаёт его сам. Сопутствующее требование: `init` должен быть проверяемым и отменяемым, а не «молча проиграть» повторный `OnceLock::set`.
-- **`metadata.json` расширяется точками входа рендера** (и заводится для `vpn`/`explorer`, где его сейчас нет) — `simulate` берёт список оттуда.
+- **A module owns its runtime state.** The kernel stops naming module types (`VpnRuntime`, `TelegramRuntime`, `AppState`). The state lives in the module, and the handler fetches it itself. Accompanying requirement: `init` must be verifiable and cancellable, not "silently lose" a repeated `OnceLock::set`.
+- **`metadata.json` is extended with the render entry points** (and added for `vpn`/`explorer`, where it is currently absent). `simulate` takes the list from there.
 
-**Открыто:**
+**Open:**
 
-1. **Судьба плагинов и ассетов.** Команды и события уходят на наш протокол, но `fs`/`opener`/`path` и `convertFileSrc` (отдача картинок) остаются Tauri. Переносить ли их тоже — отдельный этап C, решение объёмное.
-2. **Кто гасит работающий инстанс при обновлении** (NSIS-хук / команда CLI / updater). Сейчас `PREUNINSTALL` снимает автозапуск и при апгрейде тоже, а старый процесс держит порты 26540/9222.
-3. **Бюджеты ресурсов**: максимум шагов в батче `gui`, время жизни CDP-сессии, допустимый прирост Working Set / idle CPU.
+1. **The fate of plugins and assets.** Commands and events move to our protocol, but `fs`/`opener`/`path` and `convertFileSrc` (serving images) stay on Tauri. Whether to move them too is a separate stage C, a large decision.
+2. **Who stops the running instance during an update** (NSIS hook / CLI command / updater). Currently `PREUNINSTALL` removes autostart, and it does so on upgrade too. The old process holds ports 26540/9222.
+3. **Resource budgets**: the maximum number of steps in a `gui` batch, the lifetime of a CDP session, and the permissible growth of Working Set / idle CPU.
 
-### 10.4 Этапы
+### 10.4 Stages
 
-**Этап 0. Отладочная дверь: сохранить и обезопасить (решение владельца — CDP всегда).**
-CDP на 9222 остаётся включённым постоянно: на нём стоят `udtk gui`/`shot`/`dom`. Вместо гейта — сокращение поверхности:
+**Stage 0. The debug door: preserve and secure (owner's decision: CDP always on).**
+CDP on 9222 stays enabled permanently. `udtk gui`/`shot`/`dom` run on it. Instead of a gate, the surface is reduced:
 
-- **убрать `--remote-allow-origins=*` целиком, а не сужать до origin.** Заголовок `Origin` выбирает сам клиент, поэтому «разрешённый origin WebView» ничего не фильтрует (любой локальный клиент пришлёт `http://tauri.localhost`) — это контроль, который выглядит контролем, но не является им. Наш CLI (`tungstenite::client_with_config`) `Origin` не шлёт и не пострадает — проверено пробой: апгрейд без `Origin` даёт `101`.
-- **Три точки, а не одна:** `core/kernel/main.rs:1477`, `opt/cli/main.rs:1203` (`dev --debug`), `opt/cli/main.rs:1236` (`run --debug`). Иначе дыра вернётся из CLI.
-- **Ядро перестаёт перетирать `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`** (`core/kernel/main.rs:1480`): сегодня оно затирает то, что выставил CLI, поэтому аргументы CLI вообще мертвы. Должно дописывать свои к существующему значению.
-- **Дискавери порта и мишени — внутри этапа 0, не «в перспективе»:** цель принимается только если слушающий сокет принадлежит `msedgewebview2.exe`, чей родитель — `unidtk.exe` из `install_dir()`. Иначе — жёсткая ошибка, а не предупреждение (иначе `gui` управляет окном старого или чужого процесса).
+- **Remove `--remote-allow-origins=*` entirely, not narrow it to an origin.** The `Origin` header is chosen by the client itself, so an "allowed WebView origin" filters nothing. Any local client will send `http://tauri.localhost`. This is a control that looks like a control but is not one. Our CLI (`tungstenite::client_with_config`) sends no `Origin` and is not affected. Verified with a probe: an upgrade without `Origin` gives `101`.
+- **Three points, not one:** `core/kernel/main.rs:1477`, `opt/cli/main.rs:1203` (`dev --debug`), `opt/cli/main.rs:1236` (`run --debug`). Otherwise the hole returns from the CLI.
+- **The kernel stops overwriting `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`** (`core/kernel/main.rs:1480`). Today it erases what the CLI set, so the CLI arguments are dead. It must append its own arguments to the existing value.
+- **Port and target discovery is inside stage 0, not "in the future".** A target is accepted only if the listening socket belongs to `msedgewebview2.exe` whose parent is `unidtk.exe` from `install_dir()`. Otherwise it is a hard error, not a warning. Otherwise `gui` would drive the window of an old or foreign process.
 
-**Уточнение по границе (проверено пробами на живом приложении).** Класс «веб-страница» закрыт **не** этим флагом, а проверкой `Host` у DevTools (принимается только IP/`localhost`; запрос с `Host: evil.test` получает `500` ещё до поиска цели) и отсутствием CORS на `/json` — то есть DNS-rebinding против CDP не проходит независимо от `*`. Флаг расширял дверь только для клиента, который **уже знает UUID цели**. Класс «локальный процесс того же пользователя» не закрывается ничем: он подключается и исполняет JS. **Граница безопасности здесь — учётная запись Windows.** Аутентификация нашей двери (§10.4 этапы 1/7) — протокольная гигиена, а не граница, и не может служить обоснованием расширения write-поверхности.
+**Clarification of the boundary (verified by probes on the live app).** The "web page" class is closed **not** by this flag. It is closed by the `Host` check on DevTools (only IP/`localhost` is accepted; a request with `Host: evil.test` gets `500` before the target is looked up) and by the absence of CORS on `/json`. That means DNS rebinding against CDP fails regardless of `*`. The flag only widened the door for a client that **already knows the target UUID**. The class "local process of the same user" is not closed by anything: it connects and executes JS. **The security boundary here is the Windows user account.** The authentication of our door (§10.4 stages 1/7) is protocol hygiene, not a boundary, and cannot justify widening the write surface.
 
-**В будущем (отдельная задача, не в этом плане):** убрать режимы `dev` и `--debug` вместе с переменными `UNIDTK_DEBUG`/`SHELL_DEBUG` — отладка и так доступна всегда, отдельный флаг теряет смысл.
+**In the future (a separate task, not in this plan):** remove the `dev` and `--debug` modes together with the variables `UNIDTK_DEBUG`/`SHELL_DEBUG`. Debugging is available at all times anyway, so a separate flag loses its meaning.
 
-**Этап 1. Протокол-конверт v1.**
-`{"v":1,"id":N,"cmd":…,"args":…}` → `{"v":1,"id":N,"ok":…,"result"|"error":…}` + frame-тип для push-событий. Обязательные серверные потолки: максимальный размер строки/сообщения, клампы `limit`/`since`, лимит исходящей очереди. В `ping` — `proto`, `capabilities[]`, `min_cli`. Это снимает блокер «версий нет вообще»: установленный CLI и ядро обновляются независимо.
+**Stage 1. Protocol envelope v1.**
+`{"v":1,"id":N,"cmd":…,"args":…}` → `{"v":1,"id":N,"ok":…,"result"|"error":…}` + a frame type for push events. Mandatory server-side ceilings: the maximum size of a line/message, clamps on `limit`/`since`, a limit on the outgoing queue. In `ping`: `proto`, `capabilities[]`, `min_cli`. This removes the blocker "there are no versions at all": the installed CLI and the kernel update independently.
 
-Сюда же входит **рукопожатие**: обязательный первый кадр с токеном и жёстким таймаутом, до которого не исполняется ни одна команда; проверка origin для WebView. Без этого этапа переводить фронт на нашу дверь нельзя.
+This stage also includes the **handshake**: a mandatory first frame that carries the token and has a hard timeout. No command is executed before it. There is also an origin check for the WebView. Without this stage, the front end cannot be moved to our door.
 
-**Этап 2. Манифест команд (без proc-macro и без сканирования исходников).**
-`CommandSpec { name, summary, args, access, requires_state, doors }` в `core/api`. Каждый модуль объявляет свой набор одним `macro_rules!`-списком (одна строка на команду). Реестр перечисляет `fn commands() -> &'static [CommandSpec]` по указателям. Ядро и CLI получают **один и тот же** скомпилированный манифест. Проверки сборки: дубли имён, отсутствие описания, столкновение с зарезервированными, «spec без обработчика», orphan-модули (существующий `lint_modules_integrity` — с исправлением `rerun-if-changed` на `../modules`).
+**Stage 2. Command manifest (no proc-macro and no scanning of sources).**
+`CommandSpec { name, summary, args, access, requires_state, doors }` in `core/api`. Each module declares its own set in one `macro_rules!` list (one line per command). The registry enumerates `fn commands() -> &'static [CommandSpec]` through function pointers. The kernel and the CLI get the **same** compiled manifest. Build checks: duplicate names, missing description, collision with reserved names, "spec without a handler", and orphan modules (the existing `lint_modules_integrity`, with a fix to `rerun-if-changed` on `../modules`).
 
-**Этап 3. Одна таблица маршрутизации в ядре.**
-`ipc.rs::route()` ищет по таблице; `match` удаляется. Ключевое: сохранить различие **«команда не существует» ↔ «модуль не готов»** (сейчас это разные тексты). Готовность — отдельное поле, а не факт наличия в таблице. Обёртки Tauri остаются рукописными, но их имена сверяются с манифестом на сборке.
+**Stage 3. One routing table in the kernel.**
+`ipc.rs::route()` looks up the table, and the `match` is removed. The key point is to preserve the difference between **"the command does not exist"** and **"the module is not ready"** (currently these are different texts). Readiness is a separate field, not a fact of presence in the table. The Tauri wrappers stay handwritten, but their names are checked against the manifest at build time.
 
-**Этап 4. CLI читает манифест.**
-`udtk invoke` и `help --json` — из общего манифеста (работает и при выключенном приложении, потому что манифест слинкован в CLI). Ответ IPC-команды `commands` остаётся как рантайм-отражение двери (он честно различает двери и права), но перестаёт быть источником истины.
+**Stage 4. The CLI reads the manifest.**
+`udtk invoke` and `help --json` read from the shared manifest. This works even when the app is off, because the manifest is linked into the CLI. The response of the IPC command `commands` stays as a runtime reflection of the door (it honestly distinguishes doors and rights), but it stops being the source of truth.
 
-**Этап 5. `udtk gui`.**
-Одна CDP-сессия на батч (**владение — область процесса CLI**, с keepalive и одним авто-переподключением). Снимок дерева — **один на батч** со стабильными ссылками; резолв цели точечный, без повторного полного `getSemanticTree`. Квитанция на каждый шаг: `kind`, `ok`, `value` | `hit_point`/`occluded`, `log_delta`, `ui_errors`, `duration_ms`. Чтобы не делать 2 соединения на шаг — новая команда `log_delta {since}` возвращает `(max_id, entries)` одним ответом. Предел батча по шагам и по времени. `dom`/`eval`/`act` удаляются (на переходный период — алиасы).
+**Stage 5. `udtk gui`.**
+One CDP session per batch. **Ownership belongs to the scope of the CLI process**, with keepalive and one automatic reconnect. The tree snapshot is **one per batch**, with stable references. Target resolution is point-wise, without another full `getSemanticTree`. A receipt for each step: `kind`, `ok`, `value` | `hit_point`/`occluded`, `log_delta`, `ui_errors`, `duration_ms`. To avoid two connections per step, a new command `log_delta {since}` returns `(max_id, entries)` in one response. There is a limit on the batch by steps and by time. `dom`/`eval`/`act` are removed (with aliases during a transition period).
 
-**Этап 6. `simulate` на реестр (переписать, а не «доделать»).**
-- Убрать самопинг и дубли с `-ping`/`logs`/`-modules`: simulate отвечает только за то, чего нет в других секциях, и **не инициализирует модули повторно**.
-- Убрать клик по **живому** виджету часов: сейчас он дёргает настоящий `toggleWidget`, сворачивает открытый пользователем виджет и гоняется с таймером анимации (300 мс против паузы 60 мс). Вместо этого — работа с offscreen-копией или через harness с сохранением/восстановлением состояния.
-- Песочница не должна быть видна глобальным выборкам (`.widget-card`, harness, `relayoutWidgets`) — изолировать, исключить из селекторов, `contain: strict`.
-- Точки входа рендера — из расширенного `metadata.json` (§10.3, «Принято»), а не строкой в CLI. Явно зафиксировать, что прогон read-only: `save_widget_config` за прогон не вызывается.
+**Stage 6. `simulate` on the registry (rewrite it, do not "finish" it).**
+- Remove the self-ping and the duplicates of `-ping`/`logs`/`-modules`. Simulate is responsible only for what the other sections do not cover, and it **does not re-initialize modules**.
+- Remove the click on the **live** clock widget. Right now it fires the real `toggleWidget`, collapses a widget the user has opened, and races the animation timer (300 ms against a 60 ms pause). Instead, work with an offscreen copy or through the harness, with state save/restore.
+- The sandbox must not be visible to global queries (`.widget-card`, the harness, `relayoutWidgets`). Isolate it, exclude it from selectors, and apply `contain: strict`.
+- Render entry points come from the extended `metadata.json` (§10.3, "Accepted"), not from a string in the CLI. Record explicitly that the run is read-only: `save_widget_config` is not called during the run.
 
-**Этап 7. Фронтенд — переезд на наш протокол (радикальный вариант, решение владельца).**
-- Сначала **инвентаризация** зависимостей от Tauri как артефакт: команды, события (17+ подписок), плагины `fs`/`opener`/`path`, `convertFileSrc`.
-- Сразу исправить обход: `modules/explorer/ui/*.js` импортируют Tauri **относительным путём**, минуя importmap — фасад их не перехватит.
-- Фасад — единственная точка импорта для команд, событий и (пока) плагинов; линт-правило запрещает прямой импорт `@tauri-apps/*` вне фасада.
-- Дверь: WebSocket на loopback + токен на запуск + проверка origin + первый кадр-рукопожатие (этап 1). CLI-дверь — именованный канал с проверкой процесса-клиента.
-- Переезд **по одной команде** за рантайм-флагом, с сохранением рабочего Tauri-пути до прохождения фазы; откат без пересборки.
-- Дверь обязана восстанавливать подписки после реконнекта: в Tauri ядро живо всегда, на нашем канале — нет, иначе события теряются молча.
-- Аутентификация — **до** включения write-команд, а не вместе с ними.
-- Плагины и ассеты остаются на Tauri — это отдельный этап C (§10.3, открытый вопрос 1).
+**Stage 7. The front end: migration to our protocol (radical option, the owner's decision).**
+- First, an **inventory** of the dependencies on Tauri, as an artifact: commands, events (17+ subscriptions), the plugins `fs`/`opener`/`path`, and `convertFileSrc`.
+- Fix the bypass immediately: `modules/explorer/ui/*.js` import Tauri by a **relative path**, bypassing the importmap. The facade would not intercept them.
+- The facade is the single import point for commands, events, and (for now) plugins. A lint rule forbids direct imports of `@tauri-apps/*` outside the facade.
+- The door: a WebSocket on loopback + a token per launch + an origin check + a first handshake frame (stage 1). The CLI door is a named pipe with a check of the client process.
+- Migration **one command at a time** behind a runtime flag, keeping the working Tauri path until the phase passes. Rollback without a rebuild.
+- The door must restore subscriptions after a reconnect. In Tauri the kernel is always alive. On our channel it is not, and otherwise events are lost silently.
+- Authentication comes **before** write commands are enabled, not together with them.
+- Plugins and assets stay on Tauri. That is a separate stage C (§10.3, open question 1).
 
-**Этап 8. Приёмка и документы.**
-Обновить `AGENTS.md` (§3.1/§3.4: `dom`/`act`/`eval` → `gui`; статус `simulate`) и `docs/architecture.md`. Приёмка — по §10.5.
+**Stage 8. Acceptance and documents.**
+Update `AGENTS.md` (§3.1/§3.4: `dom`/`act`/`eval` → `gui`; the status of `simulate`) and `docs/architecture.md`. Acceptance is checked against §10.5.
 
-### 10.5 Критерии приёмки (измеримые)
+### 10.5 Acceptance criteria (measurable)
 
-1. **Полнота манифеста**: тест в ядре итерацией сверяет реальную таблицу маршрутизации с манифестом; расхождение — падение теста.
-2. **Согласованность дверей**: `udtk help --json` == манифест == рантайм-ответ `commands` по составу (расхождение — по дверям/правам допустимо и помечается явно).
-3. **Фронтенд**: снапшот-тест «множество имён `invoke(...)` из `core/ui` и `modules/*/ui` ⊆ манифест» — закрывает риск «переименование ломает фронт молча».
-4. **Офлайн**: при выключенном приложении `udtk help --json` и `udtk doctor -modules` зелёные.
-5. **`gui`**: последовательность шагов в одной сессии, дельта логов на каждый шаг, число CDP-хендшейков = 1 на батч (проверяется счётчиком), число IPC-соединений ≤ 2 на батч.
-6. **`simulate`**: read-only (за прогон не вызван `save_widget_config`, состояние раскладки и `activeExpandedWidgetId` совпадают до/после), отсутствует `[INFO] CDP simulation unavailable` при поднятом приложении.
-7. **Регрессии**: `cargo test --workspace` зелёный, `udtk doctor -all` без ошибок, `utdk shot` без изменений вёрстки.
+1. **Manifest completeness**: a test in the kernel iterates over the real routing table and compares it with the manifest. A mismatch fails the test.
+2. **Door consistency**: `udtk help --json` == manifest == the runtime response of `commands`, in terms of the set of names. Differences by door/rights are permissible and must be flagged explicitly.
+3. **Front end**: a snapshot test that the set of names in `invoke(...)` calls from `core/ui` and `modules/*/ui` is a subset of the manifest. This closes the risk that a rename silently breaks the front end.
+4. **Offline**: with the app off, `udtk help --json` and `udtk doctor -modules` are green.
+5. **`gui`**: a sequence of steps in one session, a log delta for each step, the number of CDP handshakes = 1 per batch (verified by a counter), and the number of IPC connections ≤ 2 per batch.
+6. **`simulate`**: read-only (`save_widget_config` not called during the run; the layout state and `activeExpandedWidgetId` match before and after). No `[INFO] CDP simulation unavailable` while the app is running.
+7. **Regressions**: `cargo test --workspace` is green, `udtk doctor -all` has no errors, and `utdk shot` shows no layout changes.
 
-### 10.6 Риски
+### 10.6 Risks
 
-- **Безопасность**: CDP включён всегда (решение владельца). Срез S0 убран `--remote-allow-origins=*` (три места) и введено дискавери порта. Остаточный риск, принятый осознанно: любой локальный процесс может исполнить JS в оболочке — **граница здесь учётная запись Windows**, а не токен и не флаг.
-- **Совместимость версий**: старый `udtk.exe` из поставки и новое ядро расходятся независимо; без версии протокола это выглядит как «странные сбои». Лечится этапом 1.
-- **Ресурсы постоянного процесса**: соединение на запрос + поток на соединение; снимок `getSemanticTree` вызывает принудительный layout и хит-тест на UI-потоке WebView2 (тех же обоев). Бюджеты — §10.3 п.5.
-- **Потоки и COM**: все tauri-команды объявлены `(async)`; сгенерированная синхронная обёртка вернёт фризы UI (AGENTS §4.3). Потоки сокета не инициализируют COM — команды, работающие через COM/буфер обмена, с них вызывать нельзя; это должно быть записано в контракте.
-- **Shutdown**: запрос в `block_on` во время `app.exit(0)` → порванная транзакция redb. Нужен closing-гейт и дренаж `INFLIGHT`.
-- **Жизненный цикл модулей**: таймаут `init` оставляет модуль живым без `shutdown`; повторный `init` игнорируется `OnceLock::set` — модуль молча работает с чужим контекстом.
-- **Обновление**: `PREUNINSTALL` снимает автозапуск и при апгрейде; занятые порты и залоченные файлы в Program Files.
-- **Расползание объёма**: ~30 tauri-команд + ~20 IPC + вызовы в JS. Только этапами, по одному модулю.
+- **Security**: CDP is always on (the owner's decision). Slice S0 removed `--remote-allow-origins=*` (three places) and introduced port discovery. Residual risk, accepted knowingly: any local process can execute JS in the shell. **The boundary here is the Windows user account**, not a token and not a flag.
+- **Version compatibility**: an old `udtk.exe` from the shipped install and a new kernel diverge independently. Without a protocol version this looks like "strange failures". Addressed by stage 1.
+- **Resources of a persistent process**: a connection per request + a thread per connection. A `getSemanticTree` snapshot forces a layout and a hit-test on the WebView2 UI thread (the same wallpaper). Budgets: §10.3 item 5.
+- **Threads and COM**: all tauri commands are declared `(async)`. A generated synchronous wrapper would freeze the UI (AGENTS §4.3). Socket threads do not initialize COM, so commands that work through COM/the clipboard must not be called from them. This must be recorded in the contract.
+- **Shutdown**: a request in `block_on` during `app.exit(0)` leaves a torn redb transaction. A closing gate and a drain of `INFLIGHT` are needed.
+- **Module life cycle**: an `init` timeout leaves the module alive without `shutdown`. A repeated `init` is ignored by `OnceLock::set`, so the module silently works with a foreign context.
+- **Update**: `PREUNINSTALL` removes autostart on upgrade too. Busy ports and locked files in Program Files.
+- **Scope creep**: ~30 tauri commands + ~20 IPC + calls in JS. Only in stages, one module at a time.
 
-### 10.7 Итоги критики субагентов
+### 10.7 Outcome of the subagent critique
 
-**Отвергнуто из первой версии плана:**
-- proc-macro `#[udtk_command]` + сканирование `modules/*/rust` в `build.rs` — два парсера одного и того же, взаимно исключающие механизмы; скан по подстроке ловит комментарии и `cfg`-выключенный код.
-- Генерация тел `#[tauri::command]`-обёрток — нереализуема: Tauri-инъекция (`State`/`AppHandle`) известна только ядру; `include!` из `OUT_DIR` ломает IDE, rust-analyzer и инкрементальную сборку.
-- Построение таблицы из `registry::all_modules()` — вторые экземпляры модулей в ядре, двойная инициализация VPN/TDLib/плеера.
-- Выставление write-команд на сокет «сразу» — понижение периметра безопасности без threat model.
-- Критерий «в `help --json` единственный источник правды через сокет» — делал бы диагностику зависимой от запущенного приложения.
+**Rejected from the first version of the plan:**
+- A proc-macro `#[udtk_command]` plus scanning `modules/*/rust` in `build.rs`. These are two parsers of the same thing, mutually exclusive mechanisms. A substring scan catches comments and `cfg`-disabled code.
+- Generating the bodies of the `#[tauri::command]` wrappers. Not feasible: the Tauri injection (`State`/`AppHandle`) is known only to the kernel, and `include!` from `OUT_DIR` breaks the IDE, rust-analyzer, and incremental builds.
+- Building the table from `registry::all_modules()`. This creates second module instances in the kernel and double initialization of VPN/TDLib/the player.
+- Exposing write commands on the socket "right away". This lowers the security perimeter without a threat model.
+- The criterion "the single source of truth in `help --json` through the socket". It would make diagnostics depend on the running app.
 
-**Принято в план:**
-- манифест как сборочный артефакт, слинкованный в ядро и CLI; декларация в модуле без инстанцирования;
-- конверт протокола с версией, id, лимитами и capabilities;
-- сохранение различия «нет команды» / «не готов»;
-- read-only по умолчанию для сокета, закрытие CDP отдельным этапом;
-- `gui` с одной сессией и одним снимком на батч + команда `log_delta`;
-- переписывание `simulate` (живой клик, изоляция песочницы, отсутствие повторного init);
-- инвентаризация Tauri-зависимостей и фасад перед миграцией фронтенда;
-- измеримые критерии приёмки и явные бюджеты ресурсов.
+**Accepted into the plan:**
+- The manifest as a build artifact linked into the kernel and the CLI. Declaration in the module, without instantiation.
+- The protocol envelope with a version, id, limits, and capabilities.
+- Preserving the difference between "no command" and "not ready".
+- Read-only by default for the socket, with closing CDP as a separate stage.
+- `gui` with one session and one snapshot per batch, plus the `log_delta` command.
+- Rewriting `simulate` (live click, sandbox isolation, no repeated init).
+- An inventory of the Tauri dependencies and a facade before the front-end migration.
+- Measurable acceptance criteria and explicit resource budgets.
 
-**Решения владельца по итогам обсуждения (внесены в §10.2–10.4):**
-
-- фронт переводится на наш протокол целиком (радикальный вариант), поэтому аутентификация двери — обязательный этап, а не опция; принятая граница (защита от веб-страниц и чужих пользователей, но не от malware того же пользователя) зафиксирована как осознанный риск;
-- состояние модулей переезжает в сами модули — это условие того, чтобы сторонний разработчик добавлял команду без правки ядра;
-- `metadata.json` расширяется точками входа рендера;
-- работа начинается с этапа 0 — обезопасить отладочную дверь: CDP остаётся включённым всегда (решение владельца), но `--remote-allow-origins=*` убирается, порт перестаёт быть захардкоженным, а режимы `dev`/`--debug` в перспективе упраздняются.
-
----
-
-## 10.8 Консенсус после диалога с субагентом
-
-Диалог в два раунда (позиции → возражения → консенсус), с живыми пробами против запущенного приложения. Итог вносится в план как обязательный.
-
-### 10.8.1 Ядро и типы модулей — сузить формулировку цели
-
-«Ядро перестаёт называть типы модулей» **не выполнимо целиком на этапе 3** и не должно: Tauri-поверхность продолжает называть типы до этапа 7.
-
-Факты: в `core/kernel/main.rs` — **31** `#[tauri::command]`, **93** позиции параметра `State<…>`, **9** сайтов `app.manage(...)`; в `core/kernel/ipc.rs` — отдельная меньшая поверхность (~20 веток).
-
-**Решение:** §10.3 применяется **к маршрутной поверхности** — с этапа 3 `ipc.rs::route()` ищет по таблице, каждая ветка которой `dispatch(&self, cmd, args)` модуля, тип состояния не покидает модуль. Рукописные обёртки, `generate_handler!` и `app.manage(module.runtime())` **остаются** до этапа 7 и удаляются вместе с Tauri-транспортом.
-
-**Следствие, которое надо вписать в §10.1 и §10.7 прямым текстом:** «команду можно добавить без правки ядра» верно **для нашей двери**; для Tauri-поверхности это станет верным только после этапа 7.
-
-**Критерии:** S3 — grep-тест «в `ipc.rs` нет идентификаторов типов модулей»; S7 — «в `main.rs` нет ни одного `State<…>` с типом модуля и ни одного `app.manage` состояния модуля».
-
-**Правило «модуль зависит только от `unidtk-api`» устарело фактически:** `tauri` объявлен у 4 модулей из 5, и сам контракт это провоцирует (`ModuleContext::host::<tauri::AppHandle>()`). **Решение владельца: правило сужается** до защищающего обновляемость инварианта: «модуль **не** зависит от крейта ядра; `unidtk-api` — обязателен, типы Tauri-хоста допустимы». Применение: правка формулировки в `docs/architecture.md` §1 и в шапке `core/api`, проверка — в `toolchain/build.rs::lint_modules_integrity()` (падать на зависимости от крейта ядра в `modules/*/rust/Cargo.toml`). Сделать в рамках S2.
-
-### 10.8.2 Манифест и маршрут — где проверка возможна, а где нет
-
-Проверка «spec без обработчика» **на сборке невозможна**: proc-macro и сканирование исходников отвергнуты, а `generate_handler!` для `build.rs` непрозрачен. Значит:
-
-- маршрутная таблица сокетной двери — **единственное рукописное перечисление имён**;
-- сборка гарантирует только выводимое: дубли имён, зарезервированные имена, отсутствие описания, orphan-модули;
-- «spec без обработчика» и «таблица == манифест» — **тестовые** гарантии, и тест обязан быть невырожденным (проверка мутацией: убрать обработчик → тест красный);
-- макрос окупается не как описание команд, а как способ не дать разъехаться `generate_handler!` и массиву имён.
-
-### 10.8.3 Срезы и ворота
-
-**S0** (CDP + дискавери) → **S1** (`gui`) → **S2** (манифест + маршрут + CLI) → **S3** (расцепление типов в `ipc.rs`) → **S4** (фронт, по одной команде за флагом) → **S5** (`simulate` + приёмка).
-
-Ворота на **каждом** срезе: `cargo test --workspace` + `udtk doctor -all` + `udtk doctor -check` + `udtk shot` (вёрстка не изменилась). В S0 добавляется негативная проверка: `rg -n -- '--remote-allow-origins'` пусто **и** `udtk eval 1+1`, `udtk dom`, `udtk shot`, `udtk doctor -simulate` зелёные — это и есть доказательство, что наш клиент живёт без заголовка `Origin`.
-
-### 10.8.4 Что заимствовать у `agent-browser` в первую очередь
-
-Приёмы важнее частоты снимков: наш подход (один снимок на батч + типизированные квитанции + дельта логов) не проигрывает — Chrome DevTools MCP сделал снимок после действия **опциональным**, а `agent-browser` переснимает дерево только при провале. Порядок заимствования:
-
-1. **Отказ при перекрытой цели + отчёт, что именно перекрыло** — самая ценная и дешёвая правка (см. §10.8.5 п.3).
-2. **Ссылки вместо индексов:** стабильный `data-udtk-ref`, а не позиционный номер из снимка.
-3. **Аннотированный скриншот** с боксами и ссылками (`udtk shot`) как замена снимку дерева, когда дешевле картинка.
-4. **Не заимствовать демон** `agent-browser`: он противоречит §10.2 («логика в CLI не оседает») и переносит состояние сессии в CLI. Наш контракт — один батч на один запуск `udtk gui`.
-
-### 10.8.5 Найдено сверх плана (живые пробы, DPI-контракт, harness)
-**1. Прямое противоречие в документации про DPI — ударит в S1.**
-`docs/agent-e2e-and-ipc-plan.md` «Табу #9» предписывает умножать координаты на `devicePixelRatio`, а §5.3 того же документа — ровно обратное: в CDP `Input.dispatchMouseEvent` принимает CSS-пиксели 1:1, и умножение даёт промах 1.25–1.5×. Код прав (умножения нет, `opt/cli/main.rs:664-688` отправляет координаты из `getBoundingClientRect()` как есть). **Правка:** переформулировать Табу в «запрет смешивать конвенции ввода»: CDP — CSS-пиксели без масштабирования; нативный `SendInput` — физические, требует dpr; обязательна per-monitor-v2 DPI-awareness.
-
-**2. Harness и `act` нарушают собственное «Табу #3» (только `data-testid` и роли).**
-`core/ui/harness.js` строит выборку по классам (`.action-btn`, `.nav-btn`, `.track-row`, …) и отдаёт наружу `selector` вида `.class`; `udtk act` принимает произвольный CSS-селектор. Плюс `id` в дереве **позиционный** (`nextId++`) — между снимками не стабилен, а план §10.4 этап 5 требует «стабильных ссылок». **Правка:** наружу отдавать только локаторы `{testid}` / `{role+name}` / `{ref}` и флаг `fragile`, если стабильного нет; классы оставить только внутреннему обнаружению; проставлять `data-udtk-ref` (снимается вместе с узлом); `act` по классу — только с явным `--allow-fragile`; ворота — JS-тест «в выводе дерева нет классового локатора».
-
-**3. `occluded` детектируется, но клик всё равно отправляется — квитанция врёт (проверено на живом приложении).**
-`udtk dom` вернул **41 элемент, и все 41 помечены `[OCCLUDED]`**: поверх открыт `#explorerContainer` (`z-index: 2000`), и центры узлов попадают на чужие элементы самого Explorer. При этом `act` читает флаг, но клик **не отменяет**, отправляет события и в JSON-квитанции отдаёт `"status": "ok"` (предупреждение печатается только в текстовом режиме). Автоматика, читающая статус, видит успех, а нажатие получил Explorer — это «тест для галочки» механизмом. **Правка:** `ok` квитанции выводится из хит-теста; при `occluded: true` — отказ без `--force`; в квитанцию добавить `covering: {id, selector, surface}`; узлы под активной поверхностью не предлагать как цели. **Приёмка S1:** «клик по перекрытой цели → отказная квитанция с именем перекрывающего элемента».
+**The owner's decisions from the discussion (recorded in §10.2–10.4):**
+- The front end is moved entirely to our protocol (the radical option). Door authentication is therefore a mandatory stage, not an option. The accepted boundary (protection from web pages and other users, but not from malware of the same user) is recorded as a knowingly accepted risk.
+- Module state moves into the modules themselves. This is the condition for a third-party developer to add a command without editing the kernel.
+- `metadata.json` is extended with render entry points.
+- Work starts with stage 0, which secures the debug door. CDP stays enabled always (the owner's decision), but `--remote-allow-origins=*` is removed, the port stops being hardcoded, and the `dev`/`--debug` modes are to be retired in the long run.
 
 ---
 
-## 10.9 Срез S0 выполнен (отчёт)
+## 10.8 Consensus after a dialogue with a subagent
 
-**Что изменено в коде:**
+A two-round dialogue (positions → objections → consensus), with live probes against the running app. The outcome is recorded in the plan as mandatory.
 
-- `core/kernel/main.rs`: убран `--remote-allow-origins=*`; добавлены `pick_cdp_port()` (9222, если свободен, иначе эфемерный), `merge_browser_args()` (свои WebView2-аргументы **дописываются** к унаследованным, а унаследованные `--remote-debugging-port`/`--remote-allow-origins` отбрасываются) и `cdp_port()`; порт публикуется в IPC.
-- `core/kernel/ipc.rs`: `ping` возвращает `cdpPort`; из маршрута **удалена write-команда `save_widget_config`** (и из ответа `commands`) — дверь снова соответствует заявленной read-only модели.
-- `opt/cli/main.rs`: `--remote-allow-origins=*` убран в `dev --debug` и `run --debug`; CDP-порт больше не хардкодится — `cdp_port()` спрашивает его у приложения и **не подставляет 9222 вслепую**; `cdp_ws_url()` отказывается работать, если мишень не `http://tauri.localhost`; `run_simulation()` возвращает признак провала, и `doctor` его учитывает.
+### 10.8.1 Kernel and module types: narrow the wording of the goal
 
-**Проверено живьём (release-сборка, приложение реально перезапускалось):**
+"The kernel stops naming module types" **is not achievable in full at stage 3**, and it should not be. The Tauri surface continues to name the types until stage 7.
 
-| Проверка | Результат |
+Facts: in `core/kernel/main.rs` there are **31** `#[tauri::command]`, **93** `State<…>` parameter positions, and **9** `app.manage(...)` sites. In `core/kernel/ipc.rs` there is a separate, smaller surface (~20 arms).
+
+**Decision:** §10.3 applies **to the routing surface**. From stage 3, `ipc.rs::route()` looks up a table where each arm is a module's `dispatch(&self, cmd, args)`, so the state type does not leave the module. The handwritten wrappers, `generate_handler!`, and `app.manage(module.runtime())` **remain** until stage 7, and are removed together with the Tauri transport.
+
+**Consequence to be written into §10.1 and §10.7 in plain text:** "a command can be added without editing the kernel" is true **for our door**. For the Tauri surface it becomes true only after stage 7.
+
+**Criteria:** S3 — a grep test that "there are no module type identifiers in `ipc.rs`". S7 — "there is no `State<…>` with a module type in `main.rs`, and no `app.manage` of module state".
+
+**The rule "a module depends only on `unidtk-api`" is factually obsolete.** `tauri` is declared by 4 of the 5 modules, and the contract itself provokes this (`ModuleContext::host::<tauri::AppHandle>()`). **Owner's decision: the rule is narrowed** to the invariant that protects updatability: "a module **does not** depend on the kernel crate. `unidtk-api` is mandatory, and Tauri host types are permitted". Application: a rewording in `docs/architecture.md` §1 and in the header of `core/api`. The check is in `toolchain/build.rs::lint_modules_integrity()`, which fails on a dependency on the kernel crate in `modules/*/rust/Cargo.toml`. Do this as part of S2.
+
+### 10.8.2 Manifest and route: where verification is possible and where it is not
+
+The check "spec without a handler" **cannot be done at build time**. The proc-macro and source scanning were rejected, and `generate_handler!` is opaque to `build.rs`. So:
+
+- the routing table of the socket door is **the only handwritten enumeration of names**;
+- the build guarantees only what can be derived: duplicate names, reserved names, missing descriptions, orphan modules;
+- "spec without a handler" and "table == manifest" are **test** guarantees, and the test must be non-degenerate (a mutation check: remove a handler → the test turns red);
+- the macro pays off not as a description of commands, but as a way to keep `generate_handler!` and the name array from drifting apart.
+
+### 10.8.3 Slices and gates
+
+**S0** (CDP + discovery) → **S1** (`gui`) → **S2** (manifest + route + CLI) → **S3** (decoupling of types in `ipc.rs`) → **S4** (front end, one command at a time behind a flag) → **S5** (`simulate` + acceptance).
+
+The gate on **each** slice: `cargo test --workspace` + `udtk doctor -all` + `udtk doctor -check` + `udtk shot` (the layout has not changed). In S0 a negative check is added: `rg -n -- '--remote-allow-origins'` must be empty **and** `udtk eval 1+1`, `udtk dom`, `udtk shot`, `udtk doctor -simulate` must be green. This is the proof that our client works without an `Origin` header.
+
+### 10.8.4 What to borrow from `agent-browser` first
+
+Techniques matter more than snapshot frequency. Our approach (one snapshot per batch + typed receipts + log delta) is not behind. Chrome DevTools MCP made the post-action snapshot **optional**, and `agent-browser` re-snapshots the tree only on failure. The borrowing order:
+
+1. **Refusal on an occluded target, plus a report of what exactly occluded it.** This is the most valuable and the cheapest change (see §10.8.5 item 3).
+2. **References instead of indexes:** a stable `data-udtk-ref`, not a positional number from the snapshot.
+3. **An annotated screenshot** with boxes and references (`udtk shot`) as a replacement for the tree snapshot, when a picture is cheaper.
+4. **Do not borrow the `agent-browser` daemon.** It contradicts §10.2 ("logic does not settle in the CLI") and moves session state into the CLI. Our contract is one batch per `udtk gui` run.
+
+### 10.8.5 Found beyond the plan (live probes, DPI contract, harness)
+
+**1. A direct contradiction in the documentation about DPI. It will hit S1.**
+`docs/agent-e2e-and-ipc-plan.md` "Taboo #9" prescribes multiplying coordinates by `devicePixelRatio`. Section §5.3 of the same document says exactly the opposite: in CDP, `Input.dispatchMouseEvent` takes CSS pixels 1:1, and multiplication gives a miss of 1.25–1.5×. The code is right. There is no multiplication, and `opt/cli/main.rs:664-688` sends the coordinates from `getBoundingClientRect()` as they are. **Fix:** reword the taboo into "a ban on mixing input conventions". CDP takes CSS pixels without scaling. Native `SendInput` takes physical pixels and requires the dpr. Per-monitor-v2 DPI awareness is mandatory.
+
+**2. The harness and `act` break their own "Taboo #3" (only `data-testid` and roles).**
+`core/ui/harness.js` builds its selection by class (`.action-btn`, `.nav-btn`, `.track-row`, …) and exposes a `selector` of the form `.class`. `udtk act` accepts an arbitrary CSS selector. In addition, the `id` in the tree is **positional** (`nextId++`), so it is not stable between snapshots. Plan §10.4, stage 5, requires "stable references". **Fix:** expose outside only the locators `{testid}` / `{role+name}` / `{ref}`, plus a flag `fragile` if no stable one exists. Keep classes only for internal discovery. Set `data-udtk-ref` (it is removed together with the node). `act` by class only with an explicit `--allow-fragile`. The gate is a JS test: "the tree output contains no class locator".
+
+**3. `occluded` is detected, but the click is sent anyway. The receipt lies (verified on the live app).**
+`udtk dom` returned **41 elements, and all 41 are marked `[OCCLUDED]`**. `#explorerContainer` (`z-index: 2000`) is open on top, and the centers of the nodes land on other elements of Explorer itself. `act` reads the flag but **does not cancel** the click. It sends the events and returns `"status": "ok"` in the JSON receipt. The warning is printed only in text mode. Automation that reads the status sees success, while the press was received by Explorer. The check exists only for show. **Fix:** the receipt's `ok` is derived from the hit-test. With `occluded: true`, refuse without `--force`. Add `covering: {id, selector, surface}` to the receipt. Do not offer nodes under an active surface as targets. **S1 acceptance:** "a click on an occluded target → a refusal receipt with the name of the covering element".
+
+---
+
+## 10.9 Slice S0 completed (report)
+
+**What changed in the code:**
+
+* `core/kernel/main.rs`: `--remote-allow-origins=*` was removed. Added `pick_cdp_port()` (9222 if it is free, otherwise an ephemeral port), `merge_browser_args()` (its own WebView2 arguments are **appended** to the inherited ones, and the inherited `--remote-debugging-port`/`--remote-allow-origins` are discarded), and `cdp_port()`. The port is published in IPC.
+* `core/kernel/ipc.rs`: `ping` returns `cdpPort`. The **write command `save_widget_config` was removed** from the route (and from the `commands` response). The door again matches the declared read-only model.
+* `opt/cli/main.rs`: `--remote-allow-origins=*` was removed from `dev --debug` and `run --debug`. The CDP port is no longer hardcoded: `cdp_port()` asks the app for it and **does not substitute 9222 blindly**. `cdp_ws_url()` refuses to work if the target is not `http://tauri.localhost`. `run_simulation()` returns a failure flag, and `doctor` takes it into account.
+
+**Verified live (release build, the app was actually restarted):**
+
+| Check | Result |
 |---|---|
-| `utdk invoke ping` | `{"cdpPort": 9222, "pong": true}` — дискавери работает |
-| WebSocket с `Origin: http://evil.test` | **отвергнут** (до правки был `101`) |
-| WebSocket без `Origin` (наш CLI) | `101`, работает |
-| 9222 занят чужим listener | приложение взяло **54060**, `utdk eval` отработал по нему |
-| `save_widget_config` через IPC | `unknown cmd` |
-| `dom` без запущенного приложения | внятная ошибка «cannot determine the CDP port», без слепого 9222 |
-| `doctor -simulate` без приложения | `FAILED (1 issue detected)`, exit 1 (раньше мог отдать «ALL CHECKS PASSED») |
+| `utdk invoke ping` | `{"cdpPort": 9222, "pong": true}`. Discovery works |
+| WebSocket with `Origin: http://evil.test` | **rejected** (before the fix it was `101`) |
+| WebSocket without `Origin` (our CLI) | `101`, works |
+| 9222 occupied by a foreign listener | the app took **54060**, and `utdk eval` worked through it |
+| `save_widget_config` through IPC | `unknown cmd` |
+| `dom` without the running app | a clear error, "cannot determine the CDP port", without a blind 9222 |
+| `doctor -simulate` without the app | `FAILED (1 issue detected)`, exit 1 (previously it could give "ALL CHECKS PASSED") |
 | `cargo test -p unidtk --bin udtk` | 10/10 |
 | `utdk doctor -quick` | ALL CHECKS PASSED |
-| `utdk shot` | вёрстка в норме (проверено визуально) |
+| `utdk shot` | layout is fine (checked visually) |
 
-**Замечания независимого ревьюера (GPT-5.6 Sol), принятые к следующим срезам:**
+**Remarks from the independent reviewer (GPT-5.6 Sol), accepted for the next slices:**
 
-- **Идемпотентность и повтор запроса** (S1/S4): `id` в конверте — корреляция, а не защита от повторного исполнения; реконнект `gui` или таймаут после фактически выполненной команды способны повторить побочный эффект. Нужны классы идемпотентности, дедупликация по request-id и запрет авто-ретрая для неидемпотентных команд.
-- **События не восстанавливаются переподпиской** (S4): `Bus::last` хранит только последнее значение, поэтому события между обрывом и новой подпиской теряются. Нужны монотонный sequence/cursor, `resumeFrom`, сигнал gap и обязательный resync.
-- **TOCTOU выбора порта** (S1): между пробным `TcpListener` и фактическим bind WebView2 остаётся окно; нужен перепроверяемый маркер владельца (PID/родитель или уникальный идентификатор страницы) и отказ при неопределённости.
-- **Четвёртый список** (S2): если маршрутная таблица появится рядом с отдельными `CommandSpec` и обработчиками, обещание «одна таблица» не выполнится. Единица декларации должна сразу нести и spec, и обработчик, а манифест — быть проекцией этой структуры.
-- **Отделение инвентаря от фабрик** (S2): CLI сейчас тянет `core/kernel/registry.rs::all_modules()`, что создаёт модули; инвентарь команд должен жить в статических данных, не вызывая `Module::init`.
-- **Формулировка «build-time гарантия обработчика» неверна** — это тестовая гарантия (§10.8.2 это уже признаёт; в воротах S2 формулировать именно так).
+- **Idempotency and request repetition** (S1/S4): `id` in the envelope is correlation, not protection against repeated execution. A `gui` reconnect, or a timeout after a command has actually executed, can repeat a side effect. Idempotency classes, deduplication by request-id, and a ban on automatic retries for non-idempotent commands are needed.
+- **Events are not restored by resubscription** (S4): `Bus::last` stores only the last value, so events between a disconnect and a new subscription are lost. A monotonic sequence/cursor, `resumeFrom`, a gap signal, and a mandatory resync are needed.
+- **TOCTOU in port selection** (S1): between the probe `TcpListener` and the actual bind, WebView2 leaves a window. A re-verifiable owner marker (PID/parent or a unique page identifier) and a refusal in case of uncertainty are needed.
+- **A fourth list** (S2): if the routing table appears alongside separate `CommandSpec`s and handlers, the promise of "one table" will not hold. The unit of declaration must carry both the spec and the handler at once, and the manifest must be a projection of that structure.
+- **Separating the inventory from the factories** (S2): the CLI currently pulls in `core/kernel/registry.rs::all_modules()`, which creates modules. The command inventory must live in static data, without calling `Module::init`.
+- **The wording "build-time guarantee of a handler" is wrong.** It is a test guarantee (§10.8.2 already admits this). In the S2 gate, phrase it exactly that way.
 
-**Среда (найдено попутно):** запущенное приложение держит `tdjson.dll`/`libcrypto`/`libssl`/`z.dll` из `target\release`, из-за чего релизная сборка падает с `os error 32`. Порядок для релиза: остановить приложение → `cargo build --release --bins` → запустить. Второе: **нельзя прогонять cargo через конвейер PowerShell с `Select-Object`** — вывод обрывается, процесс сборки завершается раньше времени, и артефакт молча остаётся старым (дважды ловили «сборка успешна, бинарник старый»).
-
----
-
-## 10.10 Срез S1 выполнен: `udtk gui`
-
-**Что изменено:**
-
-- `opt/cli/main.rs`: команда `gui` — одна CDP-сессия на весь батч (структура `Cdp` с монотонными `id`, события игнорируются), шаги `js:` / `click:` / `type:` / `press:` / `tree` / `wait:`, до 50 шагов, квитанция на каждый шаг (`kind`, `ok`, `value`, `hit_point`, `covering`, `refused`, `text`/`key`, `log_delta`, `ui_errors`, `duration_ms`), `--json`, `--force`. Команды `dom`, `act`, `eval` удалены.
-- `core/ui/harness.js`: стабильные ссылки `data-udtk-ref` (поле `ref`), поле `covering` у перекрытых узлов, классовые селекторы убраны из выдачи (флаг `fragile` вместо них), `resolveTarget` понимает `r<N>`.
-- `core/kernel/ipc.rs`: команда `log_delta` — дельта журнала и новый watermark одним раундом.
-
-**Проверено живьём:** батч из двух `js`-шагов с квитанциями; `tree` — 29 узлов, у всех `ref`, классовых локаторов 0; клик по `r1` при открытом меню → отказ `refused: "occluded"` с `covering: div#menuOverlay (r30)`; `--force` кликает принудительно; `cargo test -p unidtk --bin udtk` 10/10; `doctor -quick` PASSED; вёрстка по скриншоту цела.
+**Environment (found along the way):** the running app holds `tdjson.dll`/`libcrypto`/`libssl`/`z.dll` from `target\release`, which makes the release build fail with `os error 32`. The order for a release: stop the app → `cargo build --release --bins` → start the app. Second: **do not run cargo through a PowerShell pipeline with `Select-Object`.** The output is cut off, the build process ends early, and the artifact silently stays old. This was caught twice as "build succeeded, binary is old".
 
 ---
 
-## 10.11 Срез S2 (частично): единый инвентарь команд
+## 10.10 Slice S1 completed: `udtk gui`
 
-**Что изменено:**
+**What changed:**
 
-- `core/api/src/commands.rs` (новый): типы `CommandSpec`, `Access::{ReadOnly, Write}`, `Door::{Socket, Tauri}`. Write-команда по построению не попадает на сокет — это отражено тестами контракта. Правило стало **данными**, а не умолчанием.
-- `core/kernel/command_inventory.rs` (новый): 21 команда с именем, описанием, аргументами, доступом и дверями. Файл **компилируется в оба бинарника** — ядро обслуживает по нему, CLI `#[path]`-включает его и описывает поверхность даже при выключенном приложении.
-- `core/kernel/ipc.rs`: гард перед маршрутом — `route()` сначала ищет команду в инвентаре; нет в инвентаре → `unknown cmd`; есть, но write → отказ с пояснением. Ветка `log` удалена из `match` (её роль теперь у инвентаря), ответ команды `commands` строится из инвентаря.
-- `opt/cli/main.rs`: `help --json` отдаёт `protocol: 1`, `cli_commands` (команды самого `udtk`) и **`app_commands`** — поверхность приложения из общего инвентаря.
+* `opt/cli/main.rs`: the `gui` command. One CDP session for the whole batch (a `Cdp` structure with monotonic `id`s; events are ignored). Steps `js:` / `click:` / `type:` / `press:` / `tree` / `wait:`, up to 50 steps. A receipt for each step (`kind`, `ok`, `value`, `hit_point`, `covering`, `refused`, `text`/`key`, `log_delta`, `ui_errors`, `duration_ms`), `--json`, `--force`. The `dom`, `act`, `eval` commands were removed.
+* `core/ui/harness.js`: stable references `data-udtk-ref` (field `ref`), a `covering` field on occluded nodes, class selectors removed from the output (the `fragile` flag is used instead), and `resolveTarget` understands `r<N>`.
+* `core/kernel/ipc.rs`: the command `log_delta`, which returns the journal delta and the new watermark in one round.
 
-**Проверено живьём:** `invoke commands` → 21 запись с `access`/`doors`; `invoke log` → `command 'log' is not available on this door (write commands stay on the UI door)`, exit 1; `invoke save_widget_config` → `unknown cmd`; `invoke ping`, `gui js:` работают; `help --json` показывает 13 CLI-команд и 21 команду приложения офлайн; `cargo test --workspace` — 0 падений.
-
-**Честная граница сделанного (остаётся на S3):**
-
-- обработчики по-прежнему живут в `match` ядра: имена теперь берутся из инвентаря (гард делает его авторитетным), но таблицы «(spec, handler)» ещё нет — это S3, вместе с расцеплением типов модулей;
-- полноценный тест «инвентарь == маршрут» требует живого сервера; сейчас расхождение ловится гардом, а не тестом;
-- команды модулей пока перечислены в ядре, а не объявлены самими модулями (зависит от решения «модуль владеет состоянием», принятого для S3);
-- сужено правило зависимостей модулей (не «только `unidtk-api`», а «не зависит от крейта ядра; tauri-типы хоста допустимы») — в `AGENTS.md` §1.1 и шапке `core/api`; проверка-линт в `build.rs` ещё не добавлена.
+**Verified live:** a batch of two `js` steps with receipts; `tree` returned 29 nodes, all with a `ref`, and 0 class locators; a click on `r1` with the menu open was refused with `refused: "occluded"` and `covering: div#menuOverlay (r30)`; `--force` clicks anyway; `cargo test -p unidtk --bin udtk` 10/10; `doctor -quick` PASSED; the layout is intact per the screenshot.
 
 ---
 
-## 10.12 Срез S1 — дополнение: замечания Sol по надёжности
+## 10.11 Slice S2 (partial): a unified command inventory
 
-Приняты в работу, но ещё не реализованы (перенесены на S4, где появится настоящая дверь):
+**What changed:**
 
-- **идемпотентность**: у команд нужен класс (идемпотентна / нет) и дедупликация по `request-id`; авто-ретрай неидемпотентных команд запрещён;
-- **события**: `Bus::last` хранит только последнее значение — нужны sequence/cursor, `resumeFrom` и обязательный resync после переподключения;
-- **TOCTOU порта**: между пробным `TcpListener` и bind WebView2 остаётся окно; нужен перепроверяемый маркер владельца (PID/родитель либо уникальный идентификатор страницы).
+* `core/api/src/commands.rs` (new): the types `CommandSpec`, `Access::{ReadOnly, Write}`, `Door::{Socket, Tauri}`. A write command by construction does not reach the socket. This is reflected in the contract tests. The rule has become **data**, not a default.
+* `core/kernel/command_inventory.rs` (new): 21 commands with name, description, arguments, access, and doors. The file **compiles into both binaries**. The kernel serves from it, and the CLI `#[path]`-includes it and describes the surface even when the app is off.
+* `core/kernel/ipc.rs`: a guard before the route. `route()` first looks the command up in the inventory. Not in the inventory → `unknown cmd`. In the inventory but write → a refusal with an explanation. The `log` branch was removed from the `match` (its role now belongs to the inventory), and the response to `commands` is built from the inventory.
+* `opt/cli/main.rs`: `help --json` returns `protocol: 1`, `cli_commands` (the commands of `udtk` itself), and **`app_commands`**, the application surface from the shared inventory.
 
----
+**Verified live:** `invoke commands` → 21 records with `access`/`doors`. `invoke log` → `command 'log' is not available on this door (write commands stay on the UI door)`, exit 1. `invoke save_widget_config` → `unknown cmd`. `invoke ping` and `gui js:` work. `help --json` shows 13 CLI commands and 21 application commands offline. `cargo test --workspace`: 0 failures.
 
-## 10.13 Срез S3, шаг 1: таблица маршрутов вместо `match`
+**The honest boundary of what was done (remains for S3):**
 
-**Что изменено** (`core/kernel/ipc.rs`): рукописный `match cmd` на ~20 веток заменён **таблицей маршрутов**:
-
-- `type Handler = fn(&IpcServer, &Args) -> Result<Value, String>` — каждый бывший «arm» стал отдельной функцией (`handle_ping`, `handle_logs`, `handle_vpn_status`, …);
-- `static ROUTES: &[(&str, Handler)]` — единственное перечисление обработчиков, причём **имена берутся из констант инвентаря** (`command_inventory::PING.name`), а не из повторённых строк: имя пишется в коде один раз;
-- `route()` = гард по инвентарю → поиск в таблице → вызов; если имя объявлено, но обработчика нет, ответ честно говорит об inconsistency сборки.
-
-**Тесты, которые делают таблицу осмысленной** (`ipc::route_tests`):
-
-1. `every_socket_command_has_a_handler` — каждая сокетная команда инвентаря имеет обработчик. Это и есть недостающая «невырожденная» проверка: добавил spec без handler — падает тест, а не тихий 404;
-2. `every_handler_is_declared_in_the_inventory` — обратная сторона;
-3. `route_names_are_unique` — дублей нет.
-
-**Проверено живьём** (release, приложение перезапускалось): `invoke ping` → `cdpPort`; `invoke vpn_status` → реальные данные через обработчик таблицы; `invoke log_max_id`, `invoke log_delta` → корректные ответы; `invoke log` → отказ политикой; `gui js:6*7` → 42; `doctor -quick` → ALL CHECKS PASSED, exit 0; `cargo test --workspace` → 0 падений, все 15 наборов зелёные.
-
-**Что осталось в S3 (шаг 2):** ядро всё ещё называет типы модулей — обработчики вызывают `with_state::<vpn::VpnRuntime>` / `TelegramRuntime` / `AppState`. Расцепление требует переноса обработки в сами модули:
-
-1. метод контракта `Module::ipc_call(&self, cmd, args) -> Option<Result<Value, String>>` (реализация по умолчанию — `None`);
-2. ядро хранит **экземпляры модулей** (сейчас оно создаёт их в `setup`, снимает рантаймы через `app.manage(...)` и теряет объекты) — нужен реестр `Arc<dyn Module>`, доступный `IpcServer`;
-3. каждый модуль сам отвечает за свои команды, доставая состояние через `ModuleContext::host::<AppHandle>()`;
-4. пилот на `glyph-bar` (одна команда, состояния не требует) → затем `explorer`, `vpn`, `telegram`, `mp3-player`;
-5. ворота: grep-тест «в `ipc.rs` нет идентификаторов типов модулей».
-
-Оценка: это самая крупная правка плана после S4; её нельзя делать «на глаз» — сначала пилот, потом остальные, каждый со своими воротами.
+* The handlers still live in the kernel's `match`. The names now come from the inventory (the guard makes it authoritative), but there is no "(spec, handler)" table yet. That is S3, together with decoupling the module types.
+* A full test "inventory == route" requires a live server. Right now the mismatch is caught by the guard, not by a test.
+- module commands are still listed in the kernel, not declared by the modules themselves. This depends on the decision "a module owns its state", adopted for S3;
+- the module dependency rule has been narrowed. It is no longer "only `unidtk-api`" but "does not depend on the kernel crate; Tauri host types are permitted". This is recorded in `AGENTS.md` §1.1 and in the header of `core/api`. The lint check in `build.rs` has not been added yet.
 
 ---
 
-## 10.14 Срез S3, шаг 2: модули отвечают за свои команды (расцепление выполнено)
+## 10.12 Slice S1 addendum: Sol's reliability remarks
 
-**Механизм.** В контракт добавлены `HostHandle<'a> = &'a (dyn Any + Send + Sync)` и `ModuleIpcFn` — сигнатура обработчика модуля. Ядро держит таблицу `MODULE_ROUTES: &[(&str, ModuleIpcFn)]` и обращается к модулю **по id**, передавая непрозрачный host; модуль сам достаёт своё состояние (`downcast_ref::<AppHandle>()` + `try_state`). Контракт при этом остаётся свободным от Tauri-типов, а `glyph-bar` (у него нет состояния для `volume_get`) так и остался без зависимости от `tauri`.
+Taken into work, but not yet implemented. They are moved to S4, where the real door will appear:
 
-**Что сделано:**
+- **Idempotency**: commands need a class (idempotent or not) and deduplication by `request-id`. Automatic retry of non-idempotent commands is forbidden.
+- **Events**: `Bus::last` stores only the last value. A sequence/cursor, `resumeFrom`, and a mandatory resync after reconnection are needed.
+- **Port TOCTOU**: between the probe `TcpListener` and the WebView2 bind, a window remains. A re-verifiable owner marker is needed (PID/parent, or a unique page identifier).
 
-| Модуль | Команды | Состояние |
+---
+
+## 10.13 Slice S3, step 1: a route table instead of `match`
+
+**What changed** (`core/kernel/ipc.rs`): the handwritten `match cmd` with ~20 arms was replaced by a **route table**:
+
+- `type Handler = fn(&IpcServer, &Args) -> Result<Value, String>`. Each former "arm" became a separate function (`handle_ping`, `handle_logs`, `handle_vpn_status`, …).
+- `static ROUTES: &[(&str, Handler)]` is the only enumeration of handlers. **The names are taken from the inventory constants** (`command_inventory::PING.name`), not from repeated strings, so a name is written in the code once.
+- `route()` = the guard against the inventory → lookup in the table → call. If a name is declared but has no handler, the answer honestly reports a build inconsistency.
+
+**Tests that make the table meaningful** (`ipc::route_tests`):
+
+1. `every_socket_command_has_a_handler`: every socket command in the inventory has a handler. This is the missing "non-degenerate" check. If you add a spec without a handler, the test fails instead of a silent 404.
+2. `every_handler_is_declared_in_the_inventory`: the reverse direction.
+3. `route_names_are_unique`: there are no duplicates.
+
+**Verified live** (release, the app was restarted): `invoke ping` → `cdpPort`; `invoke vpn_status` → real data through the table handler; `invoke log_max_id` and `invoke log_delta` → correct answers; `invoke log` → refused by policy; `gui js:6*7` → 42; `doctor -quick` → ALL CHECKS PASSED, exit 0; `cargo test --workspace` → 0 failures, all 15 suites green.
+
+**What remains in S3 (step 2):** the kernel still names the module types. The handlers call `with_state::<vpn::VpnRuntime>` / `TelegramRuntime` / `AppState`. Decoupling requires moving the handling into the modules themselves:
+
+1. A contract method `Module::ipc_call(&self, cmd, args) -> Option<Result<Value, String>>`, whose default implementation returns `None`.
+2. The kernel holds **module instances**. Currently it creates them in `setup`, takes the runtimes through `app.manage(...)`, and loses the objects. A registry of `Arc<dyn Module>` available to `IpcServer` is needed.
+3. Each module answers for its own commands itself, fetching its state through `ModuleContext::host::<AppHandle>()`.
+4. A pilot on `glyph-bar` (one command, which needs no state), then `explorer`, `vpn`, `telegram`, `mp3-player`.
+5. The gate: a grep test that "there are no module type identifiers in `ipc.rs`".
+
+Assessment: this is the largest change to the plan after S4. It must not be done "by eye". First the pilot, then the rest, each with its own gate.
+
+---
+
+## 10.14 Slice S3, step 2: modules answer for their own commands (decoupling done)
+
+**Mechanism.** The contract gains `HostHandle<'a> = &'a (dyn Any + Send + Sync)` and `ModuleIpcFn`, the signature of a module's handler. The kernel holds a table `MODULE_ROUTES: &[(&str, ModuleIpcFn)]` and addresses a module **by id**, passing an opaque host. The module fetches its own state itself (`downcast_ref::<AppHandle>()` + `try_state`). The contract stays free of Tauri types, and `glyph-bar` (which has no state for `volume_get`) stayed without a dependency on `tauri`.
+
+**What was done:**
+
+| Module | Commands | State |
 |---|---|---|
-| `glyph-bar` (пилот) | `volume_get` | не нужно |
-| `explorer` | `explorer_drives`, `explorer_places` | не нужно (добавлен `serde_json` в зависимости) |
-| `vpn` | `vpn_status`, `vpn_settings`, `vpn_list_servers` | `VpnRuntime` через host |
-| `telegram` | `telegram_status`, `telegram_chats` | `TelegramRuntime` через host |
-| `mp3-player` | `player_status`, `ai_dj_status`, `list_tracks`, `list_playlists`, `get_submodules` | `AppState` через host |
+| `glyph-bar` (pilot) | `volume_get` | not needed |
+| `explorer` | `explorer_drives`, `explorer_places` | not needed (`serde_json` added to the dependencies) |
+| `vpn` | `vpn_status`, `vpn_settings`, `vpn_list_servers` | `VpnRuntime` via host |
+| `telegram` | `telegram_status`, `telegram_chats` | `TelegramRuntime` via host |
+| `mp3-player` | `player_status`, `ai_dj_status`, `list_tracks`, `list_playlists`, `get_submodules` | `AppState` via host |
 
-В ядре удалены `run_player()` и `with_state()` — вместе с ними ушёл и импорт `tauri::Manager`: роутер больше не трогает состояние модулей вообще.
+In the kernel, `run_player()` and `with_state()` were removed, together with the `tauri::Manager` import. The router no longer touches module state at all.
 
-**Ворота (автотест, не обещание):** `ipc::route_tests::router_does_not_name_module_state_types` читает исходник `ipc.rs` через `include_str!` и падает, если там появится имя состояния модуля. Имена собираются в рантайме (`["Vpn","Runtime"].concat()`), чтобы текст самого теста не удовлетворял поиск.
+**Gate (an automatic test, not a promise):** `ipc::route_tests::router_does_not_name_module_state_types` reads the `ipc.rs` source through `include_str!` and fails if a module state type name appears there. The names are assembled at runtime (`["Vpn","Runtime"].concat()`), so that the test's own text does not satisfy the search.
 
-**Проверено живьём:** все **17** сокетных команд отвечают `exit=0` — `ping`, `logs`, `log_stats`, `get_widget_config`, `commands`, `volume_get`, `explorer_drives`, `explorer_places`, `vpn_status`, `vpn_settings`, `vpn_list_servers`, `telegram_status`, `telegram_chats`, `player_status`, `ai_dj_status`, `list_playlists`, `get_submodules`. `cargo test --workspace` — 0 падений.
+**Verified live:** all **17** socket commands answer `exit=0`: `ping`, `logs`, `log_stats`, `get_widget_config`, `commands`, `volume_get`, `explorer_drives`, `explorer_places`, `vpn_status`, `vpn_settings`, `vpn_list_servers`, `telegram_status`, `telegram_chats`, `player_status`, `ai_dj_status`, `list_playlists`, `get_submodules`. `cargo test --workspace` — 0 failures.
 
-**Что это дало по существу:** добавление команды модуля больше не требует правок ядра — три шага: объявить в инвентаре, реализовать в `ipc_call` своего крейта, добавить строку в `MODULE_ROUTES`. Это ровно та цель, которую владелец ставил («сторонний разработчик добавляет команду без правки ядра»), достигнутая без proc-macro и без линкерной магии.
+**What this gave in substance:** adding a module command no longer requires kernel edits. It takes three steps: declare it in the inventory, implement it in `ipc_call` of the module's own crate, and add a line to `MODULE_ROUTES`. This is exactly the goal the owner set ("a third-party developer adds a command without editing the kernel"), reached without a proc-macro and without linker magic.
 
-**Осталось:** S4 (фронтенд на нашу дверь: WS + токен + рукопожатие, идемпотентность и дедупликация, cursor/resync событий) и S5 (`simulate` + приёмка и документы).
-
----
-
-## 10.15 Срез S4, шаг 1: конверт протокола v1
-
-Первый и обязательный кусок S4: без версии и идентификатора запроса дверь нельзя ни версионировать, ни сопоставлять ответы, а рассинхрон «установленный CLI ↔ новое ядро» выглядел бы как случайные сбои.
-
-**Что сделано:**
-
-- `core/kernel/ipc.rs`: введены `PROTOCOL = 1` и единая функция `respond(id, outcome)`. Ответ теперь несёт `v` и, если запрос его прислал, **эхо `id`**. Конверт на входе **необязателен**: старый мост, присылающий только `{cmd, args}`, продолжает работать — это условие безболезненного перехода.
-- `ping` сообщает `proto` и `capabilities: ["envelope-v1","log-delta","door-policy","gui"]`.
-- `opt/cli/main.rs`: `ipc()` нумерует запросы (`AtomicU64`), отправляет `v`+`id` и проверяет ответ — при несовпадении `id` или чужой версии протокола выдаёт внятную ошибку «обновите обе стороны», а не молча деградирует.
-
-**Проверено живьём:** `invoke ping` → `proto: 1` + список возможностей; сырой запрос `{"v":1,"id":42,"cmd":"ping"}` получает ответ `{"id":42,…, "v":1}` — эхо подтверждено; обычные команды (`vpn_status`, `gui js:`) работают; `doctor -quick` → exit 0; `cargo test --workspace` — 0 падений, предупреждений нет.
-
-**Осталось в S4** (крупная часть, отдельными шагами):
-
-1. **WS-дверь** для страницы: `tungstenite` как сервер, обязательный первый кадр-рукопожатие с токеном и жёстким таймаутом, проверка origin; токен — на запуск, попадает в страницу через `initialization_script`, а не через URL/файл/командную строку.
-2. **Идемпотентность**: класс команды (идемпотентна / нет), дедупликация по `request-id`, запрет авто-ретрая для неидемпотентных — замечание Sol.
-3. **События**: sequence/cursor, `resumeFrom`, сигнал gap и обязательный resync; сейчас `Bus::last` хранит только последнее значение, поэтому разрыв соединения теряет события молча.
-4. **Миграция фронтенда** по одной команде за рантайм-флагом, с сохранением рабочего Tauri-пути и возможностью отката; сначала — инвентаризация зависимостей и починка обхода importmap в `explorer/ui/*.js`.
+**Remaining:** S4 (the front end on our door: WS + token + handshake, idempotency and deduplication, event cursor/resync) and S5 (`simulate` + acceptance and documents).
 
 ---
 
-## 10.16 Срез S4, шаг 2: WS-дверь с рукопожатием
+## 10.15 Slice S4, step 1: protocol envelope v1
 
-**Зачем вторая дверь.** TCP-дверь — для локальных инструментов и по политике только для чтения. Странице нужна своя дверь, и она защищена **токеном на запуск**: первый кадр обязан быть рукопожатием с этим токеном, до него никакая команда не разбирается, при неверном токене соединение закрывается сразу.
+This is the first and mandatory piece of S4. Without a version and a request identifier, the door can neither be versioned nor can responses be matched. A mismatch between "installed CLI" and "new kernel" would look like random failures.
 
-**Что сделано:**
+**What was done:**
 
-- `core/kernel/ws.rs` (новый): сервер на `tungstenite` (эпемерный loopback-порт), `HANDSHAKE_DEADLINE = 3 с`, `IDLE_TIMEOUT = 120 с`; токен (32 hex) выводится из OS-сеяного `RandomState`, то есть без новой зависимости и заново на каждый запуск.
-- `ipc.rs`: диспетчер вынесен в `IpcServer::dispatch(&Value) -> Result<Value,String>`; **обе двери ходят через него**, поэтому команда не может вести себя по-разному в зависимости от того, как пришла.
-- `ping` публикует `wsPort` (порт — знание публичное), но **не токен**: этот ответ идёт по неаутентифицированной двери.
-- Токен выдаётся странице ровно в одном месте — команда `session_info` (в `generate_handler!`), плюс хелпер `harness.sessionInfo()`. Ни в файле, ни в URL, ни в командной строке его нет.
+- `core/kernel/ipc.rs`: `PROTOCOL = 1` and a single function `respond(id, outcome)` were introduced. The response now carries `v` and, if the request sent one, an **echo of `id`**. The envelope on input is **optional**: an old bridge that sends only `{cmd, args}` keeps working. This is the condition for a painless transition.
+- `ping` reports `proto` and `capabilities: ["envelope-v1","log-delta","door-policy","gui"]`.
+- `opt/cli/main.rs`: `ipc()` numbers requests (`AtomicU64`), sends `v` and `id`, and checks the response. On a mismatched `id` or a foreign protocol version it gives a clear error, "update both sides", rather than degrading silently.
 
-**Проверено живьём:**
+**Verified live:** `invoke ping` → `proto: 1` plus the capability list. A raw request `{"v":1,"id":42,"cmd":"ping"}` gets the response `{"id":42,…, "v":1}`, so the echo is confirmed. Ordinary commands (`vpn_status`, `gui js:`) work. `doctor -quick` → exit 0. `cargo test --workspace` — 0 failures, no warnings.
 
-| Проверка | Результат |
+**Remaining in S4** (a large part, in separate steps):
+
+1. **WS door** for the page: `tungstenite` as a server, a mandatory first handshake frame with the token and a hard timeout, and an origin check. The token is issued per launch and reaches the page through `initialization_script`, not through a URL, a file, or the command line.
+2. **Idempotency**: a command class (idempotent or not), deduplication by `request-id`, and a ban on automatic retry of non-idempotent commands. This is Sol's remark.
+3. **Events**: sequence/cursor, `resumeFrom`, a gap signal, and a mandatory resync. Currently `Bus::last` stores only the last value, so a connection break loses events silently.
+4. **Frontend migration** one command at a time, behind a runtime flag, keeping the working Tauri path and the ability to roll back. First come a dependency inventory and a fix for the importmap bypass in `explorer/ui/*.js`.
+
+---
+
+## 10.16 Slice S4, step 2: the WS door with handshake
+
+**Why a second door.** The TCP door is for local tools, and by policy it is read-only. The page needs its own door, and that door is protected by a **token per launch**. The first frame must be a handshake with this token. No command is parsed before it, and a wrong token closes the connection immediately.
+
+**What was done:**
+
+- `core/kernel/ws.rs` (new): a server on `tungstenite` (an ephemeral loopback port), `HANDSHAKE_DEADLINE = 3 s`, `IDLE_TIMEOUT = 120 s`. The token (32 hex characters) is derived from an OS-seeded `RandomState`, so there is no new dependency, and it is regenerated on every launch.
+- `ipc.rs`: the dispatcher was moved out into `IpcServer::dispatch(&Value) -> Result<Value,String>`. **Both doors go through it**, so a command cannot behave differently depending on how it arrived.
+- `ping` publishes `wsPort` (the port is public knowledge), but **not the token**. This response travels over the unauthenticated door.
+- The token is given to the page in exactly one place: the command `session_info` (in `generate_handler!`), plus the helper `harness.sessionInfo()`. It is in neither a file, nor a URL, nor the command line.
+
+**Verified live:**
+
+| Check | Result |
 |---|---|
-| WS без рукопожатия | `{"ok":false,"error":"handshake required: send {\"hello\":{\"token\":\"…\"}} as the first frame","v":1}` |
-| `ping` | `wsPort: 51090`, `capabilities` включает `ws-door` |
-| токен через страницу (CDP) | 32 hex-символа, порт из страницы совпадает |
-| WS с токеном | `{"ok":true,"result":{"ready":true},"v":1}` |
-| команда по WS после рукопожатия | `{"id":7,"ok":true,"result":{"level":50,"muted":false},"v":1}` — `volume_get` с эхом id |
+| WS without a handshake | `{"ok":false,"error":"handshake required: send {\"hello\":{\"token\":\"…\"}} as the first frame","v":1}` |
+| `ping` | `wsPort: 51090`, `capabilities` includes `ws-door` |
+| token read through the page (CDP) | 32 hex characters, the port from the page matches |
+| WS with the token | `{"ok":true,"result":{"ready":true},"v":1}` |
+| command over WS after the handshake | `{"id":7,"ok":true,"result":{"level":50,"muted":false},"v":1}`, which is `volume_get` with an echo of `id` |
 
-`cargo test --workspace` — 0 падений.
+`cargo test --workspace`: 0 failures.
 
-**Граница, названная честно:** токен отсекает другие локальные процессы, которые его не знают, и любую веб-страницу. Он **не** защищает от кода, уже работающего внутри процесса: CDP читает токен прямо из страницы — именно так он и был получен в проверке выше. Это принятый риск из §10.8, и поэтому токен не отменяет read-only политику открытой двери.
+**The boundary, named honestly:** the token blocks other local processes that do not know it, and any web page. It does **not** protect against code that is already running inside the process. CDP reads the token straight from the page, which is exactly how it was obtained in the check above. This is the accepted risk from §10.8. That is why the token does not cancel the read-only policy of the open door.
 
-**Осталось в S4:** идемпотентность/дедупликация, cursor+resync событий, и сама миграция фронтенда по одной команде за рантайм-флагом (сначала — инвентаризация зависимостей и починка обхода importmap).
-
----
-
-## 10.17 Срез S4, шаг 3: importmap-обход закрыт, регрессия запрещена сборкой
-
-**Проблема (найдена критикой ранее, подтверждена в коде):** три файла проводника импортировали Tauri **относительным путём** — `../../assets/vendor/@tauri-apps/api/core.js`, — минуя import map документа. Любой фасад или подмена транспорта такие вызовы не перехватят: половина проводника продолжила бы ходить в Tauri напрямую, а расхождение «двери» проявилось бы не при сборке, а в рантайме.
-
-**Что сделано:**
-
-- `modules/explorer/ui/{explorer,tabs,preview}.js`: импорт переведён на bare-спецификатор `@tauri-apps/api/core` — ровно так, как это уже делают `core/ui/*.js`. Маппинг в `core/ui/index.html` для него есть.
-- `toolchain/build.rs`: новый линт `lint_ui_imports()` — при сборке сканирует `core/ui` и `modules/explorer/ui` и **валит сборку**, если в UI-JavaScript снова появится импорт через `assets/vendor/@tauri-apps`.
-
-**Проверка линта (негативный тест):** я временно вернул обход в `tabs.js` — сборка упала с `UI IMPORT ERROR: ../modules/explorer/ui\tabs.js imports Tauri through the vendor path, bypassing the import map; use the bare specifier`. После восстановления файла сборка зелёная. Это доказательство, что ворота работают, а не просто присутствуют.
-
-**Проверено живьём:** release пересобран и запущен; дерево интерфейса — 29 узлов, как и до правки; `harness.getErrors()` пуст; `udtk logs --level ERROR` → `[]`. `cargo test --workspace` — 0 падений.
-
-**Честная граница:** сама панель проводника в этом проходе **не открывалась** (в дереве её нет — закрыта панелью Telegram), поэтому «explorer.js исполняется» подтверждено косвенно: сборка, линт, чистая загрузка страницы без ошибок. Попытка проверить динамическим импортом по `http://tauri.localhost/modules/...` провалилась по неверному URL — модули отдаются не так, и этот тест ничего не доказывает. Прогнать проводник вживую стоит при следующем заходе (открыть папку на рабочем столе и проверить `harness.getErrors()`).
-
-**Осталось в S4:** идемпотентность/дедупликация, cursor+resync событий, и сама миграция фронтенда (фасад + переезд по одной команде за рантайм-флагом).
+**Remaining in S4:** idempotency/deduplication, event cursor + resync, and the frontend migration itself, one command at a time behind a runtime flag. First come a dependency inventory and a fix for the importmap bypass.
 
 ---
 
-## 10.18 Срез S5, шаг 1: `simulate` больше не трогает живой интерфейс
+## 10.17 Slice S4, step 3: the importmap bypass is closed, and a regression is forbidden by the build
 
-**Главный дефект, который здесь закрыт.** `doctor -simulate` брал **боевой** виджет часов (`document.querySelector('.widget-card[data-id="clock"]')`) и кликал по нему дважды с паузами 60 мс. Это настоящий `toggleWidget`: он сворачивал открытый пользователем виджет и гонялся с таймером анимации (300 мс против 60 мс), а в квитанции при этом писал `interaction:clickClockToggle — ok`. То есть проверка «не разрушает данные» на деле меняла состояние рабочего стола.
+**Problem (found by the earlier critique, confirmed in the code):** three Explorer files imported Tauri by a **relative path**, `../../assets/vendor/@tauri-apps/api/core.js`, bypassing the document's import map. Any facade or transport swap would not intercept such calls. Half of Explorer would keep calling Tauri directly, and the divergence of "the door" would show up at runtime, not at build time.
 
-**Что сделано:**
+**What was done:**
 
-1. **Клик по живому виджету убран** — взаимодействие проверяется на **offscreen-копии** внутри песочницы (`interaction:clickSandboxCopy`).
-2. **Песочница изолирована**: у неё больше нет класса `widget-card` (именно он делал её видимой для `relayoutWidgets`, аудита битых карточек и семантического дерева), добавлен `contain: strict`. Комментарий в коде объясняет, почему класс снят осознанно.
-3. **Harness не видит песочницу**: `getSemanticTree` пропускает кандидатов внутри `.simulation-sandbox` — даже если во время прогона отрендерены кнопки, агенту они не предложатся как цели.
-4. Убраны мёртвые вызовы `ipc({"cmd":"log"})` из симуляции: команда `log` теперь write и на сокетной двери не обслуживается, то есть эти вызовы всё равно ничего не делали.
+- `modules/explorer/ui/{explorer,tabs,preview}.js`: the import was switched to the bare specifier `@tauri-apps/api/core`, exactly as `core/ui/*.js` already do. The mapping for it exists in `core/ui/index.html`.
+- `toolchain/build.rs`: a new lint `lint_ui_imports()`. At build time it scans `core/ui` and `modules/explorer/ui`, and it **fails the build** if an import through `assets/vendor/@tauri-apps` reappears in UI JavaScript.
 
-**Проверено живьём:**
+**Lint check (negative test):** I temporarily put the bypass back into `tabs.js`. The build failed with `UI IMPORT ERROR: ../modules/explorer/ui\tabs.js imports Tauri through the vendor path, bypassing the import map; use the bare specifier`. After the file was restored, the build is green. This is the proof that the gate works, not just that it exists.
 
-| Проверка | Результат |
+**Verified live:** the release was rebuilt and started. The interface tree has 29 nodes, the same as before the edit. `harness.getErrors()` is empty, and `udtk logs --level ERROR` → `[]`. `cargo test --workspace`: 0 failures.
+
+**The honest boundary:** the Explorer panel itself was **not opened** in this pass. It is not in the tree, because it is covered by the Telegram panel. So "explorer.js runs" is confirmed only indirectly: by the build, the lint, and a clean page load without errors. An attempt to check it with a dynamic import from `http://tauri.localhost/modules/...` failed on a wrong URL. The modules are not served that way, so that test proves nothing. Running Explorer live should be done in the next session: open a folder on the desktop and check `harness.getErrors()`.
+
+**Remaining in S4:** idempotency/deduplication, event cursor + resync, and the frontend migration itself (the facade, plus moving one command at a time behind a runtime flag).
+
+---
+
+## 10.18 Slice S5, step 1: `simulate` no longer touches the live interface
+
+**The main defect closed here.** `doctor -simulate` took the **live** clock widget (`document.querySelector('.widget-card[data-id="clock"]')`) and clicked it twice with 60 ms pauses. This was the real `toggleWidget`. It collapsed a widget the user had opened and raced the animation timer (300 ms against 60 ms), while writing `interaction:clickClockToggle — ok` into the receipt. In other words, a check that "does not destroy data" was in fact changing the state of the desktop.
+
+**What was done:**
+
+1. **The click on the live widget was removed.** The interaction is now checked on an **offscreen copy** inside the sandbox (`interaction:clickSandboxCopy`).
+2. **The sandbox is isolated.** It no longer has the class `widget-card`. That class is what made it visible to `relayoutWidgets`, to the audit of broken cards, and to the semantic tree. `contain: strict` was added. A comment in the code explains why the class was removed deliberately.
+3. **The harness does not see the sandbox.** `getSemanticTree` skips candidates inside `.simulation-sandbox`, so even if buttons are rendered during the run, the agent will not be offered them as targets.
+4. The dead calls `ipc({"cmd":"log"})` were removed from the simulation. The command `log` is now a write command and is not served on the socket door, so these calls did nothing anyway.
+
+**Verified live:**
+
+| Check | Result |
 |---|---|
 | `doctor -simulate` | exit 0, `ALL CHECKS PASSED` |
-| квитанция взаимодействия | `interaction:clickSandboxCopy — click dispatched on the offscreen copy` (живого клика больше нет) |
-| отрисовка всех пяти модулей | `renderClock`, `initVpnPanel`, `renderMusicPlayer`, `renderGlyphBar`, `renderTelegramWidget` — все `OK` |
-| дерево интерфейса после прогона | 29 узлов, как и до; песочницы в дереве **нет** |
-| ошибки страницы после прогона | 0 |
-| скриншот | вёрстка цела, следов песочницы нет |
-| `cargo test --workspace` | 0 падений |
+| interaction receipt | `interaction:clickSandboxCopy — click dispatched on the offscreen copy` (there is no live click any more) |
+| rendering of all five modules | `renderClock`, `initVpnPanel`, `renderMusicPlayer`, `renderGlyphBar`, `renderTelegramWidget`, all `OK` |
+| interface tree after the run | 29 nodes, as before. The sandbox is **not** in the tree |
+| page errors after the run | 0 |
+| screenshot | layout intact, no trace of the sandbox |
+| `cargo test --workspace` | 0 failures |
 
-**Осталось в S5:** точки входа рендера всё ещё перечислены строкой JS в CLI (пять функций). Чтобы убрать и этот рукописный список, нужно расширить `metadata.json` модулей полем с точкой входа рендера (и завести файлы для `vpn`/`explorer`, где их нет) — это отдельный шаг, как и записано в §10.3. Также впереди приёмка по §10.5 (критерии 3 и 4: снапшот-тест имён `invoke(...)` и офлайн-проверка `help --json`).
+**Remaining in S5:** the render entry points are still listed as a JS string in the CLI (five functions). To remove this handwritten list as well, the modules' `metadata.json` must be extended with a field for the render entry point, and files must be created for `vpn`/`explorer`, where they are missing. This is a separate step, as §10.3 records. Acceptance per §10.5 is also ahead (criteria 3 and 4: the snapshot test of the `invoke(...)` names, and the offline check of `help --json`).
 
 ---
 
-## 10.19 Приёмка §10.5: критерии 3 и 4 закрыты
+## 10.19 Acceptance per §10.5: criteria 3 and 4 closed
 
-**Критерий 3 — «фронтенд не зовёт то, чего нет».** Добавлен тест `frontend_contract_tests::frontend_invoke_names_are_registered`: он собирает все литеральные имена из `invoke("…")` в `core/ui` и в каждом `modules/*/ui` и сверяет их со списком, прочитанным из `generate_handler!` в `core/kernel/main.rs`. Незнакомое имя — падение теста с точным файлом и именем. Плагинные команды (`plugin:fs|…`) пропускаются: их регистрирует Tauri.
+**Criterion 3, "the front end does not call what does not exist".** The test `frontend_contract_tests::frontend_invoke_names_are_registered` was added. It collects all literal names from `invoke("…")` in `core/ui` and in each `modules/*/ui`, and checks them against the list read from `generate_handler!` in `core/kernel/main.rs`. An unknown name is a test failure with the exact file and name. Plugin commands (`plugin:fs|…`) are skipped, since Tauri registers them.
 
-Почему тест, а не сборка: `generate_handler!` — макрос, `build.rs` не может прочитать его структурно (§10.8.2). Это ровно тот случай, где «компилятор поймает» — неправда.
+Why a test and not the build: `generate_handler!` is a macro, and `build.rs` cannot read it structurally (§10.8.2). This is exactly the case where "the compiler will catch it" is not true.
 
-**Тест проверен на невырожденность, а не просто объявлен:** я временно дописал в `core/ui/widgets-api.js` вызов `invoke('command_that_does_not_exist')` — тест упал с сообщением
+**The test was checked for non-degeneracy, not just declared.** I temporarily added a call `invoke('command_that_does_not_exist')` to `core/ui/widgets-api.js`. The test failed with the message
 
 ```
 the interface calls commands the kernel does not register:
 …/core/ui/widgets-api.js: invoke("command_that_does_not_exist")
 ```
 
-После восстановления файла — снова зелёный. То же самое я раньше проделал с линтом импортов: ворота доказаны негативным тестом, а не фактом своего существования.
+After the file was restored, the test is green again. I had done the same earlier with the import lint. The gate was proven by a negative test, not by the fact of its existence.
 
-**Критерий 4 — офлайн.** При остановленном приложении: `udtk help --json` отдаёт `protocol: 1`, 13 команд самого `utdk` и **21** команду приложения (из общего инвентаря, скомпилированного в CLI), `udtk doctor -modules` — exit 0. Затем приложение поднято обратно, `ping` подтвердил `pong/proto/wsPort`.
+**Criterion 4, offline.** With the app stopped, `udtk help --json` returns `protocol: 1`, the 13 commands of `utdk` itself, and **21** application commands (from the shared inventory compiled into the CLI). `udtk doctor -modules` exits with 0. Then the app was started again, and `ping` confirmed `pong/proto/wsPort`.
 
-**Итоговый прогон:** `cargo test --workspace` — **15 наборов, 0 падений, 0 предупреждений**; среди них зелёные три воротных теста: `every_socket_command_has_a_handler`, `router_does_not_name_module_state_types`, `frontend_invoke_names_are_registered`.
+**Final run:** `cargo test --workspace`: **15 suites, 0 failures, 0 warnings**. Among them, the three gate tests are green: `every_socket_command_has_a_handler`, `router_does_not_name_module_state_types`, `frontend_invoke_names_are_registered`.
 
-**Осталось по плану:** в S4 — идемпотентность/дедупликация, cursor+resync событий, переезд фронтенда за флагом; в S5 — вынести точки входа рендера в `metadata.json`.
+**Remaining per plan:** in S4, idempotency/deduplication, event cursor + resync, and the front-end migration behind a flag. In S5, move the render entry points into `metadata.json`.
 
 ---
 
-## 10.20 Шаг миграции: инвентаризация зависимостей фронтенда и ворота по событиям
+## 10.20 Migration step: an inventory of frontend dependencies and gates for events
 
-Миграция фронта начинается с инвентаря — что именно придётся переносить. Он же оформлен как проверяемый артефакт, а не как список «на глаз».
+The frontend migration starts with an inventory: what exactly will have to be moved. The inventory is also written up as a verifiable artifact, not as a list made "by eye".
 
-**Инвентарь (четыре категории зависимости от Tauri):**
+**Inventory (four categories of dependency on Tauri):**
 
-| Категория | Где живёт | Состояние |
+| Category | Where it lives | State |
 |---|---|---|
-| **Команды** (`invoke`) | `core/ui/*.js`, `modules/explorer/ui/*.js`, `modules/vpn/ui/vpn-panel.js`, `modules/telegram/ui/widget.js`, `modules/mp3-player/ui/audio-arcs.js` | машиночитаемо: тест `frontend_invoke_names_are_registered` |
-| **События** (`listen`) | `core/ui/unidtk-core.js`, `modules/telegram/ui/widget.js`, `modules/glyph-bar/ui/widget.js` и др. | машиночитаемо: тест `frontend_listen_names_exist_in_rust` |
-| **Плагины** | `@tauri-apps/plugin-fs`, `plugin-opener`, `api/path` — в `core/ui/widgets-api.js`, `unidtk-core.js`, `telegram/widget.js` | по коду, перенос — отдельный этап C |
-| **Ассеты** | `convertFileSrc` в `unidtk-core.js`, `telegram/widget.js`, `explorer/*.js` | по коду, перенос — отдельный этап C |
+| **Commands** (`invoke`) | `core/ui/*.js`, `modules/explorer/ui/*.js`, `modules/vpn/ui/vpn-panel.js`, `modules/telegram/ui/widget.js`, `modules/mp3-player/ui/audio-arcs.js` | machine-readable: test `frontend_invoke_names_are_registered` |
+| **Events** (`listen`) | `core/ui/unidtk-core.js`, `modules/telegram/ui/widget.js`, `modules/glyph-bar/ui/widget.js`, etc. | machine-readable: test `frontend_listen_names_exist_in_rust` |
+| **Plugins** | `@tauri-apps/plugin-fs`, `plugin-opener`, `api/path`, in `core/ui/widgets-api.js`, `unidtk-core.js`, `telegram/widget.js` | from the code; the migration is a separate stage C |
+| **Assets** | `convertFileSrc` in `unidtk-core.js`, `telegram/widget.js`, `explorer/*.js` | from the code; the migration is a separate stage C |
 
-Команды и события теперь **проверяются тестами**, поэтому инвентарь не устареет молча: он обновляется вместе с кодом или роняет прогон.
+Commands and events are now **checked by tests**, so the inventory cannot go stale silently. It is updated together with the code, or it breaks the run.
 
-**Новый страж по событиям.** `frontend_listen_names_exist_in_rust`: каждое литеральное имя из `listen("…")` в UI обязано встречаться как строковый литерал в Rust-коде. Иначе переименованное или удалённое событие оставляет слушателя навсегда молчащим — тот же класс тихой поломки, что и у команд.
+**A new guard for events.** `frontend_listen_names_exist_in_rust`: every literal name from `listen("…")` in the UI must occur as a string literal in the Rust code. Otherwise a renamed or removed event leaves its listener silent forever. This is the same class of silent breakage as with commands.
 
-**Сила проверки названа честно:** она доказывает, что **имя существует** на стороне Rust, но не то, что событие действительно эмитится на нужном пути. Строже текстовым анализом не получится: имена часто передаются отдельным аргументом (`emit(app, "telegram-message-new", payload)` — вызов разнесён по строкам), а часть строится динамически. Именно на этом мой первый вариант теста дал **10 ложных срабатываний** (`telegram-message-new`, `audio-bands`, `wallpaper-wheel` и др.) — я проверил каждый по коду: все они эмитятся, просто иначе записаны. Поэтому критерий ослаблен до «имя живо», и это записано в комментарии теста.
+**The strength of the check, named honestly:** it proves that the **name exists** on the Rust side. It does not prove that the event is actually emitted on the required path. A text analysis cannot be stricter, because names are often passed as a separate argument (`emit(app, "telegram-message-new", payload)`, with the call split across lines), and some names are built dynamically. My first version of the test gave **10 false positives** for exactly this reason (`telegram-message-new`, `audio-bands`, `wallpaper-wheel`, and others). I checked each one in the code. All of them are emitted, just written differently. So the criterion was weakened to "the name is alive", and this is recorded in the test's comment.
 
-**Проверено негативным тестом:** переименовал в `unidtk-core.js` слушателя `wallpaper-wheel` в `wallpaper-wheel-renamed` — тест упал, указав файл и имя; после восстановления зелёный.
+**Checked with a negative test:** I renamed the listener `wallpaper-wheel` in `unidtk-core.js` to `wallpaper-wheel-renamed`. The test failed, naming the file and the name. After restoration it is green.
 
-**Итог:** `cargo test --workspace` — **15 наборов, 0 падений, 0 предупреждений**; четыре воротных теста зелёные: `every_socket_command_has_a_handler`, `router_does_not_name_module_state_types`, `frontend_invoke_names_are_registered`, `frontend_listen_names_exist_in_rust`.
-
----
-
-## 10.21 Идемпотентность стала данными контракта
-
-В `unidtk_api::commands` добавлен `Idempotency::{Safe, Unsafe}` и поле `CommandSpec::idempotency`. Значение выставляется конструкторами: `read_only()` → `Safe` (читать дважды безвредно), `write()` → `Unsafe` (консервативная сторона для записи). Поле публикуется в обоих манифестах — в ответе `commands` и в `help --json` — под именем `retry_safe`.
-
-Зачем это в контракте, а не в комментарии: дверь, которая умеет переподключаться и повторять, обязана **знать**, можно ли повторять. Иначе повтор после таймаута (когда команда на самом деле выполнилась) продублирует эффект — это замечание Sol про ретраи.
-
-**Инвариант под тестом:** `command_inventory::tests::socket_surface_is_retry_safe` — всё, что выставлено на сокетную дверь, обязано быть `Safe`.
-
-**Честно про силу проверки:** сейчас инвариант выполняется **тривиально** — на сокетной двери одни только read-only команды, значит все `Safe`. Ценность не в сегодняшнем прогоне, а в будущем: как только на дверь выйдет первая write-команда (это случится при миграции фронтенда), она обязана быть явно помечена, иначе тест упадёт. Это ровно та проверка, которая понадобится на следующем шаге.
-
-`cargo test --workspace` — 15 наборов, 0 падений; `socket_surface_is_retry_safe` зелёный.
+**Result:** `cargo test --workspace`: **15 suites, 0 failures, 0 warnings**. Four gate tests are green: `every_socket_command_has_a_handler`, `router_does_not_name_module_state_types`, `frontend_invoke_names_are_registered`, `frontend_listen_names_exist_in_rust`.
 
 ---
 
-## 10.22 Исполнимый план переезда фронтенда (по итогам консультации)
+## 10.21 Idempotency became contract data
 
-План составлен по фактическому коду. Он же зафиксировал **четыре расхождения**, которые надо устранить до переезда, — их видно из исходников:
+`Idempotency::{Safe, Unsafe}` and the field `CommandSpec::idempotency` were added to `unidtk_api::commands`. The value is set by the constructors: `read_only()` → `Safe` (reading twice is harmless), `write()` → `Unsafe` (the conservative side for writes). The field is published in both manifests, in the `commands` response and in `help --json`, under the name `retry_safe`.
 
-1. **`dispatch` применяет socket-политику к обеим дверям.** Значит WS сейчас не может обслуживать write-команды: политика привязана к `spec.on_socket()`, а не к двери. Перед write-cutover диспетчеру нужен явный контекст двери (TCP — инструменты, read-only; WS — аутентифицированная UI-дверь).
-2. **WS-дверь умеет только request/response** — пуш-событий и переподключения нет вообще, это надо спроектировать, а не «включить».
-3. **Часть событий идёт мимо `unidtk_api::emit`** — прямые `AppHandle::emit` (`core/kernel/input.rs`, `main.rs`, модули), поэтому единый broker их не увидит, пока они не переведены на kernel-owned fan-out.
-4. **Формы ответов расходятся**: `list_tracks`/`list_playlists` по сокету отдают `{count, items}`, а UI ждёт массив; `get_widget_config` по сокету отдаёт `{}` вместо `Option`. Включать эти команды в WS нельзя до унификации контракта.
+Why it belongs in the contract and not in a comment: a door that can reconnect and retry must **know** whether a retry is safe. Otherwise a retry after a timeout, when the command actually executed, would duplicate the effect. This is Sol's remark about retries.
 
-### Порядок шагов
+**Invariant under test:** `command_inventory::tests::socket_surface_is_retry_safe`. Everything exposed on the socket door must be `Safe`.
 
-**1. Зафиксировать исходную точку.** `cargo test --workspace`, `udtk doctor -all`, `udtk shot`, `gui tree`, `harness.getErrors(true)` + визуальная карта (все виджеты, layout, glyph-bar, mp3, VPN, Telegram, Explorer, меню). Если baseline уже нестабилен — переезд не начинать: иначе старый дефект не отличить от регрессии.
+**Honest about the strength of the check:** right now the invariant holds **trivially**. The socket door has only read-only commands, so they are all `Safe`. The value is not in today's run but in the future. As soon as the first write command reaches the door (this will happen during the frontend migration), it must be explicitly marked, or the test will fail. This is exactly the check that will be needed in the next step.
 
-**2. Фасад `core/ui/unidtk-bridge.js`, пока целиком на Tauri.** Экспортирует `invoke`, `listen`, `convertFileSrc`, `sessionInfo`, `appDataDir`/`resolveResource`, fs-функции, `openPath` и диагностический `getTransportState()`. Внутри хранит настоящие `tauriInvoke`/`tauriListen`; `session_info` **всегда** через `tauriInvoke`, иначе при включённом WS получится рекурсия. В import map добавляется отдельный ключ `@unidtk/bridge`. **Ключ `@tauri-apps/api/core` перенаправлять нельзя** — vendor-плагины (`plugin-fs`, `plugin-opener`) сами его импортируют. Все UI-файлы переводятся на `@unidtk/bridge`, поведение не меняется.
-
-**3. Переключатель транспорта — `sessionStorage["unidtk.transport"]`** со значениями `tauri` / `shadow` / `ws`, читается один раз при загрузке модуля (посреди жизни страницы менять нельзя: часть подписок осталась бы в Tauri). Нет ключа → `tauri`. `localStorage` не использовать (забытый флаг переживёт перезапуск), env — тоже (нет доступа). Откат: `sessionStorage.setItem('unidtk.transport','tauri'); location.reload()` или просто перезапуск приложения.
-
-**4. WS-клиент и сессия, без перевода бизнес-команд.** Одна memoized сессия на загрузку (`session_info` ровно один раз), один WebSocket, hello первым кадром, таблица pending по `id`, проверка `v`/`id`/`result`-или-`error`, отдельные таймауты на connect/handshake/command. Токен — только в памяти. Unit-тесты: неверный токен, команда до hello, таймаут, out-of-order ответы, закрытие сокета с pending, несовместимая версия.
-
-**5. Первые четыре команды: `player_status`, `vpn_status`, `telegram_status`, `get_widget_config`.** Все read-only и retry-safe, у трёх есть готовые UI-вызовы и видимые индикаторы, `get_widget_config` проверяет WS достаточно рано (boot path). Явный allowlist `WS_COMMANDS` — неизвестное через WS не пойдёт. Сначала режим `shadow` (зовём оба транспорта, UI получает Tauri-результат, расхождение логируется), только после чистого прогона — `ws`.
-
-**6. События — отдельный протокол, не замаскированный под команды.** Единый `EventBroker` в ядре; конверт события несёт `type: event`, имя, глобальный монотонный `seq`, payload. События делятся на два класса: *state/latest* (`system-volume`, `vpn`, `telegram-connection-state`) — при подписке и reconnect отправляется последний снимок; *stream/edge* (Telegram new/edited/deleted/sent, `explorer-open`) — bounded ring с `seq` и replay. `audio-bands` — только последний sample (coalesce), иначе медленный WebView копит память. При reconnect: ring покрывает — replay по `seq`; курсор старше — явный `gap` и обязательный domain resync. Ридер и писатель сокета разводятся (брокер → bounded channel → writer), подписки живут в фасаде и пересоздаются автоматически, backoff с jitter.
-
-**7. Остальные read-only — вертикальными срезами** (explorer → glyph-bar → vpn → telegram → mp3-player), каждый: inventory → `ipc_call` → route → contract-тест → `shadow` → allowlist.
-
-**8. Write-команды — только после стабилизации read-only и событий**, с контекстом двери в диспетчере, dedup по `request-id` (bounded cache завершённых ответов), запретом авто-ретрая с новым id и запретом WS→Tauri fallback после отправки write-запроса. Порядок: обратимые настройки → управление плеером → VPN → Telegram/Explorer.
-
-**9. Cutover:** default `ws`, `tauri` остаётся kill switch на релизный цикл, Tauri-хендлеры не удаляются, диагностика транспорта (счётчики reconnect, pending, gap), build-gate «UI не импортирует Tauri напрямую, кроме фасада и vendor».
-
-### Три главных риска
-
-1. **Несовпадение форм Tauri и WS** — защита: `shadow` + структурное сравнение JSON + contract-тесты; запрет включать имя без чистого shadow-прогона.
-2. **Случайный перевод плагинов/ассетов на WS** — защита: отдельный specifier, фасад импортирует vendor сам, `convertFileSrc`/fs/path/opener остаются на Tauri, lint запрещает обход фасада.
-3. **Потеря и дублирование событий, повтор destructive-команд** — защита: `seq`/ring/`gap`/resync, один упорядочивающий брокер, dedup по id, никаких авто-ретраев.
-
-### Что не делать
-
-Не переносить плагины и ассеты; не включать `withGlobalTauri`; не перенаправлять `@tauri-apps/api/core` в import map; не удалять Tauri-хендлеры до конца rollback-периода; не открывать write на TCP 26540; не делать один глобальный тумблер без allowlist; не ретраить write без dedup; не хранить токен вне памяти; не менять WorkerW/ввод/CDP ради транспорта.
-
-### Вопросы, ответы на которые меняют план
-
-1. Ближайший релиз заканчивается на read-only и событиях — или write (Telegram, VPN, Explorer) тоже нужен в нём?
-2. Для Telegram нужен гарантированный replay каждого сообщения в пределах запуска — или допустим `gap` с полной перезагрузкой состояния чата?
-3. Оставляем `sessionStorage`/CDP как аварийный переключатель в продакшене — или нужен пользовательский/CLI-механизм выбора транспорта без доступа к CDP?
+`cargo test --workspace`: 15 suites, 0 failures. `socket_surface_is_retry_safe` is green.
 
 ---
 
-## 10.23 Переезд, шаг 1–2: baseline и фасад (поведение не изменилось)
+## 10.22 An executable plan for the frontend migration (following a consultation)
 
-**Шаг 1, baseline зафиксирован** (`%TEMP%\unidtk-baseline`): `cargo test --workspace` — 0 падений, `doctor -quick` — 0, скриншот, дерево **29 узлов**, ошибок страницы **0**. Без этого нельзя было бы отличить старый дефект от регрессии переезда.
+The plan was drawn up from the actual code. It also recorded **four discrepancies** that must be fixed before the migration. They are visible in the sources:
 
-**Шаг 2, фасад `core/ui/unidtk-bridge.js`.** Весь интерфейс переведён на один импорт `@unidtk/bridge`:
+1. **`dispatch` applies the socket policy to both doors.** So WS cannot currently serve write commands, because the policy is tied to `spec.on_socket()`, not to the door. Before the write cutover, the dispatcher needs an explicit door context (TCP: tools, read-only; WS: the authenticated UI door).
+2. **The WS door supports only request/response.** There are no push events and no reconnection at all. This has to be designed, not "switched on".
+3. **Some events bypass `unidtk_api::emit`.** These are direct `AppHandle::emit` calls (`core/kernel/input.rs`, `main.rs`, and the modules). So a single broker will not see them until they are moved to a kernel-owned fan-out.
+4. **The response shapes diverge.** Over the socket, `list_tracks`/`list_playlists` return `{count, items}`, while the UI expects an array. Over the socket, `get_widget_config` returns `{}` instead of an `Option`. These commands must not be enabled on WS until the contract is unified.
 
-- фасад ре-экспортирует ровно ту поверхность, что использовалась: `invoke`, `listen`, `convertFileSrc`, `appDataDir`, `resolveResource`, `BaseDirectory`, `mkdir`, `readDir`, `readTextFile`, `writeTextFile`, `openPath`, плюс `sessionInfo()` и диагностический `getTransportState()`;
-- настоящие Tauri-функции остались внутри приватными (`tauriInvoke`, `tauriListen`) — иначе будущий WS-путь рекурсировал бы в себя;
-- `session_info` всегда идёт через `tauriInvoke`, а не через публичный `invoke` — по той же причине;
-- транспорт читается **один раз** при загрузке модуля (`?transport=` для разовой пробы, иначе `sessionStorage["unidtk.transport"]`; значения `tauri`/`shadow`/`ws`, по умолчанию `tauri`). `localStorage` не используется сознательно: забытый флаг пережил бы перезапуск;
-- токен нигде не сохраняется — ни в хранилищах, ни в URL, ни в логе;
-- `WS_COMMANDS` пуст: команда попадает туда только после чистого shadow-прогона.
+### Order of steps
 
-Переведены 13 файлов (20 строк импорта): `core/ui/{boot-log,harness,widgets-api,unidtk-core,menu}.js`, `modules/{explorer/ui/{explorer,tabs,preview},vpn/ui/vpn-panel,telegram/ui/widget,glyph-bar/ui/widget,mp3-player/ui/{widget,audio-arcs}}.js`. В import map добавлен ключ `@unidtk/bridge`; **ключ `@tauri-apps/api/core` не перенаправлен** — vendor-плагины импортируют его сами.
+**1. Record the starting point.** Run `cargo test --workspace`, `udtk doctor -all`, `udtk shot`, `gui tree`, `harness.getErrors(true)`, and build a visual map (all widgets, the layout, glyph-bar, mp3, VPN, Telegram, Explorer, the menu). If the baseline is already unstable, do not start the migration. Otherwise an old defect cannot be told apart from a regression.
 
-**Ворота расширены.** `lint_ui_imports()` в `toolchain/build.rs` теперь сканирует **все** UI-модули и валит сборку, если Tauri импортируется напрямую кем-либо, кроме самого фасада. Проверено негативным тестом: добавил в `glyph-bar/ui/widget.js` прямой `@tauri-apps/api/core` — сборка упала с `UI IMPORT ERROR: … imports Tauri directly; the interface must go through the bridge`; после восстановления зелёная.
+**2. The facade `core/ui/unidtk-bridge.js`, still entirely on Tauri.** It exports `invoke`, `listen`, `convertFileSrc`, `sessionInfo`, `appDataDir`/`resolveResource`, the fs functions, `openPath`, and the diagnostic `getTransportState()`. Internally it holds the real `tauriInvoke`/`tauriListen`. `session_info` **always** goes through `tauriInvoke`. Otherwise, with WS enabled, it would recurse. A separate key `@unidtk/bridge` is added to the import map. **The key `@tauri-apps/api/core` must not be redirected**, because the vendor plugins (`plugin-fs`, `plugin-opener`) import it themselves. All UI files move to `@unidtk/bridge`, and behavior does not change.
 
-**Проверено живьём (release, приложение перезапускалось):** дерево — **29 узлов** (baseline 29), ошибок страницы — **0** (baseline 0), `getTransportState()` → `{transport: "tauri", migratedCommands: [], sessionInfoCalls: 0}`; скриншот совпадает с baseline визуально; `cargo test --workspace` — 15 наборов, 0 падений.
+**3. The transport switch: `sessionStorage["unidtk.transport"]`** with the values `tauri` / `shadow` / `ws`. It is read once, when the module loads. It must not change in the middle of the page's life, because some subscriptions would remain on Tauri. No key → `tauri`. Do not use `localStorage` (a forgotten flag would survive a restart), and do not use env either (no access). Rollback: `sessionStorage.setItem('unidtk.transport','tauri'); location.reload()`, or simply restart the app.
 
-**Что это даёт:** транспорт стал заменяемым в одном файле, и это защищено сборкой. Следующий шаг (WS-клиент и сессия, §10.22 п.4) уже не трогает UI-файлы — только фасад.
+**4. The WS client and session, without moving business commands.** One memoized session per load (`session_info` exactly once), one WebSocket, hello as the first frame, a table of pending requests keyed by `id`, validation of `v`/`id`/`result`-or-`error`, and separate timeouts for connect, handshake, and command. The token is kept in memory only. Unit tests: wrong token, command before hello, timeout, out-of-order responses, socket close with pending requests, incompatible version.
 
-**Принятые дефолты** (владелец не возражал): в этом релизе — read-only команды и события, write позже; для Telegram допускается `gap` с resync вместо гарантированного replay каждого сообщения; `sessionStorage` остаётся аварийным переключателем.
+**5. The first four commands: `player_status`, `vpn_status`, `telegram_status`, `get_widget_config`.** All are read-only and retry-safe. Three have ready UI calls and visible indicators. `get_widget_config` checks WS early enough (the boot path). An explicit allowlist `WS_COMMANDS` means anything unknown does not go over WS. First comes the `shadow` mode: both transports are called, the UI gets the Tauri result, and any divergence is logged. Only after a clean run comes `ws`.
+
+**6. Events are a separate protocol, not disguised as commands.** A single `EventBroker` lives in the kernel. The event envelope carries `type: event`, the name, a global monotonic `seq`, and the payload. Events fall into two classes. *state/latest* (`system-volume`, `vpn`, `telegram-connection-state`): on subscribe and on reconnect, the last snapshot is sent. *stream/edge* (Telegram new/edited/deleted/sent, `explorer-open`): a bounded ring with `seq` and replay. `audio-bands` carries only the last sample (coalesced), otherwise a slow WebView accumulates memory. On reconnect: if the ring covers the gap, replay by `seq`. If the cursor is older, send an explicit `gap` and a mandatory domain resync. The socket's reader and writer are separated (broker → bounded channel → writer). Subscriptions live in the facade and are recreated automatically, with backoff and jitter.
+
+**7. The remaining read-only commands, in vertical slices** (explorer → glyph-bar → vpn → telegram → mp3-player). Each goes through: inventory → `ipc_call` → route → contract test → `shadow` → allowlist.
+
+**8. Write commands, only after the read-only commands and events are stable.** They need a door context in the dispatcher, dedup by `request-id` (a bounded cache of completed responses), a ban on automatic retry with a new id, and a ban on a WS→Tauri fallback after a write request has been sent. Order: reversible settings → player control → VPN → Telegram/Explorer.
+
+**9. Cutover:** default `ws`. `tauri` stays as a kill switch for the release cycle, and Tauri handlers are not deleted. Transport diagnostics (counters for reconnect, pending, and gap), plus a build gate: "the UI does not import Tauri directly, except through the facade and vendor".
+
+### Three main risks
+
+1. **Mismatch of Tauri and WS shapes.** Protection: `shadow` + structural comparison of JSON + contract tests. A name may not be enabled without a clean shadow run.
+2. **Accidentally moving plugins/assets to WS.** Protection: a separate specifier. The facade imports vendor itself. `convertFileSrc`, fs, path, and opener stay on Tauri. The lint forbids bypassing the facade.
+3. **Loss and duplication of events, repetition of destructive commands.** Protection: `seq`/ring/`gap`/resync, one ordering broker, dedup by id, no automatic retries.
+
+### What not to do
+
+Do not move plugins and assets. Do not enable `withGlobalTauri`. Do not redirect `@tauri-apps/api/core` in the import map. Do not delete Tauri handlers before the end of the rollback period. Do not open write on TCP 26540. Do not make a single global toggle without an allowlist. Do not retry writes without dedup. Do not keep the token outside memory. Do not change WorkerW/input/CDP for the sake of the transport.
+
+### Questions whose answers change the plan
+
+1. Does the nearest release end with read-only commands and events, or does write (Telegram, VPN, Explorer) also need to be in it?
+2. Does Telegram need guaranteed replay of every message within a launch, or is a `gap` with a full reload of chat state acceptable?
+3. Do we keep `sessionStorage`/CDP as an emergency switch in production, or is a user/CLI mechanism for choosing the transport needed, one that does not require CDP access?
 
 ---
 
-## 10.24 Переезд, шаги 3–5: флаг, WS-клиент и первая миграция команд
+## 10.23 Migration, steps 1–2: baseline and facade (behavior unchanged)
 
-**Шаг 3, флаг транспорта.** `sessionStorage["unidtk.transport"]` (`tauri`/`shadow`/`ws`), читается один раз при загрузке модуля; `?transport=` — для разовой пробы. `localStorage` не используется сознательно.
+**Step 1, baseline recorded** (`%TEMP%\unidtk-baseline`): `cargo test --workspace` with 0 failures, `doctor -quick` with 0, a screenshot, the tree with **29 nodes**, and page errors **0**. Without this it would be impossible to tell an old defect from a migration regression.
 
-**Шаг 4, WS-клиент и сессия** (внутри фасада, UI-файлы не тронуты): одна memoized сессия на загрузку, один сокет, рукопожатие первым кадром, таблица pending по `id`, проверка `v`/`id`/`result`-или-`error`, отдельные таймауты. Закрытие сокета роняет все in-flight промисы, а не подвешивает их. Токен живёт только в памяти модуля.
+**Step 2, the facade `core/ui/unidtk-bridge.js`.** The whole interface was switched to a single import, `@unidtk/bridge`:
 
-**Найдено и исправлено два реальных блокера:**
+- the facade re-exports exactly the surface that was in use: `invoke`, `listen`, `convertFileSrc`, `appDataDir`, `resolveResource`, `BaseDirectory`, `mkdir`, `readDir`, `readTextFile`, `writeTextFile`, `openPath`, plus `sessionInfo()` and the diagnostic `getTransportState()`;
+- the real Tauri functions remain private inside (`tauriInvoke`, `tauriListen`). Otherwise the future WS path would recurse into itself;
+- `session_info` always goes through `tauriInvoke`, not through the public `invoke`, for the same reason;
+- the transport is read **once**, when the module loads (`?transport=` for a one-off probe, otherwise `sessionStorage["unidtk.transport"]`; values `tauri`/`shadow`/`ws`, default `tauri`). `localStorage` is deliberately not used, because a forgotten flag would survive a restart;
+- the token is not stored anywhere: not in storage, not in the URL, not in the log;
+- `WS_COMMANDS` is empty. A command gets there only after a clean shadow run.
 
-1. **CSP не пускал WS вообще.** `connect-src` в `toolchain/tauri.conf.json` разрешал только `ws://127.0.0.1:26540` (TCP-дверь), а WS-дверь эфемерная — страница не могла подключиться (`ws connection failed`). Добавлен `ws://127.0.0.1:*`. Без этого вся миграция упиралась бы в политику, а не в код.
-2. **Сравнение ответов было слишком строгим.** Первый shadow-прогон дал **16 «расхождений» из 17**, и все — только **порядок ключей**: Tauri пишет поля в порядке объявления, а сокетный путь идёт через `serde_json::Value` с сортированным map. Заменено на структурное сравнение (`sameShape`, порядок ключей игнорируется) — иначе настоящий дефект потонул бы в этом шуме.
+13 files were migrated (20 import lines): `core/ui/{boot-log,harness,widgets-api,unidtk-core,menu}.js`, `modules/{explorer/ui/{explorer,tabs,preview},vpn/ui/vpn-panel,telegram/ui/widget,glyph-bar/ui/widget,mp3-player/ui/{widget,audio-arcs}}.js`. The key `@unidtk/bridge` was added to the import map. **The key `@tauri-apps/api/core` was not redirected**, because the vendor plugins import it themselves.
 
-Плюс: рукопожатие получило запас (8 с вместо 3 — на холодной странице первый вызов падал по таймауту: `telegram_status: ws handshake timed out`) и прогрев сокета при включённом не-tauri транспорте.
+**The gates were extended.** `lint_ui_imports()` in `toolchain/build.rs` now scans **all** UI modules and fails the build if anyone imports Tauri directly, other than the facade itself. Checked with a negative test: I added a direct `@tauri-apps/api/core` import to `glyph-bar/ui/widget.js`. The build failed with `UI IMPORT ERROR: … imports Tauri directly; the interface must go through the bridge`. After restoration it is green.
 
-**Шаг 5, первые три команды** (`player_status`, `vpn_status`, `telegram_status`; у всех есть опрос в виджетах): сначала `shadow`, потом `ws`. `get_widget_config` сознательно оставлен в стороне — у него расходится контракт (`{}` против отсутствующего значения), это надо унифицировать до включения.
+**Verified live (release, the app was restarted):** the tree has **29 nodes** (baseline 29), page errors are **0** (baseline 0), and `getTransportState()` → `{transport: "tauri", migratedCommands: [], sessionInfoCalls: 0}`. The screenshot matches the baseline visually. `cargo test --workspace`: 15 suites, 0 failures.
 
-**Приборы, а не обещания:** фасад считает `shadowChecks`, `shadowDivergences`, `shadowFailures`, `wsCalls` и хранит до трёх сэмплов расхождений с обоими ответами — всё видно через `gui js:window.__UNIDTK_BRIDGE__.getTransportState()`, без чтения консоли.
+**What this gives:** the transport has become replaceable in a single file, and the build protects this. The next step (the WS client and session, §10.22 item 4) no longer touches UI files, only the facade.
 
-**Живая проверка:**
+**Accepted defaults** (the owner did not object): in this release, read-only commands and events; write comes later. For Telegram, a `gap` with resync is allowed instead of guaranteed replay of every message. `sessionStorage` remains the emergency switch.
 
-| Проверка | Результат |
+---
+
+
+## 10.24 Migration, steps 3–5: flag, WS client, and first command migration
+
+**Step 3, the transport flag.** `sessionStorage["unidtk.transport"]` (`tauri`/`shadow`/`ws`) is read once, when the module loads. `?transport=` is for a one-off probe. `localStorage` is deliberately not used.
+
+**Step 4, the WS client and session** (inside the facade, UI files untouched): one memoized session per load, one socket, the handshake as the first frame, a table of pending requests keyed by `id`, validation of `v`/`id`/`result`-or-`error`, and separate timeouts. Closing the socket rejects all in-flight promises instead of leaving them hanging. The token lives only in the module's memory.
+
+**Two real blockers were found and fixed:**
+
+1. **The CSP did not let WS through at all.** `connect-src` in `toolchain/tauri.conf.json` allowed only `ws://127.0.0.1:26540` (the TCP door), while the WS door is ephemeral. So the page could not connect (`ws connection failed`). `ws://127.0.0.1:*` was added. Without this, the whole migration would have hit the policy rather than the code.
+2. **The comparison of responses was too strict.** The first shadow run gave **16 "divergences" out of 17**, and all of them were only **key order**. Tauri writes fields in declaration order, while the socket path goes through `serde_json::Value` with a sorted map. The comparison was replaced by a structural one (`sameShape`, key order ignored). Otherwise a real defect would have drowned in this noise.
+
+In addition, the handshake got more headroom (8 s instead of 3, because on a cold page the first call timed out with `telegram_status: ws handshake timed out`). The socket is also warmed up when a non-tauri transport is enabled.
+
+**Step 5, the first three commands** (`player_status`, `vpn_status`, `telegram_status`; all of them are polled by widgets): `shadow` first, then `ws`. `get_widget_config` was deliberately left aside. Its contract diverges (`{}` against a missing value), and this must be unified before it is enabled.
+
+**Instruments, not promises:** the facade counts `shadowChecks`, `shadowDivergences`, `shadowFailures`, and `wsCalls`, and keeps up to three samples of divergence with both responses. Everything is visible through `gui js:window.__UNIDTK_BRIDGE__.getTransportState()`, without reading the console.
+
+**Live check:**
+
+| Check | Result |
 |---|---|
-| `shadow` (19 сверок) | **0 расхождений, 0 отказов** |
-| `ws` | `wsState: ready`, **18 команд** ответила сокетная дверь, 0 ошибок страницы |
-| паритет интерфейса | 29 узлов дерева и 0 ошибок страницы в обоих режимах |
-| скриншот | вёрстка идентична baseline |
-| откат (`sessionStorage → tauri`) | `transport: tauri`, `wsState: off`, 0 вызовов по WS, дерево 29 |
-| `cargo test --workspace` | 15 наборов, 0 падений |
+| `shadow` (19 comparisons) | **0 divergences, 0 refusals** |
+| `ws` | `wsState: ready`, **18 commands** answered by the socket door, 0 page errors |
+| interface parity | 29 tree nodes and 0 page errors in both modes |
+| screenshot | layout identical to the baseline |
+| rollback (`sessionStorage → tauri`) | `transport: tauri`, `wsState: off`, 0 calls over WS, tree 29 |
+| `cargo test --workspace` | 15 suites, 0 failures |
 | `udtk doctor -quick` | exit 0 |
 
-**Что это значит:** транспорт переключается одной строкой в `sessionStorage`, первая тройка команд реально ходит через нашу аутентифицированную дверь, и откат на Tauri мгновенный и проверенный. Следующий шаг по плану — события (единый `EventBroker` с `seq`, ring и resync), а затем остальные read-only команды вертикальными срезами.
+**What this means:** the transport switches with one line in `sessionStorage`. The first trio of commands really goes through our authenticated door, and the rollback to Tauri is instant and verified. The next step in the plan is events (a single `EventBroker` with `seq`, a ring, and resync), and then the remaining read-only commands as vertical slices.
 
 ---
 
-## 10.25 Переезд, шаг 7 (первый срез): шесть команд на нашей двери
+## 10.25 Migration, step 7 (first slice): six commands on our door
 
-**Расширение allowlist до шести**: `player_status`, `vpn_status`, `vpn_list_servers`, `vpn_settings`, `telegram_status`, `ai_dj_status`. Отобраны по двум признакам: имя в инвентаре совпадает с именем, которое зовёт UI, и форма ответа уже одинакова на обеих дверях.
+**Extending the allowlist to six:** `player_status`, `vpn_status`, `vpn_list_servers`, `vpn_settings`, `telegram_status`, `ai_dj_status`. They were selected on two criteria: the name in the inventory matches the name the UI calls, and the response shape is already identical on both doors.
 
-**Сознательно отложены** (и почему — чтобы это не выглядело забывчивостью):
+**Deliberately deferred** (and why, so that it does not look like forgetfulness):
 
-- `get_widget_config` — сокетный обработчик отвечает `{}` там, где Tauri отвечает отсутствующим значением: контракт надо унифицировать;
-- `list_tracks` / `list_playlists` — сокет отдаёт `{count, items}`, UI ждёт массив;
-- `explorer_places` — в инвентаре имя `explorer_places`, а UI зовёт `get_user_places`: сначала унифицировать имя;
-- `volume_get` — UI не вызывает его по имени (громкость приходит событием `system-volume`), поэтому мигрировать пока нечего.
+- `get_widget_config`: the socket handler answers `{}` where Tauri answers a missing value. The contract has to be unified first.
+- `list_tracks` / `list_playlists`: the socket returns `{count, items}`, while the UI expects an array.
+- `explorer_places`: the inventory has the name `explorer_places`, while the UI calls `get_user_places`. The name must be unified first.
+- `volume_get`: the UI does not call it by name (volume arrives as the `system-volume` event), so there is nothing to migrate yet.
 
-**Счётчик по каждой команде.** Первая попытка проверить шесть команд дала «23 сверки, 0 расхождений» — и это было **не доказательством**: из шести команд реально вызывались только две. Поэтому в фасад добавлен поименный счётчик (`perCommand`), и проверка идёт принудительно, через тот же путь сверки: `m.invoke('<cmd>')` из страницы.
+**A counter per command.** The first attempt to check six commands gave "23 comparisons, 0 divergences". That was **not proof**: of the six commands, only two were actually called. So a per-name counter (`perCommand`) was added to the facade, and the check now runs deliberately, through the same comparison path: `m.invoke('<cmd>')` from the page.
 
-**Итоговая живая проверка:**
+**Final live check:**
 
-| Режим | Результат |
+| Mode | Result |
 |---|---|
-| `shadow` | **54 сверки, 0 расхождений, 0 отказов**, покрытие поименно: `player_status` 48, `telegram_status` 2, `vpn_status`/`vpn_list_servers`/`vpn_settings`/`ai_dj_status` по 1 |
-| `ws` | `wsState: ready`, **25 вызовов** по сокету, то же поименное покрытие, 0 расхождений |
-| паритет интерфейса | 29 узлов дерева, 0 ошибок страницы в обоих режимах |
-| откат | `sessionStorage.removeItem('unidtk.transport')` → `transport: tauri`, `wsState: off`, дерево 29 |
+| `shadow` | **54 comparisons, 0 divergences, 0 refusals**. Coverage by name: `player_status` 48, `telegram_status` 2, `vpn_status`/`vpn_list_servers`/`vpn_settings`/`ai_dj_status` 1 each |
+| `ws` | `wsState: ready`, **25 calls** over the socket, the same per-name coverage, 0 divergences |
+| interface parity | 29 tree nodes, 0 page errors in both modes |
+| rollback | `sessionStorage.removeItem('unidtk.transport')` → `transport: tauri`, `wsState: off`, tree 29 |
 
-**Вывод:** шесть read-only команд обслуживаются нашей аутентифицированной дверью, каждая — с доказанной сверкой против Tauri, и всё это выключается одним ключом в `sessionStorage`. Следующий срез по плану — события (единый `EventBroker` с `seq`, ring и resync), затем остальные read-only команды после унификации контрактов.
+**Conclusion:** six read-only commands are served by our authenticated door, each with a proven comparison against Tauri. All of it is switched off with one key in `sessionStorage`. The next slice in the plan is events (a single `EventBroker` with `seq`, a ring, and resync), then the remaining read-only commands after the contracts are unified.
 
 ---
 
-## 10.26 Седьмая команда, унификация контракта и две ошибки, найденные тенью
+## 10.26 The seventh command, contract unification, and two errors found by the shadow
 
-**Унификация контракта `get_widget_config`.** Tauri-команда возвращает `Result<Option<Value>>`, то есть JSON `null`, когда конфигурации нет; сокетный обработчик отвечал `{}`. Две двери расходились — поэтому команда и не могла быть мигрирована. Исправлено: сокетный обработчик теперь отдаёт `Value::Null`. После этого команда добавлена в allowlist (седьмая).
+**Unifying the contract of `get_widget_config`.** The Tauri command returns `Result<Option<Value>>`, that is, JSON `null` when there is no configuration. The socket handler answered `{}`. The two doors diverged, which is why the command could not be migrated. Fixed: the socket handler now returns `Value::Null`. After that the command was added to the allowlist (the seventh).
 
-**Сознательно НЕ мигрированы `list_tracks`/`list_playlists`, и вот почему (проверено по коду, а не на глаз):** Tauri-команды принимают `search`, `sort_key`, `sort_dir`, а сокетные обработчики эти аргументы **игнорируют** и к тому же отдают `{count, items}` вместо массива. Перевести их сейчас — значит молча сломать поиск и сортировку в библиотеке. Сначала контракт (аргументы и форма), потом миграция. Это причина записана прямо в комментарии к `WS_COMMANDS`.
+**Deliberately NOT migrated: `list_tracks`/`list_playlists`, and here is why (verified in the code, not by eye).** The Tauri commands accept `search`, `sort_key`, and `sort_dir`, while the socket handlers **ignore** these arguments and also return `{count, items}` instead of an array. Moving them now would silently break search and sorting in the library. First the contract (arguments and shape), then the migration. This reason is recorded directly in the comment on `WS_COMMANDS`.
 
-**Тень нашла две настоящие ошибки — обе были устранены, а не заглушены:**
+**The shadow found two real errors. Both were fixed, not muffled:**
 
-1. **Ложные «отказы» из-за слишком жёсткого таймаута.** Первый прогон дал **14 отказов** (`ws timeout for 'player_status'`) на занятом бэкенде (шёл скан библиотеки). 4 секунды — самонаказание: ядро обслуживает одно соединение последовательно, и занятая команда законно занимает секунды. Таймаут поднят до 15 с, комментарий объясняет, почему он такой.
-2. **Гонка в моём же клиенте.** После подъёма таймаута остались 2 отказа с другой причиной — `ws handshake timed out`. Причина оказалась в `ensureSocket`: он кэшировал **сокет**, а не обещание, поэтому два вызова, пришедшие во время рукопожатия, открывали по собственному соединению (утечка + потеря ответа). Теперь кэшируется обещание, а `onclose` сбрасывает и его.
+1. **False "refusals" caused by a too-tight timeout.** The first run gave **14 refusals** (`ws timeout for 'player_status'`) on a busy backend (a library scan was running). 4 seconds was self-inflicted: the kernel serves one connection sequentially, and a busy command legitimately takes seconds. The timeout was raised to 15 s, and a comment explains why it is that value.
+2. **A race in my own client.** After the timeout was raised, 2 refusals remained with a different cause: `ws handshake timed out`. The cause was in `ensureSocket`. It cached the **socket**, not the promise, so two calls arriving during the handshake each opened their own connection (a leak and a lost response). Now the promise is cached, and `onclose` resets it.
 
-Вторая ошибка — ровно то, ради чего существует режим `shadow`: без сверки она всплыла бы у пользователя как «виджет иногда не обновляется».
+The second error is exactly why the `shadow` mode exists. Without a comparison, it would have surfaced for the user as "the widget sometimes does not update".
 
-**Итоговая живая проверка (семь команд):**
+**Final live check (seven commands):**
 
-| Режим | Результат |
+| Mode | Result |
 |---|---|
-| `shadow` | **34 сверки, 0 расхождений, 0 отказов**; `wsCalls = 34` — то есть каждая сверка была настоящим вызовом по сокету, а не пропуском |
-| покрытие | `player_status` 26, `telegram_status` 2, `get_widget_config` 2, `vpn_status`/`vpn_list_servers`/`vpn_settings`/`ai_dj_status` по 1 |
-| `ws` | `wsState: ready`, **30 вызовов** по сокету, то же покрытие, 29 узлов дерева, 0 ошибок страницы |
-| откат | сброс ключа → `transport: tauri`, `wsState: off`, дерево 29 |
-| `cargo test --workspace` | 15 наборов, 0 падений |
-| скриншот | вёрстка в норме |
+| `shadow` | **34 comparisons, 0 divergences, 0 refusals**. `wsCalls = 34`, so every comparison was a real call over the socket, not a skip |
+| coverage | `player_status` 26, `telegram_status` 2, `get_widget_config` 2, `vpn_status`/`vpn_list_servers`/`vpn_settings`/`ai_dj_status` 1 each |
+| `ws` | `wsState: ready`, **30 calls** over the socket, the same coverage, 29 tree nodes, 0 page errors |
+| rollback | key reset → `transport: tauri`, `wsState: off`, tree 29 |
+| `cargo test --workspace` | 15 suites, 0 failures |
+| screenshot | layout in order |
 
-**Следующее по плану:** события (единый `EventBroker` с `seq`/ring/resync — сейчас WS не пушит события вообще), затем `list_tracks`/`list_playlists` после унификации аргументов и формы, и `explorer_places` после унификации имени.
+**Next per the plan:** events (a single `EventBroker` with `seq`/ring/resync, because right now WS does not push events at all). Then `list_tracks`/`list_playlists` after the arguments and shape are unified, and `explorer_places` after the name is unified.
 
 ---
 
-## 10.27 Вся читающая поверхность UI переведена на нашу дверь (13 команд)
+## 10.27 The whole UI read surface is moved to our door (13 commands)
 
-**Унифицировано три контракта — без этого миграция была бы поломкой:**
+**Three contracts were unified. Without this, the migration would have been a breakage:**
 
-1. **`telegram_chats`** — сокет отдавал `{count, items}`, Tauri отдаёт массив. Приведено к массиву; попутно снят несуществующий у Tauri аргумент `--limit` из описания в инвентаре.
-2. **`get_drives` / `get_user_places`** — в инвентаре эти команды назывались `explorer_drives` / `explorer_places`, а UI (и Tauri) зовут их иначе. Имена в инвентаре приведены к тем, что уже используют обе стороны: одно имя работает на обеих дверях, алиасов не появилось. Константы в реестре маршрутов ссылаются на `.name`, поэтому хендлеры переименовались сами.
-3. **`list_tracks` / `list_playlists`** — сокетные обработчики игнорировали `search`/`sort_key`/`sort_dir` и отдавали `{count, items}`. Теперь принимают те же аргументы и возвращают массив, как Tauri. Это была бы самая коварная поломка: поиск и сортировка в библиотеке молча перестали бы работать только в WS-режиме.
+1. **`telegram_chats`**: the socket returned `{count, items}`, while Tauri returns an array. It was changed to an array. Along the way, the `--limit` argument, which Tauri does not have, was removed from the description in the inventory.
+2. **`get_drives` / `get_user_places`**: in the inventory these commands were called `explorer_drives` / `explorer_places`, while the UI (and Tauri) call them differently. The names in the inventory were changed to the ones both sides already use. One name works on both doors, and no aliases were added. The constants in the route registry refer to `.name`, so the handlers were renamed automatically.
+3. **`list_tracks` / `list_playlists`**: the socket handlers ignored `search`/`sort_key`/`sort_dir` and returned `{count, items}`. Now they accept the same arguments and return an array, like Tauri. This would have been the most treacherous breakage: search and sorting in the library would have silently stopped working in WS mode only.
 
-**Итоговая живая проверка (13 команд):**
+**Final live check (13 commands):**
 
-| Проверка | Результат |
+| Check | Result |
 |---|---|
-| `shadow` | **49 сверок, 0 расхождений, 0 отказов**; `wsCalls = 49` — каждая сверка была настоящим вызовом по сокету |
-| покрытие | `player_status` 30, `get_user_places` 3, `telegram_chats` 3, `get_drives` 2, `get_widget_config` 2, `telegram_status` 2, остальные по 1 |
-| `ws` + живой сценарий (открыть меню и проводник) | `wsState: ready`, **31 вызов** по сокету, среди них `get_drives`, `get_user_places`, `telegram_chats`; 29 узлов дерева, 0 ошибок страницы |
-| откат | сброс ключа → `transport: tauri`, `wsState: off`, дерево 29 |
-| `cargo test --workspace` | 15 наборов, 0 падений |
-| скриншот | вёрстка в норме |
+| `shadow` | **49 comparisons, 0 divergences, 0 refusals**. `wsCalls = 49`, so every comparison was a real call over the socket |
+| coverage | `player_status` 30, `get_user_places` 3, `telegram_chats` 3, `get_drives` 2, `get_widget_config` 2, `telegram_status` 2, the rest 1 each |
+| `ws` + live scenario (open the menu and Explorer) | `wsState: ready`, **31 calls** over the socket, among them `get_drives`, `get_user_places`, `telegram_chats`. 29 tree nodes, 0 page errors |
+| rollback | key reset → `transport: tauri`, `wsState: off`, tree 29 |
+| `cargo test --workspace` | 15 suites, 0 failures |
+| screenshot | layout in order |
 
-**Что теперь на нашей двери:** все read-only команды, которые интерфейс вызывает по имени, — `player_status`, `ai_dj_status`, `list_tracks`, `list_playlists`, `get_submodules`, `vpn_status`, `vpn_settings`, `vpn_list_servers`, `telegram_status`, `telegram_chats`, `get_drives`, `get_user_places`, `get_widget_config`. Осталось непринципиальное: `volume_get` (UI не зовёт его по имени — громкость приходит событием) и write-команды (по принятому решению — после стабилизации событий).
+**What is now on our door:** all read-only commands that the interface calls by name: `player_status`, `ai_dj_status`, `list_tracks`, `list_playlists`, `get_submodules`, `vpn_status`, `vpn_settings`, `vpn_list_servers`, `telegram_status`, `telegram_chats`, `get_drives`, `get_user_places`, `get_widget_config`. What remains is not a matter of principle: `volume_get` (the UI does not call it by name, since volume arrives as an event), and the write commands (by the adopted decision, after the events are stabilized).
 
-**Оценка честно:** переезд команд завершён, но он даёт мало, пока события идут мимо — половина интерфейса живёт на `listen`. Поэтому следующий шаг — `EventBroker` с `seq`, ring и resync, и он крупнее всех предыдущих: это новый протокол на обеих сторонах.
+**An honest assessment:** the command migration is complete, but it gives little while events bypass the door. Half of the interface lives on `listen`. So the next step is `EventBroker` with `seq`, a ring, and resync. It is larger than all the previous steps: it is a new protocol on both sides.
 
 ---
 
-## 10.28 События: брокер в ядре, push по WS и первое событие в интерфейсе
+## 10.28 Events: the broker in the kernel, push over WS, and the first event in the interface
 
-**Ядро, `core/kernel/events.rs` (новый).** События перестали быть «просто Tauri-эмитом»:
+**The kernel, `core/kernel/events.rs` (new).** Events stopped being "just Tauri emit":
 
-- **глобальный `seq`** — клиент может сказать «я видел 41» и получить ровно то, что после;
-- **кольцо на событие** (64 кадра) для короткого переподключения;
-- **state-события** (`system-volume`, `audio-bands`, `vpn`, …) держат только новейший кадр: переигрывать 120-мс сэмплы громкости медленному WebView бессмысленно и дорого;
-- **явный `gap`**: если кольцо больше не покрывает курсор, клиент получает сигнал, а не молча неполную последовательность;
-- рассылка через `try_send` — медленный клиент никогда не блокирует ядро.
+- **a global `seq`**: a client can say "I have seen 41" and receive exactly what comes after;
+- **a ring per event** (64 frames) for a short reconnection;
+- **state events** (`system-volume`, `audio-bands`, `vpn`, …) keep only the newest frame. Replaying 120 ms volume samples to a slow WebView is pointless and expensive;
+- **an explicit `gap`**: if the ring no longer covers the cursor, the client gets a signal, not a silently incomplete sequence;
+- delivery through `try_send`, so a slow client never blocks the kernel.
 
-**Одна точка подключения.** Брокер питается от того же места, где ядро регистрирует эмиттер для Tauri (`main.rs`): обе двери несут **одни и те же события с одним и тем же номером**, а не две параллельные ветки, которые надо синхронизировать.
+**One connection point.** The broker is fed from the same place where the kernel registers the emitter for Tauri (`main.rs`). Both doors carry **the same events with the same number**, rather than two parallel branches that have to be kept in sync.
 
-**Протокол WS:** `{"type":"subscribe","event":"…"[, "since": N]}` / `{"type":"unsubscribe", …}`; push-кадр — `{v, type:"event", event, seq, payload}`; при невозможности replay — `{type:"gap", …}`. При подписке без курсора сервер сразу отдаёт новейшее значение state-события. Соединение обслуживается одним потоком: чтение с таймаутом 50 мс, между чтениями сливается очередь событий — сокет остаётся одним объектом без блокировок.
+**WS protocol:** `{"type":"subscribe","event":"…"[, "since": N]}` / `{"type":"unsubscribe", …}`. A push frame is `{v, type:"event", event, seq, payload}`. If replay is impossible, the server sends `{type:"gap", …}`. On a subscription without a cursor, the server immediately sends the newest value of the state event. The connection is served by one thread: a read with a 50 ms timeout, and between reads the event queue is drained. The socket stays a single object without locks.
 
-**Фасад:** `listen` для событий из `WS_EVENTS` идёт в сокет (регистрация локальных обработчиков, подписка, отписка), хранит **курсор `seq` на событие**, а на `gap` переподписывается без курсора — это и есть resync.
+**The facade:** `listen` for events from `WS_EVENTS` goes to the socket (registering local handlers, subscribing, unsubscribing). It keeps a **`seq` cursor per event**, and on a `gap` it resubscribes without a cursor. That is the resync.
 
-**Три ошибки, найденные прибором (все — в моём коде, все исправлены):**
+**Three bugs found by the instrument (all in my code, all fixed):**
 
-1. **Сравнение событий «по позиции»** давало ложные расхождения: двери асинхронны, WS идёт впереди, и я сопоставлял разные изменения (`tauri=80` против `ws=50`). Для **state**-событий правильная семантика — сходимость значений, а не порядок кадров: теперь после Tauri-события через 250 мс сравнивается новейшее значение сокета. Для stream-событий понадобится отдельное правило — это записано в коде.
-2. **Компаратор на каждый `listen`**: несколько виджетов слушают одно событие, и каждый регистрировал свой компаратор, вычерпывая один и тот же буфер дважды. Теперь компаратор один на событие.
-3. **Flaky тест брокера** (мой же): канал подписчика получает все события, включая публикации параллельных тестов, а я ожидал свой кадр первым. Тест ищет кадр по имени.
+1. **Event comparison "by position"** gave false divergences. The doors are asynchronous, WS runs ahead, and I was matching different changes (`tauri=80` against `ws=50`). For **state** events the right semantics is convergence of values, not the order of frames. Now the newest socket value is compared 250 ms after a Tauri event. Stream events will need a separate rule, which is recorded in the code.
+2. **A comparator per `listen`**: several widgets listen to one event, and each registered its own comparator, draining the same buffer twice. Now there is one comparator per event.
+3. **A flaky broker test** (my own): the subscriber's channel receives all events, including publications from parallel tests, while I expected my frame first. The test now looks up its frame by name.
 
-**Живая проверка:**
+**Live check:**
 
-| Проверка | Результат |
+| Check | Result |
 |---|---|
-| сырой WS-клиент | подписка → снапшот `seq: 1`; смена громкости → push `seq: 2` |
-| `shadow` (событие) | **34 сверки, 0 расхождений, 0 отказов** |
-| `ws` — обновляется ли интерфейс по событию | глиф-бар: **2 сегмента при 20 %, 9 при 90 %** — полоса отреагировала на событие, доставленное нашей дверью |
-| откат | сброс ключа → `tauri`, 29 узлов |
-| `cargo test --workspace` | 15 наборов, 0 падений (включая 4 теста брокера) |
+| raw WS client | subscription → snapshot `seq: 1`; volume change → push `seq: 2` |
+| `shadow` (event) | **34 comparisons, 0 divergences, 0 refusals** |
+| `ws`: does the interface update on the event | glyph bar: **2 segments at 20 %, 9 at 90 %**. The bar reacted to an event delivered by our door |
+| rollback | key reset → `tauri`, 29 nodes |
+| `cargo test --workspace` | 15 suites, 0 failures (including 4 broker tests) |
 
-**Известные границы:** часть событий публикуется прямыми `AppHandle::emit` (`core/kernel/input.rs`, `main.rs`, модули) и в брокер **не попадает** — их надо переводить на эмиттер контракта по одному домену, и это следующий шаг; в `WS_EVENTS` пока одно событие (`system-volume`), остальные добавляются тем же порядком «сверить → включить».
+**Known limits:** some events are published by direct `AppHandle::emit` calls (`core/kernel/input.rs`, `main.rs`, modules) and **do not reach** the broker. They must be moved to the contract emitter one domain at a time, and this is the next step. `WS_EVENTS` currently holds one event (`system-volume`). The others are added in the same order: "compare → enable".
 
 ---
 
-## 10.29 Все события — через контракт, и код стал без предупреждений
+## 10.29 All events go through the contract, and the code is free of warnings
 
-**Переведено на контракт** (`unidtk_api::emit` вместо `AppHandle::emit`) — теперь эти события видит и Tauri, и брокер:
+**Moved to the contract** (`unidtk_api::emit` instead of `AppHandle::emit`). Now these events are seen by both Tauri and the broker:
 
-- ядро: `explorer-open` (три точки), `display-changed` (две), `hotkey-pressed`;
-- телеграм: один хелпер `TelegramRuntime::emit` закрыл сразу все его события (состояние соединения, апдейты чатов, сообщения) — десять с лишним мест одним исправлением;
-- плеер: `audio-bands`, `ai-dj-progress`, `sync-tasks`, `sync-auto`.
+- kernel: `explorer-open` (three points), `display-changed` (two), `hotkey-pressed`;
+- telegram: one helper, `TelegramRuntime::emit`, closed all of its events at once (connection state, chat updates, messages). More than ten places were fixed in one change;
+- player: `audio-bands`, `ai-dj-progress`, `sync-tasks`, `sync-auto`.
 
-**Побочный, но важный результат — мёртвая обвязка удалена, а не заглушена.** Как только эмиссия ушла в контракт, `AppHandle` перестал быть нужен модулю плеера: убраны `app` из `AppState` (поле удалено целиком), из `start_url`, `start_all`, `start_stale`, `start_existing_playlist`, `start_playlist`, `run_task`, `run_yt_dlp`, `run_incremental_snapshot`, `run_yt_dlp_download`, `update`, `spawn_auto_playlist_sync`, `analyze_tracks`, `reanalyze_tracks`, `sync_url`, `sync_playlist`, `sync_all`, `audit::start` и из соответствующих Tauri-обёрток ядра — около пятнадцати параметров и один структурный цикл. **`cargo check` теперь проходит без единого предупреждения.**
+**A side effect, but an important one: the dead scaffolding was removed, not silenced.** Once emission moved to the contract, the player module no longer needed `AppHandle`. Removed: `app` from `AppState` (the field was deleted entirely), and `app` parameters from `start_url`, `start_all`, `start_stale`, `start_existing_playlist`, `start_playlist`, `run_task`, `run_yt_dlp`, `run_incremental_snapshot`, `run_yt_dlp_download`, `update`, `spawn_auto_playlist_sync`, `analyze_tracks`, `reanalyze_tracks`, `sync_url`, `sync_playlist`, `sync_all`, `audit::start`, and from the corresponding Tauri wrappers in the kernel. That is about fifteen parameters and one structural cycle. **`cargo check` now passes without a single warning.**
 
-**Схлопывание на проводе.** `audio-bands` публикуется ~30 раз в секунду, и для state-события пересылать все кадры бессмысленно: писатель WS схлопывает их до новейшего значения за проход (`events::is_state`). Для stream-событий порядок сохраняется.
+**Coalescing on the wire.** `audio-bands` is published about 30 times per second. For a state event, forwarding every frame is pointless: the WS writer collapses them to the newest value per pass (`events::is_state`). For stream events, order is preserved.
 
-**Живая проверка после перевода эмиссии:**
+**Live check after the emission was moved:**
 
-| Проверка | Результат |
+| Check | Result |
 |---|---|
-| `explorer-open` через контракт (второй экземпляр с путём) | дерево **29 → 39 узлов**, путь Documents виден в интерфейсе, 0 ошибок страницы |
-| событие **модуля** в брокере | `telegram-connection-state` → `{"state":"Ready"}` c реальным `seq` |
-| `cargo test --workspace` | 15 наборов, 0 падений |
-| `cargo check --release --bins` | **0 предупреждений** |
-| `udtk doctor -quick`, `udtk logs --level ERROR` | exit 0, ошибок нет |
-| скриншот | вёрстка в норме |
+| `explorer-open` through the contract (a second instance with a path) | tree **29 → 39 nodes**, the Documents path is visible in the interface, 0 page errors |
+| a **module** event in the broker | `telegram-connection-state` → `{"state":"Ready"}` with a real `seq` |
+| `cargo test --workspace` | 15 suites, 0 failures |
+| `cargo check --release --bins` | **0 warnings** |
+| `udtk doctor -quick`, `udtk logs --level ERROR` | exit 0, no errors |
+| screenshot | layout in order |
 
-**Честные границы этой проверки:** `audio-bands` и `ai-dj-progress` публикуются только во время воспроизведения и анализа — живьём их не поднять без запуска музыки и AI-анализа, поэтому проверены общим путём эмиттера, а не наблюдением; `sync-tasks` требует реальной синхронизации. Все они идут через тот же `unidtk_api::emit`, что и проверенные события. Конфиг пользователя при этих опытах не изменён (значение `visualizer_enabled` было `true` изначально — проверено по резервной копии).
-
----
-
-## 10.30 Переезд завершён: интерфейс на своей двери (shadow → ws)
-
-**Результат.** Интерфейс работает через сокет: **13 команд** (`get_drives`, `get_user_places`, `get_widget_config`, `player_status`, `telegram_chats`, `telegram_status` и др.) и **17 событий** идут по новой двери; непереведённые (`get_folders`, `scan_directory`, `explorer_tabs_get`, `frontend_log`, `telegram_get_config`, `telegram_debug`) остаются на Tauri, и это видно в счётчиках по каждой двери. Дерево — 29 узлов, ошибок страницы — 0, скриншот в норме. По умолчанию траспорт остаётся `tauri`; `shadow` и `ws` включаются флагом в `sessionStorage` (сбрасывается вместе с сессией WebView2 — забытый флаг не переживёт перезапуск).
-
-**Сверка (shadow): 65 проверок, 0 расхождений, 0 отказов.** Именно сверка, а не «вроде работает», дала два протокольных улучшения:
-
-1. **Снимок при подписке помечен явно.** Сервер на подписку без курсора отвечает текущим значением state-события — кадра, у которого нет пары на Tauri-двери. Сверка принимала его за живое событие и показывала расхождение, которого не было. Теперь кадр несёт `"snapshot": true`, а проверка сравнивает только живые доставки. Правка в `ws.rs` + фасаде.
-2. **Сравнение по доставке, а не по последнему значению.** Первые прогоны дали 3–4 «расхождения» по Telegram, и разбор показал, что обе двери доставили всё: модуль шлёт события пачками (несколько смен статуса пользователей, несколько сообщений в секунду), а сверка сравнивала «payload от Tauri» с «последним кадром сокета» — то есть два разных сообщения из одной пачки (`from: "Yae Miko"` против `from: ".#GS"`, разные `userId`). Инструмент был неверен, не транспорт. Теперь сокет держит кольцо из 8 последних живых payload на событие, и расхождением считается только отсутствие **этого** события среди доставленных.
-
-**Сопутствующие находки при восстановлении сборки (обе — реальные дефекты, не разовые сбои):**
-
-- **Холодная сборка с нуля невозможна.** `build.rs` через `tauri_build::try_build` требует, чтобы ресурсы из `tauri.conf.json` (`../target/release/udtk.exe`, `../target/release/vpn-helper.exe`) уже существовали. При пустом `target/` это замкнутый круг: чтобы собрать `udtk`, скрипт требует `udtk`. Обход — создать нулевые файлы-заглушки, после чего cargo перезаписывает их настоящими бинарниками (проверено: `udtk.exe` 28 МБ, `vpn-helper.exe` 331 КБ). Лечится правкой build.rs — принять отсутствие ресурсов на этапе `cargo build` и проверять их только при упаковке.
-- **Установленное приложение может держать файлы репозитория.** Приложение из `C:\Program Files\UniDTK` держало `tdjson.dll`, `libcrypto-3-x64.dll`, `libssl-3-x64.dll`, `z.dll` **из `target/release` репозитория** — путь к библиотеке Telegram сохранён в настройках и указывает в репозиторий. Следствия: `cargo build` падает с `os error 32` без внятного имени файла, а после переименования папки (`shell` → `unidtk`) Telegram сломается. Проверено поиском загруженных модулей процесса. Перед релизной сборкой приложение обязано быть остановлено.
-
-**Урок по ресурсам (стоил зависания системы).** Полная сборка с thin-LTO на этой машине упирается в **лимит выделяемой памяти**: система доходила до 63,4 ГБ из 63,7 ГБ, файл подкачки раздувался до 48 ГБ, после чего rustc падал с `LLVM out of memory` и `memory allocation failed`, а Windows переставал отвечать. Что помогло: остановить приложение, собрать в **один поток** (`-j 1`) и дать компилятору большой стек (`RUST_MIN_STACK=134217728`) — без стека он падал на гигантском крейте `windows` уже через 16 секунд. Итог: 155 зависимостей + три бинарника, `Finished release profile in 13m 55s`, без единого предупреждения.
+**Honest limits of this check:** `audio-bands` and `ai-dj-progress` are published only during playback and analysis. They cannot be brought up live without starting music and AI analysis, so they were verified through the common emitter path, not by observation. `sync-tasks` requires a real synchronization. All of them go through the same `unidtk_api::emit` as the verified events. The user's config was not changed during these experiments. The value of `visualizer_enabled` was `true` originally, verified against a backup copy.
 
 ---
 
-## 10.31 Этап 7 закрыт целиком: запись, политика дверей и три дефекта манифеста
+## 10.30 Migration complete: the interface on its own door (shadow → ws)
 
-Закрыт последний блокер этапа 7 (найден при разборе §10.22): **диспетчер применял сокетную политику к обеим дверям**, поэтому команды записи не проходили нигде — по сокету правильно, по аутентифицированной WS-двери неправильно. «Переезд» без этого был половиной: интерфейс не мог ни переключить VPN, ни отправить сообщение.
+**Result.** The interface works over the socket. **13 commands** (`get_drives`, `get_user_places`, `get_widget_config`, `player_status`, `telegram_chats`, `telegram_status`, and others) and **17 events** go through the new door. The untranslated ones (`get_folders`, `scan_directory`, `explorer_tabs_get`, `frontend_log`, `telegram_get_config`, `telegram_debug`) remain on Tauri, and this is visible in the per-door counters. The tree has 29 nodes, page errors are 0, and the screenshot is fine. The default transport remains `tauri`. `shadow` and `ws` are enabled with a flag in `sessionStorage`. It is cleared together with the WebView2 session, so a forgotten flag does not survive a restart.
 
-**Что изменено:**
+**Comparison (shadow): 65 checks, 0 divergences, 0 refusals.** It was the comparison, not "seems to work", that produced two protocol improvements:
 
-- **Дверь стала контекстом диспетчера.** `dispatch(req, door)`: TCP-дверь передаёт `Door::Socket`, WS — `Door::Ui` (соединение доказало владение токеном, это и есть дверь интерфейса). Политика берётся из данных контракта (`spec.doors`), а не из одного правила на всех. Проверка вынесена в отдельную функцию `check_door`, потому что `IpcServer` в тесте не создать (нужен живой `AppHandle`), а политика — чистые данные.
-- **Вторая дверь переименована: `Door::Tauri` → `Door::Ui`.** Имя описывает **кто спрашивает**, а не трубу: транспорт интерфейса как раз и меняется с Tauri на WebSocket, и политика меняться не должна.
-- **У трёх отказов разные причины, и они больше не врут:** «изменяет состояние, запись остаётся на двери UI», «обслуживается только инструментальной дверью» (для `ping`/`logs`/`commands`), «только дверью UI».
-- **Новый вид команды — `read_only_cli`.** Лайвнес, чтение журнала и сам список команд объявлялись доступными интерфейсу, хотя интерфейс их не вызывает, а ядро не регистрирует. Теперь манифест этого не обещает.
-- **Три дефекта манифеста исправлены:** запись в журнал объявлялась как `log`, а ядро регистрирует `frontend_log`; громкость как `volume_get`, а ядро — `get_system_volume` (модуль `glyph-bar` ждал именно старое имя, так что переименование без правки модуля сломало бы громкость); CLI-команды выдавались за доступные интерфейсу.
-- **У команды записи двери UI появился маршрут.** Это нашла **живая проба уже после зелёных тестов**: `frontend_log` доходил по WS до диспетчера и получал «declared in the inventory but has no handler» — Tauri-команда с тем же именем это *другой* транспорт, а не замена. Тест проверял маршруты только для сокетного подмножества, поэтому молчал.
+1. **The snapshot at subscription is marked explicitly.** On a subscription without a cursor, the server answers with the current value of the state event. That frame has no counterpart on the Tauri door. The comparison took it for a live event and reported a divergence that did not exist. Now the frame carries `"snapshot": true`, and the check compares only live deliveries. The fix is in `ws.rs` and the facade.
+2. **Comparison by delivery, not by the last value.** The first runs gave 3–4 "divergences" for Telegram. Analysis showed that both doors delivered everything. The module sends events in batches (several user status changes, several messages per second), and the comparison was setting the "payload from Tauri" against the "last socket frame". That is two different messages from one batch (`from: "Yae Miko"` against `from: ".#GS"`, different `userId`s). The instrument was wrong, not the transport. Now the socket keeps a ring of the last 8 live payloads per event, and a divergence is counted only when **this** event is absent from the delivered ones.
 
-**Стражи, которые не дали бы этому повториться:**
+**Side findings during the restoration of the build (both are real defects, not one-off failures):**
 
-| Тест | Что гарантирует |
+- **A cold build from scratch is impossible.** `build.rs` via `tauri_build::try_build` requires the resources from `tauri.conf.json` (`../target/release/udtk.exe`, `../target/release/vpn-helper.exe`) to already exist. With an empty `target/` this is a closed loop: to build `udtk`, the script requires `udtk`. The workaround is to create zero-length placeholder files, after which cargo overwrites them with the real binaries (verified: `udtk.exe` 28 MB, `vpn-helper.exe` 331 KB). The fix is an edit to build.rs: accept missing resources at `cargo build` time, and check them only at packaging.
+- **The installed app can hold files from the repository.** The app from `C:\Program Files\UniDTK` held `tdjson.dll`, `libcrypto-3-x64.dll`, `libssl-3-x64.dll`, and `z.dll` **from the repository's `target/release`**. The path to the Telegram library is stored in the settings and points into the repository. Consequences: `cargo build` fails with `os error 32` without a clear file name, and after renaming the folder (`shell` → `unidtk`) Telegram breaks. Verified by searching the process's loaded modules. Before a release build, the app must be stopped.
+
+**A lesson about resources (it cost a system freeze).** A full build with thin-LTO on this machine hits the **memory allocation limit**. The system reached 63.4 GB out of 63.7 GB, the page file swelled to 48 GB, after which rustc failed with `LLVM out of memory` and `memory allocation failed`, and Windows stopped responding. What helped: stop the app, build on **one thread** (`-j 1`), and give the compiler a large stack (`RUST_MIN_STACK=134217728`). Without the stack it failed on the huge `windows` crate after just 16 seconds. Result: 155 dependencies plus three binaries, `Finished release profile in 13m 55s`, without a single warning.
+
+---
+
+## 10.31 Stage 7 closed completely: writes, the door policy, and three manifest defects
+
+The last blocker of stage 7 was closed (found when analyzing §10.22). **The dispatcher applied the socket policy to both doors**, so write commands did not pass anywhere. On the socket that was correct. On the authenticated WS door it was wrong. Without this fix the "migration" was half-done: the interface could not switch a VPN or send a message.
+
+**What changed:**
+
+- **The door became the dispatcher's context.** `dispatch(req, door)`: the TCP door passes `Door::Socket`, and WS passes `Door::Ui`. The connection has proven ownership of the token, and that is what makes it the interface door. The policy is taken from the contract data (`spec.doors`), not from one rule for all. The check was moved into a separate function, `check_door`, because an `IpcServer` cannot be created in a test (it needs a live `AppHandle`), while the policy is pure data.
+- **The second door was renamed: `Door::Tauri` → `Door::Ui`.** The name describes **who is asking**, not the pipe. The interface transport is exactly what changes from Tauri to WebSocket, and the policy must not change with it.
+- **The three refusals have distinct reasons, and they no longer lie:** "changes state, writes stay on the UI door", "served only by the tool door" (for `ping`/`logs`/`commands`), and "UI door only".
+- **A new kind of command: `read_only_cli`.** Liveness, reading the journal, and the command list itself were declared as available to the interface, although the interface does not call them and the kernel does not register them. Now the manifest does not promise this.
+- **Three manifest defects were fixed.** The journal write was declared as `log`, while the kernel registers `frontend_log`. The volume was declared as `volume_get`, while the kernel has `get_system_volume`. The `glyph-bar` module waited for the old name, so renaming without editing the module would have broken volume. CLI commands were presented as available to the interface.
+- **The write command of the UI door got a route.** This was found by a **live probe after the tests were already green**: `frontend_log` arrived over WS at the dispatcher and got "declared in the inventory but has no handler". A Tauri command with the same name is a *different* transport, not a replacement. The test checked routes only for the socket subset, so it stayed silent.
+
+**Guards that would prevent this from recurring:**
+
+| Test | What it guarantees |
 |---|---|
-| `every_command_has_a_handler` (расширен с сокетного подмножества на все команды) | у каждой объявленной команды есть маршрут, то есть её может обслужить хотя бы одна дверь |
-| `every_manifest_ui_command_is_registered` (новый) | каждая команда манифеста для двери UI реально зарегистрирована в ядре — раньше **манифест не сверялся ни с чем** |
-| `a_write_command_is_refused_on_the_socket_and_answered_on_the_ui`, `a_cli_only_read_is_not_offered_to_the_ui`, `an_unknown_command_is_refused_on_every_door` (новые) | три разных отказа политики, а не один «на всякий случай» |
-| `a_read_command_is_served_on_both_doors` (исправлен) | команда выбирается **по свойству**, а не по позиции: первая читающая команда — как раз CLI-команда `ping`, и тест по индексу утверждал обратное манифесту |
+| `every_command_has_a_handler` (extended from the socket subset to all commands) | every declared command has a route, so at least one door can serve it |
+| `every_manifest_ui_command_is_registered` (new) | every manifest command for the UI door is actually registered in the kernel. Previously the **manifest was not checked against anything** |
+| `a_write_command_is_refused_on_the_socket_and_answered_on_the_ui`, `a_cli_only_read_is_not_offered_to_the_ui`, `an_unknown_command_is_refused_on_every_door` (new) | three different policy refusals, not one "just in case" |
+| `a_read_command_is_served_on_both_doors` (fixed) | the command is selected **by property**, not by position. The first read command is the CLI command `ping` itself, and the index-based test asserted the opposite of the manifest |
 
-**Живая проверка после сборки:**
+**Live check after the build:**
 
-| Проба | Результат |
+| Probe | Result |
 |---|---|
-| запись `frontend_log` по **сокету** | отказ: «not available on the socket door: it changes state, and write commands stay on the UI door» |
-| запись `frontend_log` по **WS-двери** | `ok`, и запись **легла в журнал** (`udtk logs --source frontend` → «запись через WS-дверь: проверка» первой строкой) |
-| чтение `get_system_volume` по WS | `{"level":0,"muted":true}` |
-| CLI-команда `ping` по WS | отказ: «served by the tool door only» |
-| старое имя `volume_get` | `unknown cmd` |
-| `cargo test --release --workspace` | 0 падений (в ядре — 40 тестов), сборка `Finished in 14m 13s`, ноль предупреждений |
-| интерфейс | 29 узлов, 0 ошибок |
+| write `frontend_log` over the **socket** | refused: "not available on the socket door: it changes state, and write commands stay on the UI door" |
+| write `frontend_log` over the **WS door** | `ok`, and the write **landed in the journal**. `udtk logs --source frontend` shows `"запись через WS-дверь: проверка"` ("write via WS door: check") as the first line |
+| read `get_system_volume` over WS | `{"level":0,"muted":true}` |
+| CLI command `ping` over WS | refused: "served by the tool door only" |
+| the old name `volume_get` | `unknown cmd` |
+| `cargo test --release --workspace` | 0 failures (40 tests in the kernel), build `Finished in 14m 13s`, zero warnings |
+| interface | 29 nodes, 0 errors |
 
-**Замечание по инструменту (не дефект кода).** `udtk gui js:<expr>` принимает JS одним аргументом, но PowerShell 5.1 рвёт аргумент по переносам строк и по двойным кавычкам внутри — многострочный скрипт превращается в десяток «шагов» (`unknown step kind: write`). Рабочий приём: однострочный JS, строки внутри — **одинарными** кавычками.
+**A note on the tool (not a code defect).** `udtk gui js:<expr>` takes JS as one argument. PowerShell 5.1, however, breaks the argument at line breaks and at double quotes inside it. A multi-line script turns into a dozen "steps" (`unknown step kind: write`). The working technique is single-line JS, with **single** quotes for the strings inside.
 
 ---
 
-## 10.32 Первая запись интерфейса на новой двери (и почему запись нельзя «сверять»)
+## 10.32 The first write from the interface on the new door (and why a write cannot be "compared")
 
-**Найденная до переезда ловушка.** `shadow` (сверка) устроен так: зовутся **обе** двери и ответы сравниваются. Для чтения это верно, для записи — нет: двери не сравниваются, а **действие выполняется дважды**. Значит правило «переводим команду, только если сверка чистая» для записи неприменимо в принципе, и это надо было зафиксировать раньше, чем в список попадёт первая запись.
+**A trap found before the migration.** `shadow` (the comparison) works like this: **both** doors are called and the responses are compared. For reads this is correct. For writes it is not: the doors are not compared, but **the action is executed twice**. So the rule "we migrate a command only if the comparison is clean" cannot apply to writes at all. This had to be recorded before the first write entered the list.
 
-**Как сделано.** В фасаде два отдельных списка:
+**How it was done.** The facade has two separate lists:
 
-- `WS_COMMANDS` — чтения: попадают на сокет и в `shadow`, и в `ws`; сверка для них и есть проверка.
-- `WS_WRITES` — записи: на сокет идут **только в `ws`**, а в `shadow` остаются на старой двери. Проверяется запись не сравнением, а **следствием** — последующим чтением состояния.
+- `WS_COMMANDS`: reads. They go to the socket in both `shadow` and `ws`, and the comparison is their check.
+- `WS_WRITES`: writes. They go to the socket **only in `ws`**, while in `shadow` they stay on the old door. A write is checked not by comparison, but by its **consequence**, that is, a subsequent read of the state.
 
-Это записано комментарием в самом фасаде, чтобы следующий, кто добавит запись в список, не наступил на двойное выполнение.
+This is recorded in a comment in the facade itself, so that whoever adds a write to the list next does not fall into double execution.
 
-**Пилот — `frontend_log`.** Выбран за то, что его следствие безвредно и прямо наблюдаемо: запись в журнале. Плюс это ровно та команда, у которой живая проба нашла отсутствующий маршрут (§10.31) — то есть проверялся и он.
+**The pilot, `frontend_log`.** It was chosen because its consequence is harmless and directly observable: a journal entry. Also, it is exactly the command for which the live probe found the missing route (§10.31), so the route was tested too.
 
-**Живая проверка:**
+**Live check:**
 
-| Режим | Что звалось | `tauri frontend_log` | `ws frontend_log` | Записей в журнале |
+| Mode | What was called | `tauri frontend_log` | `ws frontend_log` | Journal entries |
 |---|---|---|---|---|
-| `shadow` | `frontend_log` через фасад | 16 | 0 | **1** (двойного выполнения нет) |
-| `ws` | то же | 0 | 32 | **1** |
+| `shadow` | `frontend_log` through the facade | 16 | 0 | **1** (no double execution) |
+| `ws` | the same | 0 | 32 | **1** |
 
-Интерфейс в режиме сокета: 29 узлов, 0 ошибок, вёрстка цела (скриншот `unidtk_2026-09-20_15-19-05.png`). После проверки транспорт возвращён в `tauri` — по умолчанию приложение работает на старой двери.
+The interface in socket mode: 29 nodes, 0 errors, the layout is intact (screenshot `unidtk_2026-09-20_15-19-05.png`). After the check, the transport was returned to `tauri`. By default the app runs on the old door.
 
-**Что это даёт.** Механика перевода записей готова и проверена на безвредной команде. Дальше по этой схеме переводятся боевые записи (VPN, Telegram, проводник) — по одной: объявить в манифесте, дать маршрут, добавить в `WS_WRITES`, проверить следствием. Записи, которых в манифесте ещё нет (`vpn_connect`, `telegram_send_message`, файловые операции проводника), сначала надо туда внести — манифест по-прежнему описывает только часть поверхности двери UI.
+**What this gives.** The mechanism for migrating writes is ready and verified on a harmless command. From here on, live writes (VPN, Telegram, Explorer) are migrated by this scheme, one at a time: declare the write in the manifest, give it a route, add it to `WS_WRITES`, and verify it by consequence. Writes that are not yet in the manifest (`vpn_connect`, `telegram_send_message`, Explorer file operations) must first be added there. The manifest still describes only part of the UI door's surface.
 
 ---
 
-## 10.33 Первые боевые записи: громкость объявлена в манифесте и переведена
+## 10.33 The first live writes: volume is declared in the manifest and migrated
 
-Пилот `frontend_log` был записью **ядра**. Следующий шаг — запись **модуля**, потому что там другой путь: диспетчер зовёт модуль по имени из манифеста, и имя обязано совпасть в трёх местах.
+The `frontend_log` pilot was a **kernel** write. The next step is a **module** write, because the path is different there. The dispatcher calls the module by the name from the manifest, and the name must match in three places.
 
-**Что внесено в манифест:** `set_system_volume` и `set_system_mute` — обе `Access::Write`, то есть по построению недоступны сокетной двери. Громкость выбрана первой боевой записью за то, что модуль без состояния (остаётся Tauri-free), а следствие видно и обратимо.
+**What went into the manifest:** `set_system_volume` and `set_system_mute`, both `Access::Write`, so by construction they are unavailable on the socket door. Volume was chosen as the first live write because the module has no state (it stays Tauri-free), and its consequence is visible and reversible.
 
-**Что для этого потребовалось (рецепт для остальных записей):**
+**What this required (a recipe for the other writes):**
 
-1. запись в манифесте (`CommandSpec::write`) — она же снимает команду с сокетной двери;
-2. ветка в `ipc_call` модуля, причём **имя обязано совпасть с манифестом** — иначе диспетчер отчитается «объявлена, но обработчика нет»;
-3. маршрут в ядре (`handle_*` → `call_module`), потому что по WS команда приходит именно в диспетчер, а не в свою Tauri-обёртку;
-4. имя в `WS_WRITES` фасада — и только там, не в `WS_COMMANDS`: запись нельзя «сверять» (§10.32).
+1. The write in the manifest (`CommandSpec::write`). This is also what removes the command from the socket door.
+2. A branch in the module's `ipc_call`. The **name must match the manifest**, otherwise the dispatcher reports "declared, but there is no handler".
+3. A route in the kernel (`handle_*` → `call_module`), because over WS the command arrives at the dispatcher, not at its own Tauri wrapper.
+4. The name in the facade's `WS_WRITES`, and only there, not in `WS_COMMANDS`. A write cannot be "compared" (§10.32).
 
-**Живая проверка:**
+**Live check:**
 
-| Проба | Результат |
+| Probe | Result |
 |---|---|
-| `set_system_volume` по **сокету** | отказ: «changes state, and write commands stay on the UI door» |
-| `set_system_volume {level:30}` по **WS** | ответ `{"level":30,"muted":false}` |
-| следствие — независимое чтение **через сокет** | `{"level":30,"muted":false}` — состояние изменилось, а не «ответ пришёл» |
-| возврат исходного состояния через **ту же дверь** | `{level:0}` → `{"muted":false}`, затем `set_system_mute {muted:true}` → `{"level":0,"muted":true}`; чтение подтвердило исходные значения |
-| `cargo test --release --workspace` | 0 падений (в ядре 40), сборка `Finished in 14m 27s`, ноль предупреждений |
-| интерфейс после сброса флага | транспорт `tauri`, переносимых записей три, 29 узлов, 0 ошибок |
+| `set_system_volume` over the **socket** | refused: "changes state, and write commands stay on the UI door" |
+| `set_system_volume {level:30}` over **WS** | response `{"level":30,"muted":false}` |
+| the consequence: an independent read **over the socket** | `{"level":30,"muted":false}`. The state changed, not just "a response came back" |
+| restoring the original state through **the same door** | `{level:0}` → `{"muted":false}`, then `set_system_mute {muted:true}` → `{"level":0,"muted":true}`. A read confirmed the original values |
+| `cargo test --release --workspace` | 0 failures (40 in the kernel), build `Finished in 14m 27s`, zero warnings |
+| interface after the flag reset | transport `tauri`, three transferable writes, 29 nodes, 0 errors |
 
-**Наблюдение по существу:** запись `set_system_volume` с ненулевым уровнем **снимает mute** (так устроен модуль: «поднял громкость — значит не немой»). Это повело себя ровно так и на новой двери, то есть поведение команды от транспорта не зависит — что и требовалось доказать. Состояние пользователя восстановлено точно.
+**An observation on substance:** the `set_system_volume` write with a non-zero level **clears mute**. That is how the module works: "raised the volume, so it is not muted". It behaved exactly the same on the new door, so the command's behavior does not depend on the transport. That is what had to be proven. The user's state was restored exactly.
 
 ---
 
-## 10.34 Записи VPN: объявлены в манифесте и переведены
+## 10.34 VPN writes: declared in the manifest and migrated
 
-Второй модуль с записями — и первый, где запись **меняет сетевое состояние**, а не громкость. Интерфейс VPN-панели зовёт четыре: `vpn_connect`, `vpn_disconnect`, `vpn_ping_all`, `vpn_set_auto_connect`. Все четыре объявлены `Access::Write` (сокет по построению) и переведены на новую дверь.
+The second module with writes, and the first where a write **changes network state**, not volume. The VPN panel's interface calls four: `vpn_connect`, `vpn_disconnect`, `vpn_ping_all`, `vpn_set_auto_connect`. All four are declared `Access::Write` (the socket, by construction) and migrated to the new door.
 
-**Про `vpn_ping_all` — почему это запись, хотя отвечает замерами.** Команда берёт глобальный признак «замер уже идёт» (второй вызов в это время честно отказывает) и сохраняет результаты, то есть меняет наблюдаемое состояние. `Access` описывает, что команда **делает**, а не чем отвечает; иначе политика двери перестала бы быть данными и стала бы договорённостью. Это записано комментарием в манифесте, чтобы вопрос не возникал заново.
+**On `vpn_ping_all`, why it is a write even though it answers with measurements.** The command takes a global "measurement already running" flag (a second call during that time is honestly refused), and it saves the results. In other words, it changes observable state. `Access` describes what the command **does**, not what it replies with. Otherwise the door policy would stop being data and become a convention. This is recorded in a comment in the manifest so that the question does not come up again.
 
-**Живая проверка:**
+**Live check:**
 
-| Проба | Результат |
+| Probe | Result |
 |---|---|
-| `vpn_connect`, `vpn_disconnect`, `vpn_ping_all`, `vpn_set_auto_connect` по **сокету** | все четыре отказаны: «changes state, and write commands stay on the UI door» |
-| `vpn_set_auto_connect {enabled:true}` через **WS** | ответ `auto_connect: true` |
-| следствие — независимое чтение `vpn_settings` **через сокет** | `auto_connect: true` (настройка действительно изменилась) |
-| возврат `{enabled:false}` через **ту же дверь** | ответ `auto_connect: false`, чтение подтвердило исходное значение |
-| приёмка §10.5, критерий 2 после расширения | манифест 27 команд (20 сокетных) **==** рантайм (20 сокетных); записей в манифесте 7 |
-| интерфейс | 29 узлов, 0 ошибок, скриншот в норме; транспорт возвращён в `tauri` |
+| `vpn_connect`, `vpn_disconnect`, `vpn_ping_all`, `vpn_set_auto_connect` over the **socket** | all four refused: "changes state, and write commands stay on the UI door" |
+| `vpn_set_auto_connect {enabled:true}` through **WS** | response `auto_connect: true` |
+| the consequence: an independent read of `vpn_settings` **over the socket** | `auto_connect: true` (the setting really changed) |
+| return to `{enabled:false}` through **the same door** | response `auto_connect: false`. A read confirmed the original value |
+| §10.5 acceptance, criterion 2 after the extension | manifest 27 commands (20 socket) **==** runtime (20 socket); 7 writes in the manifest |
+| interface | 29 nodes, 0 errors, screenshot fine; transport returned to `tauri` |
 
-**Урок про тесты (стоил одного цикла).** Сборка **тестовых** целей тоже тяжёлая: `cargo test --release --workspace -j 2` уронил две LTO-сборки разом с `0xc000012d` (предел выделяемой памяти), хотя релизный бинарник собрался нормально. Тесты проходят при `-j 1`. То есть правило «один поток на этой машине» относится не только к релизной сборке.
+**A lesson about tests (it cost one cycle).** Building the **test** targets is also heavy. `cargo test --release --workspace -j 2` brought down two LTO builds at once with `0xc000012d` (the memory allocation limit), even though the release binary had built normally. The tests pass at `-j 1`. So the rule "one thread on this machine" applies not only to the release build.
 
 ---
 
-## 10.35 Doctor без хардкода: `-env` из манифеста, `-simulate` из инвентаря и `metadata.json`
+## 10.35 Doctor without hardcoding: `-env` from the manifest, `-simulate` from the inventory and `metadata.json`
 
-Закрыт остаток §10.1 («четвёртый рукописный список» жил в `doctor`): секция `-env` дублировала имена DLL/EXE/моделей строкой в CLI, а `-simulate` — шесть IPC-команд и пять JS-функций рендера. Теперь обе секции читают данные, а не литералы.
+The remainder of §10.1 is closed. The "fourth handwritten list" lived in `doctor`. The `-env` section duplicated the names of DLLs, EXEs, and models as a string in the CLI, and `-simulate` held six IPC commands and five JS render functions. Now both sections read data, not literals.
 
-**Что изменено:**
+**What changed:**
 
-- **`doctor -env` → `run_env_section()` (`opt/cli/main.rs`).** Никаких `["libmpv-2.dll","tdjson.dll","sing-box.exe","vpn-helper.exe"]` и пути `opt/models/discogs-maest-129e` в коде больше нет: секция итерирует `registry::all_modules()` → `Module::dependencies()` и для каждого `DynamicLibrary` / `Executable` / `ModelAsset` / `WindowsTask` делает presence-проверку через `paths::resolve_binary` / `resolve_asset` / `schtasks`. Severity из манифеста решает FAIL против WARN. Попутно это нашло незаявленное в старом списке `telegram:byedpi` (`ciadpi.exe`, Optional) — старый хардкод его просто не видел. Блок `.env` и `scheduled tasks` остался (это не зависимости модулей), плюс кросс-проверка: задача из манифеста, которой нет в `SCHEDULER_TASKS`, даёт `[WARN] … is not managed by 'udtk tasks'`.
-- **`doctor -simulate`, шаги 1–5 → инвентарь (`core/kernel/command_inventory.rs`).** Новые `SIMULATE_PING` / `SIMULATE_LOG_STATS` / `SIMULATE_LOGS` / `SIMULATE_WIDGET_CONFIG` (константы-алиасы `.name`) и таблица `SIMULATE_PROBES` (`vpn_status`, `telegram_status`, обе read-only). `run_simulation`, `run_ping_check`, `cdp_port`, `logs_cmd` и хинт `shot` ссылаются на них — переименование команды в инвентаре больше не оставляет висячих литералов. Тест `simulate_probes_name_real_socket_commands`: каждый проб называет существующую сокетную read-only команду с валидным JSON-объектом аргументов.
-- **`doctor -simulate`, шаг 6 (CDP) → `metadata.json` (`simulate`).** Точки входа объявлены владельцами: `modules/{clock,glyph-bar,mp3-player,telegram}/ui/metadata.json` получили `simulate: {module, function, sandbox}`, для `vpn` и `explorer` файлы заведены (у explorer секции нет — рендерится иначе, и это нормально: отсутствие секции = «не участвует в пробе»). CLI (`simulate_targets()`) собирает их из чекаута / `toolchain/dist` / каталога установки, сортирует по id и генерирует один generic-harness: цикл `import('../modules/<id>/<file>')` → `sandbox.innerHTML` → `await fn(sandbox, 'simulation-<id>')`. Значения из метаданных экранируются под однокавычечный JS-литерал. Пустой набор даёт `[WARN]`, а не молчаливый успех.
-- **Ворота сборки (`toolchain/build.rs::lint_simulate_metadata`).** Проверяет: каждая `simulate`-секция называет существующий JS-файл, файл определяет функцию; хотя бы одна секция объявлена; в production-коде `opt/cli/main.rs` (до `#[cfg(test)]`) нет литералов `renderClock` / `initVpnPanel` / `renderMusicPlayer` / `renderGlyphBar` / `renderTelegramWidget`. Тестовые ассёрты называют их намеренно — линту обрезан `#[cfg(test)]`-хвост. Без serde в build-зависимостях: поля вытаскиваются ручным парсером.
-- **Тесты CLI:** `simulate_targets_come_from_metadata` (пять функций находятся через discovery), `env_section_lists_manifest_dependencies` (каждый `mod:dep:id` из манифеста есть в отчёте `-env`).
+- **`doctor -env` → `run_env_section()` (`opt/cli/main.rs`).** There are no longer any lists like `["libmpv-2.dll","tdjson.dll","sing-box.exe","vpn-helper.exe"]`, or the path `opt/models/discogs-maest-129e`, in the code. The section iterates `registry::all_modules()` → `Module::dependencies()`. For each `DynamicLibrary` / `Executable` / `ModelAsset` / `WindowsTask` it does a presence check through `paths::resolve_binary` / `resolve_asset` / `schtasks`. The severity from the manifest decides FAIL against WARN. Along the way it found `telegram:byedpi` (`ciadpi.exe`, Optional), which the old list did not declare, so the old hardcode simply did not see it. The `.env` block and `scheduled tasks` remained, since they are not module dependencies. In addition, there is a cross-check: a task from the manifest that is missing from `SCHEDULER_TASKS` yields `[WARN] … is not managed by 'udtk tasks'`.
+- **`doctor -simulate`, steps 1–5 → the inventory (`core/kernel/command_inventory.rs`).** New `SIMULATE_PING` / `SIMULATE_LOG_STATS` / `SIMULATE_LOGS` / `SIMULATE_WIDGET_CONFIG` (alias constants for `.name`) and a table `SIMULATE_PROBES` (`vpn_status`, `telegram_status`, both read-only). `run_simulation`, `run_ping_check`, `cdp_port`, `logs_cmd`, and the `shot` hint refer to them. Renaming a command in the inventory no longer leaves dangling literals. The test `simulate_probes_name_real_socket_commands` checks that every probe names an existing read-only socket command with a valid JSON object of arguments.
+- **`doctor -simulate`, step 6 (CDP) → `metadata.json` (`simulate`).** The entry points are declared by their owners. `modules/{clock,glyph-bar,mp3-player,telegram}/ui/metadata.json` received `simulate: {module, function, sandbox}`. Files were created for `vpn` and `explorer`. Explorer has no section, since it renders differently. This is normal: the absence of a section means "does not take part in the probe". The CLI (`simulate_targets()`) collects the entries from the checkout, `toolchain/dist`, or the install directory, sorts them by id, and generates one generic harness: a loop `import('../modules/<id>/<file>')` → `sandbox.innerHTML` → `await fn(sandbox, 'simulation-<id>')`. Values from the metadata are escaped into a single-quoted JS literal. An empty set gives `[WARN]`, not a silent success.
+- **Build gate (`toolchain/build.rs::lint_simulate_metadata`).** It checks that each `simulate` section names an existing JS file, that the file defines the function, and that at least one section is declared. It also checks that the production code of `opt/cli/main.rs` (before `#[cfg(test)]`) has no literals `renderClock` / `initVpnPanel` / `renderMusicPlayer` / `renderGlyphBar` / `renderTelegramWidget`. The test assertions name them on purpose, and the lint cuts off the `#[cfg(test)]` tail. There is no serde in the build dependencies: the fields are extracted with a hand-written parser.
+- **CLI tests:** `simulate_targets_come_from_metadata` (the five functions are found through discovery), and `env_section_lists_manifest_dependencies` (every `mod:dep:id` from the manifest appears in the `-env` report).
 
-**Проверено:** `cargo test --workspace -j 1` — всё зелёное (CLI 17/17, ядро 41/41, включая новый `simulate_probes_name_real_socket_commands`); `cargo check --bins` — ноль предупреждений; `cargo build --bins` (debug) + `udtk doctor -env` — `ALL CHECKS PASSED` с построчными `mod:dep:id`; `udtk doctor -unknown` — exit 2. Живой `-simulate` с CDP не прогонялся (приложение не было запущено) — следующий заход с поднятым приложением должен подтвердить паритет проб с прежним выводом.
+**Verified:** `cargo test --workspace -j 1` is all green (CLI 17/17, kernel 41/41, including the new `simulate_probes_name_real_socket_commands`). `cargo check --bins` has zero warnings. `cargo build --bins` (debug) plus `udtk doctor -env` gives `ALL CHECKS PASSED` with line-by-line `mod:dep:id`. `udtk doctor -unknown` exits with 2. A live `-simulate` with CDP was not run, because the app was not running. The next session with the app up must confirm the parity of the probes with the previous output.
 
-**Честные границы:** `-env` — presence-only близнец глубокой фазы `-modules` (PE-валидация, смоук-пробы — там же, из того же манифеста); `SCHEDULER_TASKS`/`OBSOLETE_TASKS` остались захардкожены осознанно — это знание CLI про установку, а не про модули, но дрейф против манифеста теперь виден как WARN; `help --json` для `cli_commands` — по-прежнему рукописный массив (app-половина — из инвентаря).
+**Honest limits:** `-env` is a presence-only twin of the deep `-modules` phase. PE validation and smoke probes live there, from the same manifest. `SCHEDULER_TASKS`/`OBSOLETE_TASKS` remain hardcoded on purpose. This is the CLI's knowledge about the installation, not about the modules, and the drift against the manifest is now visible as a WARN. `help --json` for `cli_commands` is still a handwritten array. The app half comes from the inventory.

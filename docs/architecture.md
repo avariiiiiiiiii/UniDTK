@@ -1,327 +1,346 @@
-# UniDTK Architecture — агентская спецификация
+# UniDTK Architecture — agent specification
 
-> **Навигация:** [← UniDTK Master MOC](00_master.md) | [Журнал сессий (1–112+)](sessions.md) | [GPUI Дорожная карта](gpui_transition.md) | [CLI Мост](cliudtk.md)
+> **Navigation:** [← UniDTK Master MOC](00_master.md) | [Session log (1–112+)](sessions.md) | [GPUI roadmap](gpui_transition.md) | [CLI bridge](cliudtk.md)
 
+> **Audience:** AI agents (assistants) working on this repository. **For humans:** the Kanban board `docs/kanban.md` (Obsidian). **Status:** living document — update it on every architectural decision. **Repo:** `C:/Users/admin/Documents/GitHub/shell` (Tauri + Rust backend + vanilla JS frontend).
 
-> **Для кого:** агенты (ИИ-ассистенты), работающие над этим репозиторием.
-> **Для человека:** канбан-доска `docs/kanban.md` (Obsidian).
-> **Статус:** живой документ — обновлять при каждом архитектурном решении.
-> **Репо:** `C:/Users/admin/Documents/GitHub/shell` (Tauri + Rust бэкенд + vanilla JS фронт).
->
-> **⚠ Источник истины.** При противоречии с `AGENTS.md` и фактическим кодом приоритет имеет **`AGENTS.md`** (§10 «Проектные приложения», раздел *shell / unidtk*) и исходный код. Нормативные разделы ниже (§1–§7) приведены к текущей структуре; историю сессий (§14+) не переписываем.
+> **⚠ Source of truth.** If this file conflicts with `AGENTS.md` and the actual code, **`AGENTS.md`** (§10 "Project applications", section *shell / unidtk*) and the source code take precedence. The normative sections below (§1–§7) are brought up to the current structure; the session history (§14+) is not rewritten.
+
+> **Documentation principle.** Documentation is written in English and is low level, like the Rust Book: it teaches the mechanism step by step, what happens on the machine and why. The book is README.md and the links in it. `udtk doc` opens it, as `rustup doc` opens the Rust documentation.
 
 ---
 
-## 0. Карта расхождений: легаси → актуальное
+## 0. Legacy-to-current map
 
-Разделы ниже уже приведены к актуальному виду, но в истории сессий и части внешних заметок встречается старое именование. Таблица — быстрый референс, чтобы не «чинить» код под старые доки:
+The sections below are already in current form, but the session history and some external notes use old names. This table is a quick reference so that code is not "fixed" to match old docs.
 
-| Легаси-терм | Актуально | Файл-источник истины |
+| Legacy term | Current | Source of truth |
 |---|---|---|
-| `shell.exe` / бинарник `shell` | `unidtk.exe` + `udtk.exe` + `vpn-helper.exe` | `core/kernel/main.rs`, `opt/cli/main.rs`, `modules/vpn/helper/main.rs` |
-| `backend/`, `frontend/` | `core/{api,kernel,ui}` + `modules/<id>/{rust,ui}` | корень репо |
-| контракт `shell-api` | `unidtk-api` | `core/api` |
-| крейты `shell-mod-<id>` | `unidtk-mod-<id>` | `toolchain/Cargo.toml`, `core/kernel/registry.rs` |
+| `shell.exe` / binary `shell` | `unidtk.exe` + `udtk.exe` + `vpn-helper.exe` | `core/kernel/main.rs`, `opt/cli/main.rs`, `modules/vpn/helper/main.rs` |
+| `backend/`, `frontend/` | `core/{api,kernel,ui}` + `modules/<id>/{rust,ui}` | repo root |
+| contract `shell-api` | `unidtk-api` | `core/api` |
+| crates `shell-mod-<id>` | `unidtk-mod-<id>` | `toolchain/Cargo.toml`, `core/kernel/registry.rs` |
 | `shell.redb`, `shell_logs.redb` | `unidtk.redb`, `unidtk_logs.redb` (`%LOCALAPPDATA%\UniDTK`) | `core/kernel/unidtk_db.rs`, `log_store.rs` |
-| Пути `frontend/…` | `core/ui/…` и `modules/<id>/ui/…` | `core/ui/*` |
-| Lua / мини-скрипты-модули | нет (только Rust-модули) | — |
+| Paths `frontend/…` | `core/ui/…` and `modules/<id>/ui/…` | `core/ui/*` |
+| Lua / mini-script modules | none (Rust modules only) | — |
 | `shell build/dev/doctor/…` | `udtk build/doctor/invoke/logs/tasks/shot/gui/…` | `opt/cli/main.rs`, `docs/cliudtk.md` |
 | `C:\Program Files\Shell`, `%APPDATA%\Shell` | `C:\Program Files\UniDTK`, `%LOCALAPPDATA%\UniDTK` | `core/api/paths.rs` |
 | `expo = cubic-bezier(0.16,1,0.3,1)` | `expo = cubic-bezier(0.30,0.95,0.35,1.00)` (+ `--ease-item-in` = `0.16,1,0.3,1`) | `core/ui/motion.js`, `core/ui/styles.css :root` |
-| длительности диапазонами | точные токены: hover 120 / transient 220 / motion 300 / layout 340 ms | `core/ui/motion.js` (DURATIONS) |
+| durations as ranges | exact tokens: hover 120 / transient 220 / motion 300 / layout 340 ms | `core/ui/motion.js` (DURATIONS) |
 
 ---
 
-## 1. Принципы архитектуры
+## 1. Architecture principles
 
-### 1.1 Ядро = НЕ то, что видит пользователь
+### 1.1 The core is NOT what the user sees
 
-Ядро — **невидимая инфраструктура**, на которой работает всё видимое. Проверка «ядро или модуль»: **«если я это выключу — шелл перестанет быть шеллом?»**
+The core is **invisible infrastructure** that everything visible runs on. Test for "core or module": **"If I turn this off, does the shell stop being a shell?"**
 
-**Ядро (невидимое, всегда):**
-- Каркас: окна, оверлеи, layout, жизненный цикл (включая привязку окна к рабочему столу — `wallpaper`).
-- Система виджетов: загрузка, размещение, drag/resize, добавление/удаление.
-- Реестр команд + шина событий (`invoke` / `events` / `state`); физически — `core/kernel/registry.rs`, `core/kernel/events.rs`.
-- Хранилища: данные `%LOCALAPPDATA%\UniDTK\unidtk.redb` и логи `unidtk_logs.redb` (`core/kernel/unidtk_db.rs`, `core/kernel/log_store.rs`).
-- Контракт `unidtk-api` (`core/api`): трейт `Module`, сервисы (`log`/`emit`/`subscribe`/`state`), `ModuleDb`/`StoreSpec`/`StoreFactory`/`ModuleContext` и авто-выделяемая часть БД (`mods/<id>/…`).
-- Сервисный слой как платформа: FS, сеть.
+**Core (invisible, always on):**
+- Frame: windows, overlays, layout, lifecycle (including attaching the window to the desktop — `wallpaper`).
+- Widget system: loading, placement, drag/resize, add/remove.
+- Command registry + event bus (`invoke` / `events` / `state`); physically `core/kernel/registry.rs`, `core/kernel/events.rs`.
+- Storage: data in `%LOCALAPPDATA%\UniDTK\unidtk.redb` and logs in `unidtk_logs.redb` (`core/kernel/unidtk_db.rs`, `core/kernel/log_store.rs`).
+- Contract `unidtk-api` (`core/api`): `Module` trait, services (`log`/`emit`/`subscribe`/`state`), `ModuleDb`/`StoreSpec`/`StoreFactory`/`ModuleContext`, and the automatically allocated part of the DB (`mods/<id>/…`).
+- Service layer as a platform: FS, network.
 
-**Всё видимое = модуль (можно выключить):**
-- Эксплорер, Telegram, VPN, плеер (`mp3-player`), виджеты, глиф-бар.
+**Everything visible = a module (can be turned off):**
+- Explorer, Telegram, VPN, player (`mp3-player`), widgets, glyph bar.
 
-> **Уточнение (сессия 45).** Раньше хранилище и логи физически лежали внутри модуля музыки, и ядро тянуло модуль только чтобы открыть собственную базу — то есть музыка была де-факто ядром. В сессии 43 хранилища переехали в ядро, поэтому «музыка — такой же модуль, как остальные» стало правдой, а не декларацией. Аудио (захват звука для дуг) — тоже не сервис ядра, а часть плеера.
+> **Clarification (session 45).** Storage and logs used to live physically inside the music module, so the kernel pulled that module in only to open its own database — music was de facto core. In session 43 storage moved into the core, so "music is just another module" became true rather than a declaration. Audio capture (for the arcs) is not a core service either; it is part of the player.
 
-**Кто правит ядро:** только автор / PR-контрибьюторы. **Кто правит модули:** любой пользователь (через API/меню/ИИ/CLI).
+**Who edits the core:** only the author / PR contributors. **Who edits modules:** any user (via API, menu, AI, or CLI).
 
-### 1.2 Меню настроек = часть ядра (не модуль)
+### 1.2 The settings menu is part of the core (not a module)
 
-Меню настроек **нельзя выключить** — это «панель управления» шеллом. Меню решает:
-- какие модули включены/выключены;
-- как работают анимации (ползунки, единая база);
-- какие стили/тема;
-- как работает ИИ и **какой ИИ подключён** (выбор провайдера).
+The settings menu **cannot be turned off** — it is the shell's control panel. The menu decides:
+- which modules are enabled or disabled;
+- how animations behave (sliders, one shared base);
+- which style/theme is active;
+- how the AI works and **which AI is connected** (provider choice).
 
-Управляющий слой во **фронтенде ядра**: `core/ui/menu.js` + `menu.css`, `#menuContainer` в `core/ui/index.html` — боковая панель справа (~420 px), разделы «Стол / Папки / Вид» и вид VPN. Меню управляет модулями через команды ядра.
+The control layer lives in the **core frontend**: `core/ui/menu.js` + `menu.css`, and `#menuContainer` in `core/ui/index.html` — a right-hand side panel (~420 px) with sections "Desk / Folders / Look" and the VPN view. The menu manages modules through core commands.
 
-### 1.3 Обновление ядра не ломает модули
+### 1.3 Core updates do not break modules
 
-Модули держатся за **стабильный API**, а не за внутренности ядра. ИИ (встроенный) тоже держится за тот же API. Правило: **ИИ правит модулями/конфигами/стилями, но НЕ ядром** (вариант А) — иначе обновления ломают всё.
+Modules depend on a **stable API**, not on core internals. The built-in AI also uses the same API. Rule: **the AI edits modules, configs, and styles, but NOT the core** (option A) — otherwise updates break everything.
 
 ---
 
-## 2. Слои архитектуры
+## 2. Architecture layers
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        SHELL (ядро)                          │
+│                        SHELL (core)                         │
 │  ┌───────────────┬────────────────┬──────────────────────┐  │
-│  │  Каркас        │  Реестр команд  │  Единая БД (redb)    │  │
-│  │  окна/оверлеи  │  + шина событий  │  WIDGET/EXPLORER/   │  │
-│  │  layout/модули │  (invoke/events) │  TELEGRAM/VPN/LOGS  │  │
-│  └───────┬────────┴────────┬────────┴──────────┬──────────┘  │
-│          │                 │                   │             │
-│  ┌───────▼────────┐  ┌─────▼──────┐  ┌─────────▼──────────┐  │
-│  │ Tauri-мост     │  │ CLI-мост   │  │ ИИ-мост (MCP)      │  │
-│  │ invoke/listen  │  │ build/dev/ │  │ модули/стили/      │  │
-│  │ emit + redb    │  │ mods/theme/│  │ настройки/логи     │  │
+│  │  Frame         │  Command reg.  │  Unified DB (redb)   │  │
+│  │  windows/      │  + event bus   │  WIDGET/EXPLORER/    │  │
+│  │  overlays/     │  (invoke/      │  TELEGRAM/VPN/LOGS   │  │
+│  │  layout/modules│   events)      │                      │  │
+│  └───────┬────────┴────────┬───────┴──────────┬───────────┘  │
+│          │                 │                  │              │
+│  ┌───────▼────────┐  ┌─────▼──────┐  ┌────────▼───────────┐  │
+│  │ Tauri bridge   │  │ CLI bridge │  │ AI bridge (MCP)    │  │
+│  │ invoke/listen  │  │ build/dev/ │  │ modules/styles/    │  │
+│  │ emit + redb    │  │ mods/theme/│  │ settings/logs      │  │
 │  │                │  │ ai/doctor  │  │                    │  │
-│  └───────┬────────┘  └─────┬──────┘  └─────────┬──────────┘  │
-│          │                 │                   │             │
-│  ┌───────▼─────────────────▼───────────────────▼──────────┐  │
-│  │           МОДУЛЬНЫЙ API (стабильный контракт)            │  │
+│  └───────┬────────┘  └─────┬──────┘  └────────┬───────────┘  │
+│          │                 │                  │              │
+│  ┌───────▼─────────────────▼──────────────────▼───────────┐  │
+│  │           MODULE API (stable contract)                  │  │
 │  │   invoke(cmd) · events.subscribe · db.get/set · ui      │  │
-│  │   + grants (белый список разрешений из mod.toml)        │  │
-│  └───────┬─────────────────┬───────────────────┬──────────┘  │
-│          │                 │                   │             │
+│  │   + grants (permission allowlist from mod.toml)         │  │
+│  └───────┬─────────────────┬──────────────────┬───────────┘  │
+│          │                 │                  │              │
 │  ┌───────▼──────┐  ┌───────▼──────┐  ┌────────▼───────────┐  │
-│  │ Lua-модули    │  │ Rust-модули  │  │ JS-виджеты          │  │
-│  │ (без сборки,  │  │ (автосборка) │  │ (frontend/widgets/  │  │
-│  │  hot-reload)  │  │              │  │  <id>/widget.js)    │  │
-│  └───────────────┘  └──────────────┘  └────────────────────┘  │
+│  │ Lua modules  │  │ Rust modules │  │ JS widgets         │  │
+│  │ (no build,   │  │ (auto-build) │  │ (frontend/widgets/ │  │
+│  │  hot-reload) │  │              │  │  <id>/widget.js)   │  │
+│  └──────────────┘  └──────────────┘  └────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
-   Внешние сервисы (бандл в установщик):
-   libmpv · sing-box · yt-dlp — управляются как сервисные процессы
+   External services (bundled into the installer):
+   libmpv · sing-box · yt-dlp — run as service processes
 ```
 
-**Клиенты одного API (все равны):** UI (фронт), CLI, встроенный ИИ, Lua-модули, Rust-модули. Ядро не знает, кто к нему стучится.
+**Clients of one API (all equal):** UI (frontend), CLI, built-in AI, Lua modules, Rust modules. The core does not know who is calling it.
 
 ---
 
-## 3. Модули
+## 3. Modules
 
-### 3.1 Способ встраивания (актуальный)
+### 3.1 Embedding method (current)
 
-| Способ | Бэкенд | Фронт | Пересборка | Перезапуск | Работа в релизе |
+| Method | Backend | Frontend | Rebuild | Restart | Works in release |
 |---|---|---|---|---|---|
-| **Rust-модуль** (основной) | Rust-крейт (`unidtk-mod-<id>`) | JS-виджет (`ui/`) | да | да | да |
-| **UI-only виджет** | нет (только `clock` сегодня) | JS-виджет | да (ресурсы) | да | да |
+| **Rust module** (main) | Rust crate (`unidtk-mod-<id>`) | JS widget (`ui/`) | yes | yes | yes |
+| **UI-only widget** | none (only `clock` today) | JS widget | yes (resources) | yes | yes |
 
-Lua/мини-скриптов в новой архитектуре нет — это легаси. Модули объединяют `rust/` (бэкенд) и `ui/` (фронт) в одном вертикальном срезе `modules/<id>/`.
+Lua/mini-scripts are gone from the new architecture — they are legacy. Modules combine `rust/` (backend) and `ui/` (frontend) in one vertical slice `modules/<id>/`.
 
-### 3.2 Формат модуля (актуальный)
+### 3.2 Module format (current)
 
 ```
 modules/<id>/
-  rust/           # крейт unidtk-mod-<id> (lib.rs), тянет только unidtk-api
-  ui/             # фронт-виджет: widget.js + metadata.json + icon.svg
-  helper/         # опц. второй GUI-бинарник (напр. vpn-helper.exe у vpn)
+  rust/           # crate unidtk-mod-<id> (lib.rs), pulls in only unidtk-api
+  ui/             # frontend widget: widget.js + metadata.json + icon.svg
+  helper/         # optional second GUI binary (e.g. vpn-helper.exe for vpn)
 ```
 
-- Встроенные модули — в ресурсах приложения (бандлятся в релиз); пользовательских `mods/` в новом контракте пока нет (механизм перекрытия — легаси из ранней архитектуры).
-- Модуль зависит только от `unidtk-api`; с ядром общается через контракт (`Module`/`ModuleDb`/события `emit`/`subscribe`/`state`). Команды регистрируются в `core/kernel/registry.rs` (`create_module()`) и экспортируются в Tauri тонкими `#[tauri::command]`-обёртками ядра. Гейт целостности — `lint_modules_integrity()` в `toolchain/build.rs`.
+- Built-in modules live in the app resources (bundled into the release). User `mods/` directories are not part of the new contract yet (the override mechanism is legacy from the early architecture).
+- A module depends only on `unidtk-api` and talks to the core through the contract (`Module`/`ModuleDb`/events `emit`/`subscribe`/`state`). Commands are registered in `core/kernel/registry.rs` (`create_module()`) and exported to Tauri as thin `#[tauri::command]` wrappers in the core. The integrity gate is `lint_modules_integrity()` in `toolchain/build.rs`.
 
-### 3.3 Lua — **отменено**
-Lua-модули (`mlua`) из ранней архитектуры не реализованы и в текущем коде отсутствуют. Модули — только Rust.
+### 3.3 Lua — **cancelled**
 
-### 3.4 Rust-модули (актуально)
+Lua modules (`mlua`) from the early architecture were never implemented and are absent from the current code. Modules are Rust only.
 
-- Полноценный бэкенд с системным доступом. Каждый — отдельный крейт `unidtk-mod-<id>` (Cargo-зависимость, тянет только `unidtk-api`).
-- Хранилища — через `ModuleContext::store(StoreSpec)` и `ModuleDb` (`mods/<id>/…` или отдельный файл `mods/<slug>/<name>.redb` / `cache/<slug>/<name>.redb`); ядро владеет путями.
-- **НЕ делаем dylib/динамические плагины** (ABI, версии — боль). Модули — компилируемые крейты.
+### 3.4 Rust modules (current)
 
-### 3.5 Существующие модули (актуальные)
+- A full backend with system access. Each module is a separate crate `unidtk-mod-<id>` (a Cargo dependency that pulls in only `unidtk-api`).
+- Storage goes through `ModuleContext::store(StoreSpec)` and `ModuleDb` (`mods/<id>/…`, or a separate file `mods/<slug>/<name>.redb` / `cache/<slug>/<name>.redb`); the core owns the paths.
+- **We do NOT build dylib/dynamic plugins** (ABI and version problems). Modules are compiled crates.
 
-- Ядро фронта: `core/ui/unidtk-core.js`, `core/ui/renderer.js` (бутстрап), `core/ui/widgets-api.js`, `core/ui/motion.js`, `core/ui/theme.js`, `core/ui/surface-manager.js`, `core/ui/unidtk-bridge.js`.
-- Модули (ромки `modules/<id>/{rust,ui}`): `clock` (ui-only), `explorer`, `glyph-bar`, `mp3-player`, `telegram`, `vpn`.
+### 3.5 Existing modules (current)
+
+- Frontend core: `core/ui/unidtk-core.js`, `core/ui/renderer.js` (bootstrap), `core/ui/widgets-api.js`, `core/ui/motion.js`, `core/ui/theme.js`, `core/ui/surface-manager.js`, `core/ui/unidtk-bridge.js`.
+- Modules (slices `modules/<id>/{rust,ui}`): `clock` (ui-only), `explorer`, `glyph-bar`, `mp3-player`, `telegram`, `vpn`.
+
+### 3.6 Lifecycle and states
+
+- `Module::suspend` and `Module::resume` (`core/api/src/lib.rs`) switch a module on or off in the running app. By default `suspend` calls `shutdown` with a 1500 ms budget, and `resume` calls `init` with a fresh context. The app keeps running, so these must not set global exit latches.
+- `set_module_enabled {id, enabled}` is the only command for this (`apply_module_enabled` in `core/kernel/main.rs`). It switches the module first and only then writes the stored disabled list, so a failure leaves both unchanged. Switches are serialized by `MODULE_SWITCH`. A module that has been off since startup was never built, so it is built from scratch when enabled.
+- Each module has one state (`moduleState` in `core/ui/menu.js`): `off`; `background` (the backend keeps running, the card is hidden — only for `backend: true`); `desk` (the card is on the desk). Modules without a backend have only `off` and `desk`.
+- metadata.json: `pack {id,label}` groups modules in the menu; `backend: true` marks a module whose backend can run hidden; `settingsView` names the view opened by "Configure…" in the menu.
+- `lint_module_contracts()` in `toolchain/build.rs` checks these fields at build time and fails the build on errors.
+
+### 3.7 Nesting (`core/ui/nesting.js`)
+
+- A widget can live inside another widget instead of on the desk. Two metadata.json fields decide it: `container` (the widget hosts others; folders always host) and `embeddable: {module, render}` (the file and export that draw the compact form, which differs from the desk card).
+- `canNest(child, host)` is the single gate. It rejects a widget inside itself, a non-container host, a container as child, and a child without `embeddable`.
+- One level deep: a container cannot be nested, so cycles cannot exist. There is no limit on the number of children.
+- `config.nested` (`{hostId: [childId]}`) is the user's intent and is never trimmed. `effectiveNested(stored, widgets)` computes what applies now. A child whose host is absent (module off, metadata read failed) is left out and shows on the desk until the host returns. Each child is counted once; the first host wins.
 
 ---
 
-## 4. API (стабильный контракт)
+## 4. API (stable contract)
 
-### 4.1 Команды (RPC)
+### 4.1 Commands (RPC)
 
-- `invoke(cmd, args)` — синхронный запрос-ответ. Модуль вызывает только то, что разрешено grants.
-- Модульные команды: `mod_<id>_<cmd>` в общий реестр.
-- **Идемпотентность:** команды должны безопасно повторяться (UI/CLI/ИИ/Lua зовут из разных контекстов).
+- `invoke(cmd, args)` — synchronous request/response. A module calls only what its grants allow.
+- Module commands: `mod_<id>_<cmd>` in the shared registry.
+- **Idempotence:** commands must be safe to repeat (UI, CLI, AI, and Lua call them from different contexts).
 
-### 4.2 События (pub/sub)
+### 4.2 Events (pub/sub)
 
 - `events.subscribe(type, fn)` / `events.emit(type, payload)`.
-- Ядро публикует («трек сменился», «сообщение пришло», «виджет добавлен»); модуль подписывается. Модуль может и сам публиковать.
+- The core publishes ("track changed", "message arrived", "widget added"); a module subscribes. A module may publish too.
 
-### 4.3 Состояние (данные)
+### 4.3 State (data)
 
-- `db.get/set` в redb; неймспейс модуля `mods/<id>/...`.
-- Единая БД `ShellDatabase` (redb): `WIDGET_POSITIONS`, `WIDGET_SETTINGS`, `EXPLORER_TABS`, `TELEGRAM_*`, `VPN_*`, `TRACKS`, `AI_*`, `LOGS`.
+- `db.get/set` in redb; module namespace `mods/<id>/...`.
+- Unified DB `ShellDatabase` (redb): `WIDGET_POSITIONS`, `WIDGET_SETTINGS`, `EXPLORER_TABS`, `TELEGRAM_*`, `VPN_*`, `TRACKS`, `AI_*`, `LOGS`.
 
-### 4.4 UI-контракт
+### 4.4 UI contract
 
-- Модуль несёт свой JS-виджет (`widget.js`), регистрирует команды как `mod_<id>_<cmd>`.
+- A module ships its JS widget (`widget.js`) and registers commands as `mod_<id>_<cmd>`.
 
-### 4.5 Версионирование
+### 4.5 Versioning
 
-- v1, совместимость при обновлении ядра. Меняется редко.
+- v1, compatible across core updates. Changes rarely.
 
 ---
 
-## 5. Мосты
+## 5. Bridges
 
-### 5.1 Tauri-мост (есть)
-`invoke` / `listen` / `emit` / redb. Ядро ↔ фронт.
+### 5.1 Tauri bridge (exists)
 
-### 5.2 Модульный мост
-Модуль ↔ ядро: `invoke`/`events`/`db` с grants.
+`invoke` / `listen` / `emit` / redb. Core ↔ frontend.
 
-### 5.3 CLI-мост
-Отдельный нативный бинарник `udtk` (`opt/cli/main.rs`, тот же идейно API; TCP IPC `127.0.0.1:26540` + нативный CDP/WebSocket).
+### 5.2 Module bridge
 
-**Команды (актуальные):**
-- `udtk build [-j N]` — единственная релизная сборка (stop → `cargo tauri build --bundles nsis` → установка в `C:\Program Files\UniDTK` → verify SHA-256 → запуск → живой IPC).
-- `udtk doctor [-kernel|-modules|-ping|-env|-check|-quick|-simulate|-all]` — диагностика (компиляция, DLL, `.env`, задачи, IPC, безопасная симуляция).
-- `udtk invoke <cmd> [json]` — read-only вызов команд ядра/модулей из манифеста; `udtk logs [--limit|--level|--source]`.
+Module ↔ core: `invoke` / `events` / `db`, with grants.
+
+### 5.3 CLI bridge
+
+A separate native binary `udtk` (`opt/cli/main.rs`, conceptually the same API; TCP IPC `127.0.0.1:26540` + native CDP/WebSocket).
+
+**Commands (current):**
+- `udtk build [-j N]` — the only release build (stop → `cargo tauri build --bundles nsis` → install into `C:\Program Files\UniDTK` → verify SHA-256 → launch → live IPC).
+- `udtk doctor [-kernel|-modules|-ping|-env|-check|-quick|-simulate|-all]` — diagnostics (compilation, DLLs, `.env`, tasks, IPC, safe simulation).
+- `udtk invoke <cmd> [json]` — read-only call of core/module commands from the manifest; `udtk logs [--limit|--level|--source]`.
 - `udtk tasks status|register|cleanup-old`, `udtk autostart`, `udtk path status|ensure`.
 - `udtk run|stop`, `udtk shot`, `udtk gui tree|click|type|press|js`, `udtk cdp-list`, `udtk help --json`.
+- `udtk doc` — renders the project book (README.md and the markdown it links to) to HTML in the cache and opens it.
 
-Подробно — `docs/cliudtk.md`; полный машиночитаемый манифест — `udtk help --json`.
+Details: `docs/cliudtk.md`; the full machine-readable manifest: `udtk help --json`.
 
-### 5.4 ИИ-мост (MCP) — статус
-Планируемый (легаси-заявка из ранней архитектуры). В текущем коде явного MCP-моста в модулях нет; ИИ правит модулями/конфигами/стилями через тот же API/CLI, но НЕ ядро. Помечено как «не реализовано / на будущее».
+### 5.4 AI bridge (MCP) — status
 
-### 5.5 Меню настроек
-См. принцип 1.2. Контракты:
-- **Позиции виджетов** (`config.positions[id]`): `x/y` + привязка к углам `anchor ∈ tl|tr|bl|br` (`ax/ay` отступ). Читает `placeOnCanvas` (`unidtk-core.js`); без `anchor` = `tl`. Угол пишется по «Готово» режима «Расставить» (снимок → «Отменить»/Esc восстанавливает всё затронутое).
-- **Ярлыки папок** (`FolderItem`: `target`, `args`, `kind`): ссылаются на реальную цель (не копии `.lnk`). Пуск, иконки, запуск — `start_menu.rs` (COM в STA); правка на столе — `folder-body.js`.
-- Необратимое выполняется сразу, отмена — тостом 5 с (`toast.js`), `alert/confirm` исключены.
+Planned (a legacy claim from the early architecture). The current code has no explicit MCP bridge in the modules. The AI edits modules, configs, and styles through the same API/CLI, but NOT the core. Marked "not implemented / future".
+
+### 5.5 Settings menu
+
+See principle 1.2. Contracts:
+- **Widget positions** (`config.positions[id]`): `x/y` plus corner anchor `anchor ∈ tl|tr|bl|br` (`ax/ay` offset). Read by `placeOnCanvas` (`unidtk-core.js`); without `anchor` it is `tl`. The corner is written on "Done" in arrange mode (snapshot → "Undo"/Esc restores everything touched).
+- **Folder shortcuts** (`FolderItem`: `target`, `args`, `kind`): they reference the real target, not `.lnk` copies. Start menu, icons, and launch — `start_menu.rs` (COM in STA); editing on the desk — `folder-body.js`.
+- Irreversible actions run at once; cancel is offered as a 5 s toast (`toast.js`). `alert`/`confirm` are excluded.
 
 ---
 
-## 6. Инструменты (внешние бинарники)
+## 6. Tools (external binaries)
 
-| Компонент | Сейчас | Решение | Тип | Лицензия |
+| Component | Now | Decision | Type | License |
 |---|---|---|---|---|
-| Lua | нет | **не используется** (Lua-модули отсутствуют в новой архитектуре; только Rust-модули) | — | — |
-| mpv | процесс | **libmpv ✅** (`libmpv-2.dll`, in-process FFI) | DLL | LGPL-2.1+ |
-| xray | Go-процесс | **сложить в sing-box, удалить xray** | бинарник | MIT |
-| yt-dlp | Python-процесс | **бандлим** (используется в `mp3-player`/sync) | бинарник | Unlicense |
+| Lua | none | **not used** (no Lua modules in the new architecture; Rust modules only) | — | — |
+| mpv | process | **libmpv ✅** (`libmpv-2.dll`, in-process FFI) | DLL | LGPL-2.1+ |
+| xray | Go process | **fold into sing-box, remove xray** | binary | MIT |
+| yt-dlp | Python process | **bundle** (used in `mp3-player`/sync) | binary | Unlicense |
 
-**Принцип:** встраиваем то, что имеет библиотечный API (libmpv); бандлим то, что не имеет (yt-dlp, sing-box). Рантаймы Go/Python **спрятаны внутри бинарников** — пользователь их не ставит.
+**Principle:** embed what has a library API (libmpv); bundle what does not (yt-dlp, sing-box). Go/Python runtimes are **hidden inside the binaries** — the user does not install them.
 
-**Доставка и проверка:** NSIS-установщик через `udtk build` кладёт в `C:\Program Files\UniDTK` (`libmpv-2.dll`, `tdjson.dll`, `sing-box.exe`, `ciadpi.exe`); целостность — `udtk doctor`.
+**Delivery and verification:** the NSIS installer built by `udtk build` puts `libmpv-2.dll`, `tdjson.dll`, `sing-box.exe`, and `ciadpi.exe` into `C:\Program Files\UniDTK`; integrity is checked by `udtk doctor`.
 
-### 6.1 sing-box (детали оценки)
-- Уже используется в коде (TUN-роутер `wallpaper-tun`, задача `ShellSingbox`).
-- xray — отдельный прокси-клиент (VLESS/Trojan, SOCKS :12908, задача `ShellXray`).
-- **Решение:** встроить vless/trojan outbound в конфиг sing-box, удалить xray целиком → один процесс, одна задача, один конфиг. Effort: Medium (~200-350 строк vpn.rs).
-- **НЕ** встраивать sing-box как Rust-crate: ядро на Go, Rust-crate нет, gomobile/C-ABI на Windows рискованно (research-пункт).
+### 6.1 sing-box (evaluation details)
 
----
-
-## 7. Стили и анимации (Theme)
-
-- **Тема-токены:** единый объект/переменные (`--dur-*`, `--ease-*`, `--r-*`, `--blur-*`, `--theme-*`, `--z-surface-*`) вместо захардкоженных значений. Источник истины — `core/ui/motion.js` (EASINGS/DURATIONS) и `core/ui/theme.js` (пресеты/слайдеры); CSS в `:root` (`core/ui/styles.css`) — только fallback.
-- **Тема:** `core/ui/theme.js` — 2 встроенных пресета (Nothing Classic, Sea Glass) + пользовательские, схема v4 (цвета, шрифты, геометрия, материал `flat|jelly`, палитра + `tintMap`, оптика; старые записи мигрируют; личная расцветка `userColors` в redb), атрибуты `<html data-material|mg-layout|avatar-color>`, zero-FOUC (pre-paint применяет кэш `paint` + `save_widget_config`→redb), событие `unidtk-theme-changed`. Пресеты меняют только appearance: позиции (x/y) — данные пользователя, размеры — дефолты пресетов, свои правки побеждают (миграция в `selectPreset`, сброс кнопкой в меню). Пресеты и настройки тем/анимаций в меню (`core/ui/menu.js`, раздел «Вид»).
-- **Единая база анимаций:** все анимации через токены; ползунки в меню (скорость Motion Scale, пресеты, reduced-motion). `motionScale` пишет `--dur-*`/`--ease-*` на `<html>` инлайн; CSS-переходы на `var(--dur-*)` наследуют шкалу. Бесконечные/loop-анимации и `linear` шкалой не масштабируются (спиннеры, пульсы).
-- **Канон easings** (только эти, из `motion.js` EASINGS): `standard` `(0.4,0,0.2,1)`, `spring` `(0.34,1.56,0.64,1)`, `expo`/`expoOut` `(0.30,0.95,0.35,1.00)`, `expoOutRev`/`surfaceExit` `(0.38,0.05,0.45,1.00)`, `smooth` `(0.25,0.1,0.25,1)`, `snap` `(0.18,1.04,0.22,1)`, `content` `(0.25,1,0.5,1)`, `itemIn` `(0.16,1,0.3,1)`.
-- **Канон длительностей** (только эти, `DURATIONS`): hover 120ms, transient 220ms, motion 300ms, layout 340ms.
-- **prefers-reduced-motion** — реализован: `core/ui/motion.js` (`initMotionSystem`, раздельные `userScale`/`currentScale`) + глобальный `@media` в `styles.css` (`0.01ms !important`), раскрывает шкалу, не затирая выбор пользователя.
+- Already used in code (TUN router `wallpaper-tun`, task `ShellSingbox`).
+- xray is a separate proxy client (VLESS/Trojan, SOCKS :12908, task `ShellXray`).
+- **Decision:** embed the vless/trojan outbound in the sing-box config and remove xray entirely → one process, one task, one config. Effort: Medium (~200–350 lines in vpn.rs).
+- **NOT** embedding sing-box as a Rust crate: the core is written in Go, there is no Rust crate, and gomobile/C-ABI on Windows is risky (research item).
 
 ---
 
-## 8. Система логов (единая БД)
+## 7. Styles and animations (Theme)
 
-- Таблица `LOGS` в redb.
-- Пишут **бэкенд** (все команды/ошибки) **И фронтенд** (console.log/ошибки через invoke).
-- Ротация: cap по размеру/времени (не разрастись бесконечно).
-- Экспорт через CLI (`udtk logs`).
-- Назначение: диагностика без «рыться в консоли»; ИИ может читать логи через API.
-
----
-
-## 9. Встроенный ИИ
-
-- **Вариант А (первая итерация):** ИИ правит только модули/конфиги/стили/токены/логи — безопасно, без пересборки. НЕ ядро.
-- **Вариант Б (потом):** ИИ может править ядро на Rust + запускать пересборку — полноценный агент-разработчик (отдельно, не сейчас).
-- **MCP-контракт:** тот же API, что у CLI/модулей.
-- **ИИ-центр (бизнес):** опенсорсный продукт + своя ИИ-база (аналог opencode/hermes).
+- **Theme tokens:** one object/set of variables (`--dur-*`, `--ease-*`, `--r-*`, `--blur-*`, `--theme-*`, `--z-surface-*`) instead of hardcoded values. Source of truth: `core/ui/motion.js` (EASINGS/DURATIONS) and `core/ui/theme.js` (presets/sliders); CSS in `:root` (`core/ui/styles.css`) is only the fallback.
+- **Theme:** `core/ui/theme.js` ships 2 built-in presets (Nothing Classic, Sea Glass) plus custom ones, schema v4 (colors, fonts, geometry, material `flat|jelly`, palette + `tintMap`, optics; old records migrate). Attributes `<html data-material|mg-layout|avatar-color>`, zero FOUC (the pre-paint applies the `paint` cache + `save_widget_config` → redb), event `unidtk-theme-changed`. Presets change only appearance: positions (x/y) are user data, sizes are preset defaults, and user edits win (migration in `selectPreset`, reset by a button in the menu). Presets and theme/animation settings are in the menu (`core/ui/menu.js`, "Look" section).
+- **Theme contract (modules):** `theme.js` and the menu name no module. A module declares its part in metadata.json: `tints [{id,label,default,role}]` (a tintable surface; `default` is a palette slot; `role` groups targets that share one color when colors are shuffled) and `lookOptions` (module settings that live in the theme). `registerThemeContracts(modules)` reads them; metadata arrives after the theme is live, so new targets are painted at that point.
+- **Contrast contract:** a theme declares `onAccentRgb` (the text color on the accent). `readableOn(surfaceHex, preferredRgb)` keeps it while contrast is at least 4.5:1 (WCAG AA); otherwise the better of white and near-black wins. A user-picked accent can therefore never make text unreadable.
+- **Per-theme colors:** user colors are kept per theme in `config.colorOverrides` (palette, tintMap, color fields). An old `userColors` record becomes the Sea Glass entry (`loadColorOverrides`).
+- **Unified animation base:** all animations use tokens; sliders in the menu (Motion Scale speed, presets, reduced-motion). `motionScale` writes `--dur-*`/`--ease-*` inline on `<html>`; CSS transitions on `var(--dur-*)` inherit the scale. Infinite/loop animations and `linear` are not scaled (spinners, pulses).
+- **Canonical easings** (only these, from `motion.js` EASINGS): `standard` `(0.4,0,0.2,1)`, `spring` `(0.34,1.56,0.64,1)`, `expo`/`expoOut` `(0.30,0.95,0.35,1.00)`, `expoOutRev`/`surfaceExit` `(0.38,0.05,0.45,1.00)`, `smooth` `(0.25,0.1,0.25,1)`, `snap` `(0.18,1.04,0.22,1)`, `content` `(0.25,1,0.5,1)`, `itemIn` `(0.16,1,0.3,1)`. **Canonical durations** (only these, `DURATIONS`): hover 120 ms, transient 220 ms, motion 300 ms, layout 340 ms.
+- **prefers-reduced-motion** is implemented: `core/ui/motion.js` (`initMotionSystem`, separate `userScale`/`currentScale`) plus a global `@media` rule in `styles.css` (`0.01ms !important`). It overrides the scale without overwriting the user's choice.
 
 ---
 
-## 10. Бизнес-модель (на будущее)
+## 8. Log system (unified DB)
 
-1. **Ручная настройка «под ключ»** — платная услуга: настройка шелла под конкретного пользователя (модули, стили, анимации, ИИ).
-2. **Свой ИИ-центр** — аналог opencode/hermes: опенсорс + своя ИИ-база/подписка; встроенный ИИ подключён к своему центру.
-3. **Экосистема модулей** — маркетплейс модулей (позже).
-
----
-
-## 11. Идеи (будущие модули)
-
-- **Терминал** — встроенный терминал как модуль.
-- **Панель задач** — как модуль.
-- **Меню пуск** — как модуль.
-- **Мульти-мессенджер** — Telegram-виджет в будущем может быть не только Telegram: WhatsApp, Discord, Slack. Единый мессенджер-модуль с разными бекендами (архитектура готова: TDLib → общий адаптер).
+- Table `LOGS` in redb.
+- Both the **backend** (all commands/errors) **and the frontend** (console.log/errors via invoke) write logs.
+- Rotation: capped by size/time (it must not grow forever). Export via CLI (`udtk logs`).
+- Purpose: diagnostics without digging through the console; the AI can read logs through the API.
 
 ---
 
-## 12. WASM — решение
+## 9. Built-in AI
 
-**WASM не используем.** Причины:
-- лишний слой (второй рантайм);
-- изоляцию уже решают Lua-песочница + Rust-модули нативно;
-- у тебя нет задачи «запускать чужой непроверенный код» — модули доверенные.
-
----
-
-## 13. Бутстрап шелла (частично)
-
-- **Tauri** — уже библиотека, ядро использует её. «Съесть» = использовать как фреймворк.
-- **Cargo** — можно встроить, но дорого (~2GB тулчейн). Сладкая точка: НЕ компилировать внутри, а (а) прекомпилировать модули заранее, (б) `shell build` для автосборки.
-- **WebView** — системный компонент (WebView2/Chromium), «съесть» нельзя. Можно только заменить на свой рендерер (wry/tao = то же, Servo/WebKit = огромно).
+- **Option A (first iteration):** the AI edits only modules, configs, styles, tokens, and logs — safe, no rebuild. NOT the core.
+- **Option B (later):** the AI may edit the Rust core and run a rebuild — a full developer agent (separate, not now).
+- **MCP contract:** the same API as CLI/modules.
+- **AI center (business):** an open-source product + its own AI knowledge base (analogue of opencode/hermes).
 
 ---
 
-## 14. Что уже сделано (история, для контекста)
+## 10. Business model (future)
 
-- **Анимации explorer → канон** (febeef4): `both`→`backwards`, дубли keyframes убраны, тайминг navigateTo починен (rAF+reflow+token), вкладки не мигают, канон-easing.
-- **Топики Telegram** (a6f6dc9): колонка топиков (46px рейл + 200px топики + thread), message_thread_id в fetch/send/older, isForum маппинг.
-- **VPN-скроллбар** (0f94917).
-- **AI DJ «0 tracks»** (711b588): track_count = библиотека, + analyzed_count.
-- **mpv не играет** (ed88bfc): невалидный `--audio-fallback` убран, try_wait после spawn, ошибки в UI, resolve_mpv находит MPV Player.
-- **Explorer overlay симметричен** (260ms spring).
-- **CLI-мост** (fa87b16): IPC-сервер 127.0.0.1:26540 + бинарник `shell` (backend/cli) — player control, tracks, logs, ai_dj; CDP через node-хелпер для eval/screenshot. DevDebug.vbs включает remote debugging (9222).
-- **libmpv встроен** (3bc28ab): плеер переведён с внешнего mpv.exe на in-process libmpv (raw-dylib FFI, без import lib). Реальные pause/seek/volume/time-pos/EOF. libmpv-2.dll бандлится в ресурсы. Тесты libmpv.rs (2).
-- **Единая система логов** (f59188b): таблица LOGS в redb (по образцу noto), backend + frontend пишут через канал, ротация (7 дней / 5000), команды log_list/log_clear/log_stats/frontend_log.
-- **Распил renderer.js** (1258682): renderer.js = 9 строк, core.js + widgets/<id>/widget.js.
-- **ESC → ядро** (рабочая): глобальный обработчик Escape только в core.js (`collapseAllShellWidgets` → контекст-меню телеги, лайтбоксы, explorer, телеграм-виджеты, музыка, папки). Из telegram/widget.js убран дублирующий глобальный `keydown`-Escape; локальные keydown на полях ввода остались в модуле. Бэкенд (`input.rs`) по-прежнему эмитит `escape-pressed` в ядро.
+1. **Hand-made setup** — a paid service: configuring the shell for a specific user (modules, styles, animations, AI).
+2. **Own AI center** — an analogue of opencode/hermes: open source + own AI knowledge base/subscription; the built-in AI connects to it.
+3. **Module ecosystem** — a module marketplace (later).
 
 ---
 
-## 15. Техдолг
+## 11. Ideas (future modules)
 
-- Мёртвый код телеграма: `activeTopicThreadId`, ветка `data-topic-id`, `hasBackend`.
-- Гигиена репо: `Cargo.lock`, `Server - SSH.cmd` (незакоммиченные), `.obsidian/` (решить: коммитить или gitignore).
-- `.tmp_analyze.py`, `.tmp_split.py` — удалены (мусор от воркера).
-- Синхронизация плеера не отслеживает дочерние `yt-dlp`-процессы: при выходе активная загрузка остаётся сиротой (не регресс; при следующей доработке `shutdown` стоит завести реестр `Child` и гасить их).
-
----
+- **Terminal** — an embedded terminal as a module.
+- **Taskbar** — as a module.
+- **Start menu** — as a module.
+- **Multi-messenger** — the Telegram widget may later support WhatsApp, Discord, Slack too. One messenger module with different backends (the architecture allows it: TDLib → common adapter).
 
 ---
 
-## 16. История инженерных сессий
+## 12. WASM — decision
+
+**WASM is not used.** Reasons:
+- an extra layer (a second runtime);
+- isolation is already handled by the Lua sandbox + native Rust modules;
+- there is no need to run third-party untrusted code — modules are trusted.
+
+---
+
+## 13. Shell bootstrap (partial)
+
+- **Tauri** is already a library the core uses. "Eating" it means using it as the framework.
+- **Cargo** can be embedded, but it is expensive (~2 GB toolchain). The sweet spot: do NOT compile inside the app; instead (a) precompile modules ahead of time, (b) use `shell build` for automatic builds.
+- **WebView** is a system component (WebView2/Chromium) and cannot be "eaten". It can only be replaced with a custom renderer (wry/tao is the same thing; Servo/WebKit is huge).
+
+---
+
+## 14. What is already done (history, for context)
+
+- **Explorer animations → canon** (febeef4): `both` → `backwards`, duplicate keyframes removed, `navigateTo` timing fixed (rAF + reflow + token), tabs no longer flicker, canonical easing.
+- **Telegram topics** (a6f6dc9): topic column (46 px rail + 200 px topics + thread), `message_thread_id` in fetch/send/older, isForum mapping.
+- **VPN scrollbar** (0f94917); **Explorer overlay symmetric** (260 ms spring).
+- **AI DJ "0 tracks"** (711b588): track_count = library, + analyzed_count.
+- **mpv does not play** (ed88bfc): invalid `--audio-fallback` removed, try_wait after spawn, errors shown in UI, resolve_mpv finds MPV Player.
+- **CLI bridge** (fa87b16): IPC server 127.0.0.1:26540 + binary `shell` (backend/cli) — player control, tracks, logs, ai_dj; CDP via a node helper for eval/screenshot. DevDebug.vbs enables remote debugging (9222).
+- **libmpv embedded** (3bc28ab): the player moved from an external mpv.exe to in-process libmpv (raw-dylib FFI, no import lib). Real pause/seek/volume/time-pos/EOF. `libmpv-2.dll` bundled into resources. libmpv.rs tests (2).
+- **Unified logging** (f59188b): table LOGS in redb (modeled on noto), backend + frontend write through a channel, rotation (7 days / 5000), commands log_list/log_clear/log_stats/frontend_log.
+- **renderer.js split** (1258682): renderer.js = 9 lines, core.js + widgets/<id>/widget.js.
+- **ESC → core** (working): a global Escape handler lives only in core.js (`collapseAllShellWidgets` → Telegram context menu, lightboxes, explorer, Telegram widgets, music, folders). The duplicate global `keydown` Escape was removed from telegram/widget.js; local keydown handlers on input fields remain in the module. The backend (`input.rs`) still emits `escape-pressed` to the core.
+
+---
+
+## 15. Tech debt
+
+- Dead Telegram code: `activeTopicThreadId`, the `data-topic-id` branch, `hasBackend`.
+- Repo hygiene: `Cargo.lock`, `Server - SSH.cmd` (uncommitted), `.obsidian/` (decide: commit or gitignore).
+- `.tmp_analyze.py`, `.tmp_split.py` — removed (leftovers from a worker).
+- The player sync does not track child `yt-dlp` processes: on exit an active download is left orphaned (not a regression; at the next change, `shutdown` should get a registry of `Child` processes and kill them).
+
+---
+
+## 16. Engineering session history
 
 > [!NOTE]
-> **Бортовой журнал разработки:** Полная летопись всех инженерных сессий (Сессии 1–112+), детальные post-mortem расследования, отладка Win32-рантайма, замеры метрик и история изменений вынесены в отдельный специализированный журнал:
+> **Session log:** the full record of all engineering sessions (Sessions 1–112+), detailed post-mortems, Win32 runtime debugging, metric measurements, and change history have been moved to 📖 **[`docs/sessions.md`](sessions.md)**.
+
 >
-> 📖 **[`docs/sessions.md`](sessions.md)**
->
-> Документ `architecture.md` поддерживается исключительно как **нормативная архитектурная спецификация** ядра, контракта `unidtk-api`, хранилищ `redb` и системных стандартов оболочки.
+> `architecture.md` is maintained solely as the **normative architecture specification** of the core, the `unidtk-api` contract, the `redb` stores, and the shell's system standards.

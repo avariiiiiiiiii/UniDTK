@@ -1,133 +1,133 @@
-# Переход UniDTK с Chromium WebView2 на нативный GPUI (План, Статус, Дорожная карта)
+# Migrating UniDTK from Chromium WebView2 to Native GPUI (Plan, Status, Roadmap)
 
-> **Статус документа:** Активный инженерный трекер миграции графической оболочки рабочего стола.  
-> **Целевая ветка:** `feature/gpui-desktop`  
-> **Текущий этап:** Завершен Gate 0, реализован Gate 1 (модульная архитектура, дизайн-система Nothing OS, виджеты `clock` и `glyph-bar`, динамический многозональный Hit-Testing).
+> **Document status:** Active engineering tracker for the migration of the desktop graphics shell.  
+> **Target branch:** `feature/gpui-desktop`  
+> **Current stage:** Gate 0 completed, Gate 1 implemented (modular architecture, Nothing OS design system, `clock` and `glyph-bar` widgets, dynamic multi-zone hit-testing).
 
 ---
 
-## 1. Зачем мы переходим: Сравнение WebView2 и GPUI
+## 1. Why we are moving: WebView2 vs GPUI
 
-Оболочка UniDTK создавалась как легковесная альтернатива ресурсоёмким решениям. Использование WebView2 позволило быстро собрать интерфейс на HTML/CSS/JS, однако среда Chromium несёт фундаментальные накладные расходы:
+The UniDTK shell was built as a lightweight alternative to resource-heavy solutions. WebView2 made it fast to build the interface in HTML/CSS/JS, but the Chromium runtime carries fundamental overhead:
 
-| Метрика / Критерий | Chromium WebView2 (Текущий релиз) | GPUI Native (Новая архитектура) | Выигрыш / Эффект |
+| Metric / Criterion | Chromium WebView2 (current release) | GPUI Native (new architecture) | Gain / Effect |
 | :--- | :--- | :--- | :--- |
-| **Working Set RAM** | **400–450 МБ** (6 процессов `msedgewebview2.exe`) | **~50–60 МБ** (1 процесс) | **Сокращение памяти в 7–8 раз** |
-| **Количество процессов ОС** | 6–8 процессов (Брокер, Рендерер, GPU, Network) | **Ровно 1 процесс** | Исключение межпроцессного IPC Chromium |
-| **Время холодного старта** | 450–700 мс (инициализация runtime WebView2) | **15–30 мс** | Мгновенное появление на рабочем столе |
-| **Рендеринг и GPU** | Chromium Compositor -> ANGLE -> D3D11 | **DirectX 11 + DirectComposition** | Прямой нативный swapchain без слоёв абстракции |
-| **Оконная модель Win32** | Дерево промежуточных окон (`Chrome_WidgetWin`) | **1 нативный HWND** на WorkerW | Прямая интеграция под системные иконки |
-| **Idle CPU** | 0.8–1.5% (фоновые таймеры и IPC Chromium) | **0.0–0.4%** (on-demand рендеринг по таймеру) | Максимальная экономия батареи ноутбука |
+| **Working Set RAM** | **400–450 MB** (6 `msedgewebview2.exe` processes) | **~50–60 MB** (1 process) | **7–8x less memory** |
+| **OS process count** | 6–8 processes (broker, renderer, GPU, network) | **Exactly 1 process** | No Chromium inter-process IPC |
+| **Cold start time** | 450–700 ms (WebView2 runtime initialization) | **15–30 ms** | Appears on the desktop almost instantly |
+| **Rendering and GPU** | Chromium compositor -> ANGLE -> D3D11 | **DirectX 11 + DirectComposition** | Direct native swapchain, no abstraction layers |
+| **Win32 window model** | Tree of intermediate windows (`Chrome_WidgetWin`) | **1 native HWND** on WorkerW | Direct integration with system icons |
+| **Idle CPU** | 0.8–1.5% (Chromium background timers and IPC) | **0.0–0.4%** (on-demand rendering on a timer) | Maximum battery saving on laptops |
 
 ---
 
-## 2. Архитектурные принципы и изоляция
+## 2. Architectural principles and isolation
 
-1. **Неприкосновенность ядра (`core/kernel`)**:
-   - Ядро остаётся чистым системным каркасом, взаимодействующим через контракт `unidtk-api`.
-   - В ядре отсутствуют зависимости от GPUI, DirectX или графических библиотек.
-2. **Параллельное сосуществование**:
-   - Вся разработка ведётся в ветке `feature/gpui-desktop` в каталоге `hosts/gpui` (крейт `unidtk-gpui`).
-   - Текущая рабочая версия в `C:\Program Files\UniDTK` (`unidtk.exe` на WebView2) остаётся 100% работоспособной и не ломается.
-   - Исходники фронтенда в `modules/*/ui` не модифицируются, что сохраняет сборку `udtk build` через `stage_dist()`.
-
----
-
-## 3. Что уже сделано (Выполнено и верифицировано)
-
-### Этап 0: Базовый прототип (Gate 0) — *Влито в `feature/gpui-desktop`*
-- [x] Создан крейт `hosts/gpui` (`unidtk-gpui`) в workspace Cargo.
-- [x] **Решена проблема оконных станций Windows**: `wallpaper::attach_thread_to_input_desktop()` переключает поток на интерактивный десктоп пользователя `WinSta0\Default` до создания окна GPUI, гарантируя обнаружение `WorkerW`.
-- [x] **Интеграция с рабочим столом Windows**: Реализован алгоритм поиска хоста рабочего стола (sibling `WorkerW` -> top-level `WorkerW` -> `Progman`) и перепарентинг окна (`SetParent`) со стилями `WS_CHILD | WS_VISIBLE`.
-- [x] **Прозрачный DirectComposition SwapChain**: Настроен `DXGI_ALPHA_MODE_PREMULTIPLIED` с фоновой очисткой в `[0.0, 0.0, 0.0, 0.0]`. Окно 100% прозрачно вне виджетов.
-- [x] **Базовый сабкласс `WM_NCHITTEST`**: Возврат `HTTRANSPARENT (-1)` в пустых зонах (клики проходят к обоям и системным иконкам) и `HTCLIENT (1)` над карточкой.
-- [x] **Замеры ресурсов в рантайме**: 59.7 MB Working Set RAM, 0.39% Idle CPU, 1 нативный HWND. Визуальный аудит подтвержден скриншотом `gpui_window.png`.
-
-### Этап 1: Модульность, Дизайн-система Nothing OS и Глиф-бар (Gate 1) — *Реализовано*
-- [x] **Дизайн-система Nothing OS (`hosts/gpui/src/theme.rs`)**:
-  - Единая палитра цветовых токенов (`NOTHING_RED`, `BG_GLASS`, `BORDER_GLASS`, `TEXT_PRIMARY`, `TEXT_MUTED`, `ACCENT_GREEN`, `GLYPH_ON`, `GLYPH_OFF`).
-  - Встроенный шрифт точечной матрицы Nothing OS `assets/fonts/Ndot 55/Ndot 55.ttf` с динамической регистрацией в `cx.text_system().add_fonts()`.
-- [x] **Модульная архитектура виджетов (`hosts/gpui/src/widgets/mod.rs`)**:
-  - Объявлены трейты `DesktopWidgetContent` и объектно-безопасный `DesktopWidget` с контейнером `DesktopWidgetHandle<W>`.
-- [x] **Виджет часов (`hosts/gpui/src/widgets/clock.rs`)**:
-  - Выделен в изолированную структуру `ClockWidget`.
-  - Типографика Ndot 55 для времени и секундного индикатора.
-- [x] **Второй модуль — `glyph-bar` (`hosts/gpui/src/widgets/glyph_bar.rs`)**:
-  - Подключен чистый крейт `unidtk-mod-glyph-bar`.
-  - 10-сегментная светодиодная шкала громкости в стиле Nothing OS Phone.
-  - Интерактивные клики по светодиодам: установка громкости 10–100%.
-  - Интерактивный клик по бейджу состояния: переключение Mute / Active.
-  - Управление колесом мыши над виджетом (`on_scroll_wheel`): плавная регулировка шагом 5%.
-  - Фоновый реактивный опрос WASAPI каждые 120 мс для мгновенного отклика при изменении громкости из системы.
-- [x] **Динамический многозональный Hit-Testing (`hosts/gpui/src/wallpaper.rs` & `main.rs`)**:
-  - Полный отказ от хардкода прямоугольников `RECT`.
-  - Интеграция с фазой `Prepaint` в GPUI через `div().on_children_prepainted(...)`.
-  - Корректный пересчет субпиксельных логических координат в физические с учетом DPI экрана (`scale_factor`, `floor`/`ceil`).
-  - Lock-free / low-contention хранилище `parking_lot::RwLock<Vec<RECT>>` (задержка чтения < 5 нс).
-  - **Защита от срыва перетаскивания (Drag & Capture Guard)**: Проверка `GetCapture() == hwnd` в сабклассе `WM_NCHITTEST` безусловно сохраняет `HTCLIENT`, исключая потерю фокуса при быстром движении мыши.
+1. **The core is untouched (`core/kernel`)**:
+   - The core remains a clean system frame that talks through the `unidtk-api` contract.
+   - The core has no dependencies on GPUI, DirectX or graphics libraries.
+2. **Side-by-side coexistence**:
+   - All development happens on the `feature/gpui-desktop` branch, in the `hosts/gpui` directory (crate `unidtk-gpui`).
+   - The current working version in `C:\Program Files\UniDTK` (`unidtk.exe` on WebView2) stays 100% functional and is not broken.
+   - The frontend sources in `modules/*/ui` are not modified, so the `udtk build` pipeline through `stage_dist()` keeps working.
 
 ---
 
-## 4. Что осталось сделать (Дорожная карта до полного переезда)
+## 3. What is done (completed and verified)
+
+### Stage 0: Base prototype (Gate 0) — *Merged into `feature/gpui-desktop`*
+- [x] Created the crate `hosts/gpui` (`unidtk-gpui`) in the Cargo workspace.
+- [x] **Windows window station issue solved**: `wallpaper::attach_thread_to_input_desktop()` switches the thread to the user's interactive desktop `WinSta0\Default` before the GPUI window is created, guaranteeing that `WorkerW` is found.
+- [x] **Windows desktop integration**: implemented the desktop host search algorithm (sibling `WorkerW` -> top-level `WorkerW` -> `Progman`) and re-parenting of the window (`SetParent`) with the `WS_CHILD | WS_VISIBLE` styles.
+- [x] **Transparent DirectComposition SwapChain**: configured `DXGI_ALPHA_MODE_PREMULTIPLIED` with a background clear to `[0.0, 0.0, 0.0, 0.0]`. The window is 100% transparent outside the widgets.
+- [x] **Basic `WM_NCHITTEST` subclass**: returns `HTTRANSPARENT (-1)` in empty zones (clicks pass through to the wallpaper and system icons) and `HTCLIENT (1)` over the card.
+- [x] **Runtime resource measurements**: 59.7 MB Working Set RAM, 0.39% Idle CPU, 1 native HWND. Visual audit confirmed by the screenshot `gpui_window.png`.
+
+### Stage 1: Modularity, Nothing OS design system and Glyph bar (Gate 1) — *Implemented*
+- [x] **Nothing OS design system (`hosts/gpui/src/theme.rs`)**:
+  - A single palette of color tokens (`NOTHING_RED`, `BG_GLASS`, `BORDER_GLASS`, `TEXT_PRIMARY`, `TEXT_MUTED`, `ACCENT_GREEN`, `GLYPH_ON`, `GLYPH_OFF`).
+  - The built-in Nothing OS dot-matrix font `assets/fonts/Ndot 55/Ndot 55.ttf`, registered at runtime through `cx.text_system().add_fonts()`.
+- [x] **Modular widget architecture (`hosts/gpui/src/widgets/mod.rs`)**:
+  - Declared the `DesktopWidgetContent` trait and the object-safe `DesktopWidget` trait, with the `DesktopWidgetHandle<W>` container.
+- [x] **Clock widget (`hosts/gpui/src/widgets/clock.rs`)**:
+  - Extracted into the isolated struct `ClockWidget`.
+  - Ndot 55 typography for the time and the seconds indicator.
+- [x] **Second module — `glyph-bar` (`hosts/gpui/src/widgets/glyph_bar.rs`)**:
+  - Connected the pure crate `unidtk-mod-glyph-bar`.
+  - A 10-segment LED volume scale in the style of the Nothing OS Phone.
+  - Interactive clicks on the LEDs: sets the volume to 10–100%.
+  - Interactive click on the status badge: toggles Mute / Active.
+  - Mouse wheel control over the widget (`on_scroll_wheel`): smooth adjustment in 5% steps.
+  - Background reactive WASAPI polling every 120 ms, for an immediate response to volume changes made from the system.
+- [x] **Dynamic multi-zone hit-testing (`hosts/gpui/src/wallpaper.rs` & `main.rs`)**:
+  - Fully removed the hardcoded `RECT` rectangles.
+  - Integrated with GPUI's `Prepaint` phase through `div().on_children_prepainted(...)`.
+  - Correct conversion of sub-pixel logical coordinates to physical ones, taking the screen DPI into account (`scale_factor`, `floor`/`ceil`).
+  - Lock-free / low-contention storage `parking_lot::RwLock<Vec<RECT>>` (read latency < 5 ns).
+  - **Drag & Capture Guard**: the `GetCapture() == hwnd` check in the `WM_NCHITTEST` subclass unconditionally keeps `HTCLIENT`, preventing loss of focus during fast mouse movement.
+
+---
+
+## 4. What is left to do (roadmap to the full migration)
 
 ```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ [x] Gate 0: Прозрачное окно на WorkerW, SetParent, NCHITTEST, Clock view, замеры RAM  │
-│ [x] Gate 1: Дизайн-система, шрифт Ndot 55, трейт виджетов, Glyph Bar + WASAPI, клики   │
-│ [ ] Gate 2: Портирование оставшихся виджетов (MP3-Player, Micrographics, VPN, Telegram)│
-│ [ ] Gate 3: Замена CDP на нативный CLI-мост (udtk gui tree, udtk gui click, udtk shot) │
-│ [ ] Gate 4: Системный трей, глобальные хоткеи и меню                                  │
-│ [ ] Gate 5: Финальный свитч бинарника, автозапуск в Task Scheduler, релизный деплой   │
-└────────────────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────────────────┐
+│ [x] Gate 0: Transparent window on WorkerW, SetParent, NCHITTEST, Clock view, RAM measurements │
+│ [x] Gate 1: Design system, Ndot 55 font, widget trait, Glyph Bar + WASAPI, clicks             │
+│ [ ] Gate 2: Port the remaining widgets (MP3-Player, Micrographics, VPN, Telegram)             │
+│ [ ] Gate 3: Replace CDP with the native CLI door (udtk gui tree, udtk gui click, udtk shot)   │
+│ [ ] Gate 4: System tray, global hotkeys and menu                                              │
+│ [ ] Gate 5: Final binary switch, Task Scheduler autostart, release deploy                     │
+└───────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Подробное описание оставшихся задач:
+### Detailed description of the remaining tasks
 
-### Gate 2: Портирование оставшихся модулей ядра
-1. **`mp3-player` (Аудиоплеер)**:
-   - Создать `hosts/gpui/src/widgets/player.rs`.
-   - Интеграция с `unidtk-mod-mp3-player`: получение текущего трека, обложки (картинка через GPUI `img()`), прогресс-бара и кнопок Play/Pause/Next/Prev.
-   - Визуализация спектра (60 Гц audio bands) через GPUI `canvas` или кастомный примитив отрисовки.
-2. **`micrographics` (Погода и астрономия)**:
-   - Создать `hosts/gpui/src/widgets/micrographics.rs`.
-   - Отображение текущей погоды, температуры, суточного движения солнца (рассчитанные восход/закат) и осадков из локального кэша `unidtk.redb`.
-3. **`vpn` (Статус подключения)**:
-   - Индикатор активности туннеля Sing-Box, пинг, входящий/исходящий трафик, кнопка быстрого переключения.
-4. **`telegram` (Уведомления и чаты)**:
-   - Карточка непрочитанных сообщений и компактный список активных диалогов.
-5. **`explorer` (Мини-проводник и быстрый доступ)**:
-   - Панель быстрого запуска дисков, папок и недавних файлов.
+### Gate 2: Porting the remaining core modules
+1. **`mp3-player` (audio player)**:
+   - Create `hosts/gpui/src/widgets/player.rs`.
+   - Integration with `unidtk-mod-mp3-player`: current track, cover art (image via GPUI `img()`), progress bar and the Play/Pause/Next/Prev buttons.
+   - Spectrum visualization (60 Hz audio bands) through GPUI `canvas` or a custom drawing primitive.
+2. **`micrographics` (weather and astronomy)**:
+   - Create `hosts/gpui/src/widgets/micrographics.rs`.
+   - Display the current weather, temperature, the daily sun movement (calculated sunrise/sunset) and precipitation from the local cache in `unidtk.redb`.
+3. **`vpn` (connection status)**:
+   - Activity indicator for the Sing-Box tunnel, ping, incoming/outgoing traffic, quick toggle button.
+4. **`telegram` (notifications and chats)**:
+   - Unread messages card and a compact list of active dialogs.
+5. **`explorer` (mini explorer and quick access)**:
+   - Quick-launch panel for drives, folders and recent files.
 
-### Gate 3: Замена Chromium CDP на нативный CLI-мост
-В текущей архитектуре WebView2 команды диагностики и автоматизации (`udtk gui tree`, `udtk gui click:...`, `udtk shot`) опираются на CDP через WebSocket. В GPUI Chromium отсутствует.
+### Gate 3: Replacing Chromium CDP with a native CLI bridge
+In the current WebView2 architecture, the diagnostic and automation commands (`udtk gui tree`, `udtk gui click:...`, `udtk shot`) rely on CDP over WebSocket. There is no Chromium in GPUI.
 1. **`udtk gui tree`**:
-   - Внедрить в `DesktopWorkspace` сериализацию дерева активных элементов (id, тип, bounding rect, текст) в JSON через TCP сокет ядра (`127.0.0.1:26540`).
-2. **`udtk gui click:<target>` и эмуляция ввода**:
-   - Реализовать обработку программных кликов по id элемента через внутренний диспетчер событий GPUI.
-3. **`udtk shot` (Скриншот экрана)**:
-   - Реализовать нативный захват окна через Windows Desktop Duplication API (DXGI) или Direct3D 11 Staging Texture Readback из swapchain GPUI. Сохранение в PNG без внешних зависимостей.
+   - Add to `DesktopWorkspace` a serializer for the tree of active elements (id, type, bounding rect, text) into JSON, sent over the core's TCP socket (`127.0.0.1:26540`).
+2. **`udtk gui click:<target>` and input emulation**:
+   - Implement handling of programmatic clicks by element id, through GPUI's internal event dispatcher.
+3. **`udtk shot` (screen capture)**:
+   - Implement native window capture through the Windows Desktop Duplication API (DXGI), or through Direct3D 11 staging texture readback from the GPUI swapchain. Save to PNG without external dependencies.
 
-### Gate 4: Системный трей и глобальные горячие клавиши
-1. **Трей Windows (`Shell_NotifyIconW`)**:
-   - Перенос логики трея из Tauri в нативный модуль на чистом Win32 API.
-2. **Горячие клавиши**:
-   - Поддержка глобальных хоткеев (скрыть/показать виджеты, переключить трек, отключить звук) через Win32 `RegisterHotKey` в фоновом потоке.
+### Gate 4: System tray and global hotkeys
+1. **Windows tray (`Shell_NotifyIconW`)**:
+   - Move the tray logic from Tauri into a native module built on the plain Win32 API.
+2. **Hotkeys**:
+   - Support global hotkeys (hide/show widgets, switch track, mute the sound) through Win32 `RegisterHotKey` on a background thread.
 
-### Gate 5: Финальный релизный свитч и деплой
-1. **Интеграция в сборочный конвейер**:
-   - Переключение `toolchain/build.rs` и `udtk build` на сборку `unidtk-gpui.exe` как основного бинарника рабочего стола.
-   - Удаление зависимостей от Tauri, Webview2, HTML, CSS и Node.js.
-2. **Инсталлятор и Task Scheduler**:
-   - Обновление NSIS-скрипта: упаковка только нативных бинарников (`unidtk.exe`, `udtk.exe`, `vpn-helper.exe`) и шрифтов/ассетов.
-   - Проверка холодного старта через Task Scheduler (`Priority 2`, `Delay 0`).
+### Gate 5: Final release switch and deployment
+1. **Integration into the build pipeline**:
+   - Switch `toolchain/build.rs` and `udtk build` to build `unidtk-gpui.exe` as the main desktop binary.
+   - Remove the dependencies on Tauri, WebView2, HTML, CSS and Node.js.
+2. **Installer and Task Scheduler**:
+   - Update the NSIS script: package only the native binaries (`unidtk.exe`, `udtk.exe`, `vpn-helper.exe`) and the fonts/assets.
+   - Verify the cold start through Task Scheduler (`Priority 2`, `Delay 0`).
 
 ---
 
-## 5. Итог
+## 5. Summary
 
-Переход на GPUI успешно преодолел самые сложные платформенные риски:
-- Окно стабильно живёт в иерархии `WorkerW` на рабочем столе.
-- Прозрачный рендеринг через DirectComposition полностью отлажен.
-- Двухсторонний Hit-Testing пропускает клики в Explorer и захватывает клики по виджетам.
-- Дизайн-система Nothing OS с точечным шрифтом и 10-сегментным светодиодным глиф-баром работает с откликом WASAPI.
-- Потребление оперативной памяти сокращено с 450 МБ до 59 МБ.
+The move to GPUI has successfully overcome the hardest platform risks:
+- The window stably lives in the `WorkerW` hierarchy on the desktop.
+- Transparent rendering through DirectComposition is fully debugged.
+- Two-way hit-testing passes clicks through to Explorer and captures clicks on widgets.
+- The Nothing OS design system, with the dot-matrix font and the 10-segment LED glyph bar, works with WASAPI response.
+- RAM consumption is reduced from 450 MB to 59 MB.

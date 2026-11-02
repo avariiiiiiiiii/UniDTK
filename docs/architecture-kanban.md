@@ -8,153 +8,153 @@ created: 2026-08-27
 
 # 🗂️ Shell Architecture Kanban
 
-> **Для кого:** человек (ты). Для агентов — отдельный `docs/architecture.md` + `docs/tasks.md` (заполним потом).
-> **Формат:** Obsidian + плагин Kanban.
-> **Статус доски:** живой документ — обновляем по мере решений.
+> **For whom:** a human (you). For agents — a separate `docs/architecture.md` + `docs/tasks.md` (to be filled in later).
+> **Format:** Obsidian + Kanban plugin.
+> **Board status:** a living document — updated as decisions are made.
 
-## 📌 Легенда
+## 📌 Legend
 
-| Статус | Значение |
+| Status | Meaning |
 |---|---|
-| ✅ Done | сделано, смержено |
-| 🟡 In Progress | в работе сейчас |
-| ⬜ Backlog | запланировано, берём по приоритету |
-| 🔍 Research | исследуем, решение не принято |
-| 🚫 Blocked | ждёт внешнего условия (Obsidian, решение, зависимость) |
+| ✅ Done | done, merged |
+| 🟡 In Progress | being worked on now |
+| ⬜ Backlog | planned, taken in priority order |
+| 🔍 Research | under investigation, no decision yet |
+| 🚫 Blocked | waiting on an external condition (Obsidian, a decision, a dependency) |
 
 ---
 
-## 🧱 1. Ядро (Core)
+## 🧱 1. Core
 
-> Что остаётся всегда: без этого шелл перестаёт быть шеллом.
-> Правят: **ты / PR-контрибьюторы** (не пользователи-модули).
+> What always stays: without this, the shell stops being a shell.
+> Maintained by: **you / PR contributors** (not user modules).
 
-- [ ] ⬜ **Каркас шелла** — окна, оверлеи, layout виджетов, загрузчик модулей
-- [ ] ✅ **Единая БД** — `ShellDatabase` (redb): `WIDGET_*`, `EXPLORER_*`, `TELEGRAM_*`, `VPN_*`, `TRACKS`, `AI_*` (уже есть)
-- [ ] 🟡 **Реестр команд + шина событий** — единый фасад: `invoke` / `events` / `db`
-- [ ] ⬜ **Стабильный API для модулей** — контракт: команды, события, БД, права (grants)
-- [ ] ⬜ **Системные сервисы как платформа** — FS, Telegram, VPN, музыка, wallpaper, volume/audio/input
-- [ ] ⬜ **Менеджер модулей** — манифесты, enable/disable, hot-reload, песочница
-- [ ] ⬜ **CLI** — `shell build|dev|run|mods|theme|ai|doctor` (замена VBS, мост для ИИ и модулей)
+- [ ] ⬜ **Shell frame** — windows, overlays, widget layout, module loader
+- [ ] ✅ **Unified DB** — `ShellDatabase` (redb): `WIDGET_*`, `EXPLORER_*`, `TELEGRAM_*`, `VPN_*`, `TRACKS`, `AI_*` (already exists)
+- [ ] 🟡 **Command registry + event bus** — single facade: `invoke` / `events` / `db`
+- [ ] ⬜ **Stable API for modules** — contract: commands, events, DB, permissions (grants)
+- [ ] ⬜ **System services as a platform** — FS, Telegram, VPN, music, wallpaper, volume/audio/input
+- [ ] ⬜ **Module manager** — manifests, enable/disable, hot-reload, sandbox
+- [ ] ⬜ **CLI** — `shell build|dev|run|mods|theme|ai|doctor` (replaces VBS, bridge for AI and modules)
 
-## 🧩 2. Модули (Modules)
+## 🧩 2. Modules
 
-> Добавляются любым пользователем. **Rust или Lua** — как хочет пользователь.
-> Правят: пользователи (через меню/ИИ/CLI). Ядро их не знает — только API.
+> Added by any user. **Rust or Lua** — whichever the user prefers.
+> Maintained by: users (via the menu/AI/CLI). The core does not know about them — only the API.
 
-- [ ] ⬜ **Формат модуля** — папка `mods/<id>/` + `mod.toml` (id, версия, permissions, триггеры) + код
-- [ ] ⬜ **Lua-модули** — быстрый бэкенд без пересборки/перезапуска, hot-reload, работает в релизе
-- [ ] ⬜ **Rust-модули** — полноценный бэкенд, но с автоматической пересборкой
-- [ ] ⬜ **JS-виджеты** — фронт модуля (существующий паттерн `widgets/<id>/`)
-- [ ] ⬜ **Мини-скрипты** — автоматизация без виджета (по желанию)
-- [ ] 🔍 **Что выносим из ядра в модули** — AI DJ, yt-dlp/ytm, scheduler-tasks, hashing/archive/registry, Telegram-фичи (критерий: «если выключить — шелл продолжает работать»)
+- [ ] ⬜ **Module format** — folder `mods/<id>/` + `mod.toml` (id, version, permissions, triggers) + code
+- [ ] ⬜ **Lua modules** — fast backend with no rebuild/restart, hot-reload, works in a release build
+- [ ] ⬜ **Rust modules** — full backend, with automatic rebuilding
+- [ ] ⬜ **JS widgets** — the module's frontend (existing pattern `widgets/<id>/`)
+- [ ] ⬜ **Mini-scripts** — automation without a widget (optional)
+- [ ] 🔍 **What we move out of the core into modules** — AI DJ, yt-dlp/ytm, scheduler-tasks, hashing/archive/registry, Telegram features (criterion: "if it's turned off, the shell keeps working")
 
-## 🌉 3. Мосты (Bridges)
+## 🌉 3. Bridges
 
-> Как части общаются.
+> How the parts talk to each other.
 
-- [ ] ✅ **Tauri-мост** — ядро ↔ фронт: `invoke` / `listen` / `emit` / единая redb (есть)
-- [ ] ⬜ **Модульный мост** — модуль ↔ ядро: тот же паттерн `invoke`/`events`/`db`, но с grants
-- [ ] ⬜ **CLI-мост** — CLI ↔ ядро: тот же контракт (UI/CLI/ИИ/Lua — все клиенты одного API)
-- [ ] ⬜ **ИИ-мост (MCP)** — встроенный ИИ читает/пишет модули, конфиги, стили, токены через CLI/API
-- [ ] 🔍 **Бинарники как сервисы** — xray, mpv/libmpv, yt-dlp: бандлим в установщик, управляем как сервисными процессами (не «библиотеки», а управляемые процессы)
+- [ ] ✅ **Tauri bridge** — core ↔ frontend: `invoke` / `listen` / `emit` / unified redb (exists)
+- [ ] ⬜ **Module bridge** — module ↔ core: same pattern `invoke`/`events`/`db`, but with grants
+- [ ] ⬜ **CLI bridge** — CLI ↔ core: same contract (UI/CLI/AI/Lua — all clients of one API)
+- [ ] ⬜ **AI bridge (MCP)** — built-in AI reads/writes modules, configs, styles, tokens via CLI/API
+- [ ] 🔍 **Binaries as services** — xray, mpv/libmpv, yt-dlp: bundled into the installer, managed as service processes (not "libraries" but managed processes)
 
-## 🔌 4. API (Контракты)
+## 🔌 4. API (Contracts)
 
-> Стабильный слой, за который держатся модули. Меняется редко, версионируется.
+> The stable layer modules depend on. Changes rarely, versioned.
 
-- [ ] ⬜ **Команды** — `invoke(cmd, args)`, белый список по grants
-- [ ] ⬜ **События** — `events.subscribe(type, fn)` / `events.emit(type, payload)`
-- [ ] ⬜ **Состояние** — `db.get/set` в redb, неймспейс модуля `mods/<id>/...`
-- [ ] ⬜ **UI-контракт** — модуль несёт свой JS-виджет, регистрирует команды как `mod_<id>_<cmd>` в общий реестр
-- [ ] ⬜ **Версионирование API** — v1, совместимость при обновлении ядра
+- [ ] ⬜ **Commands** — `invoke(cmd, args)`, allowlist by grants
+- [ ] ⬜ **Events** — `events.subscribe(type, fn)` / `events.emit(type, payload)`
+- [ ] ⬜ **State** — `db.get/set` in redb, module namespace `mods/<id>/...`
+- [ ] ⬜ **UI contract** — the module ships its own JS widget and registers commands as `mod_<id>_<cmd>` in the shared registry
+- [ ] ⬜ **API versioning** — v1, compatibility across core updates
 
-## ⚙️ 5. Инструменты (Tools)
+## ⚙️ 5. Tools
 
-> Внешние зависимости, управление, установка.
+> External dependencies, management, installation.
 
-- [ ] 🔍 **mpv → libmpv** — решение: брать libmpv (LGPL), не mpv.exe (GPL); требует переписывания музыкального бэкенда
-- [ ] 🔍 **yt-dlp** — остаётся бинарником (Python), бандлим в установщик (Unlicense — свободно)
-- [ ] 🔍 **xray → sing-box (один процесс)** — сложить прокси-роль xray в уже используемый sing-box (vless/trojan outbound), удалить xray целиком (агент: Medium, vpn.rs ~200-350 строк)
-- [ ] 🔍 **sing-box как DLL (gomobile/C-ABI)** — research: скомпилировать Go-ядро в sing-box.dll, проверить на Windows (рискованно, мобильная связка)
-- [ ] 🔍 **Go → Rust компилятор** — research: production-инструмента нет (rustgo — игрушечный); реально: C-ABI / WASM / переписать
-- [ ] 🔍 **Python как библиотека** — research: RustPython (интерпретатор на Rust, встраиваемый) vs pyo3 (эмбед CPython, тяжёлый ~30-50MB)
-- [ ] 🔍 **WASM как универсальный формат модулей** — Rust-модули / Go (wazero) / всё в WASM-рантайме (wasmtime), без сабпроцессов
-- [ ] 🔍 **Бутстрап шелла** — research: само-компиляция (Cargo внутри = 1-2GB тулчейн, тяжело), WebView не „съесть" (системный компонент), сладкая точка = WASM
-- [ ] ⬜ **Установщик = установщик пакетов** — MSI/NSIS несёт все бинарники внутри (один пакет, всё в комплекте)
-- [ ] ⬜ **`shell doctor`** — проверка наличия/версий бинарников, доставка из релиз-ассетов
+- [ ] 🔍 **mpv → libmpv** — decision: take libmpv (LGPL), not mpv.exe (GPL); requires rewriting the music backend
+- [ ] 🔍 **yt-dlp** — stays a binary (Python), bundled into the installer (Unlicense — free)
+- [ ] 🔍 **xray → sing-box (one process)** — fold the xray proxy role into the already used sing-box (vless/trojan outbound), remove xray entirely (agent: Medium, vpn.rs ~200-350 lines)
+- [ ] 🔍 **sing-box as a DLL (gomobile/C-ABI)** — research: compile the Go core into sing-box.dll, check on Windows (risky, mobile toolchain)
+- [ ] 🔍 **Go → Rust compiler** — research: no production tool exists (rustgo is a toy); realistically: C-ABI / WASM / rewrite
+- [ ] 🔍 **Python as a library** — research: RustPython (interpreter written in Rust, embeddable) vs pyo3 (embedding CPython, heavy ~30-50MB)
+- [ ] 🔍 **WASM as a universal module format** — Rust modules / Go (wazero) / everything in a WASM runtime (wasmtime), without subprocesses
+- [ ] 🔍 **Shell bootstrap** — research: self-compilation (Cargo inside = 1-2GB toolchain, heavy), WebView can't be "eaten" (a system component), sweet spot = WASM
+- [ ] ⬜ **Installer = package installer** — MSI/NSIS carries all binaries inside (one package, everything included)
+- [ ] ⬜ **`shell doctor`** — checks presence/versions of binaries, delivery from release assets
 
-## 🎨 6. Стили и анимации (Theme)
+## 🎨 6. Styles and Animations (Theme)
 
-> Единая база, настраиваемая пользователем (ползунки), меню настроек.
+> A unified base, user-configurable (sliders), settings menu.
 
-- [ ] ✅ **Анимации explorer** — починены (канон-соответствие, merged)
-- [ ] ⬜ **Тема-токены** — единый объект/переменные (`--dur-*`, `--ease-*`, `--r-*`) вместо захардкоженных значений
-- [ ] ⬜ **Источник темы** — таблица в redb (например `THEME`) или конфиг; JS подхватывает при старте
-- [ ] ⬜ **Единая база анимаций** — все анимации через токены; пользователю — ползунки
-- [ ] ⬜ **Меню настроек** — замена кнопки перемещения: размещение виджетов, добавление/создание виджетов, стили, анимации
-- [ ] ⬜ **prefers-reduced-motion** — проект-вайд гэп (обязательно для опенсорса)
+- [ ] ✅ **Explorer animations** — fixed (canon-compliant, merged)
+- [ ] ⬜ **Theme tokens** — single object/variables (`--dur-*`, `--ease-*`, `--r-*`) instead of hardcoded values
+- [ ] ⬜ **Theme source** — table in redb (e.g. `THEME`) or a config; JS picks it up at startup
+- [ ] ⬜ **Unified animation base** — all animations via tokens; sliders for the user
+- [ ] ⬜ **Settings menu** — replaces the move button: widget placement, adding/creating widgets, styles, animations
+- [ ] ⬜ **prefers-reduced-motion** — project-wide gap (mandatory for open source)
 
-## 🤖 7. Встроенный ИИ (AI)
+## 🤖 7. Built-in AI (AI)
 
-> Обученный системным промптом ИИ, который правит шелл под пользователя.
+> An AI, shaped by a system prompt, that edits the shell for the user.
 
-- [ ] ⬜ **ИИ-редактор модулей** — создаёт/правит Lua/JS-модули (вариант А: только модули/конфиги/стили, НЕ ядро)
-- [ ] ⬜ **ИИ-редактор настроек** — меняет стили, анимации, токены через API/CLI
-- [ ] ⬜ **ИИ-мост (MCP-контракт)** — инструменты: чтение, запись, invoke, list mods/theme
-- [ ] 🚫 **ИИ правит ядро** — НЕТ в первой итерации (ломает обновления); ядро — только PR
+- [ ] ⬜ **AI module editor** — creates/edits Lua/JS modules (option A: only modules/configs/styles, NOT the core)
+- [ ] ⬜ **AI settings editor** — changes styles, animations, tokens via API/CLI
+- [ ] ⬜ **AI bridge (MCP contract)** — tools: read, write, invoke, list mods/theme
+- [ ] 🚫 **AI edits the core** — NO in the first iteration (breaks updates); the core changes only via PR
 
-## 🧹 8. Технический долг (Tech Debt)
+## 🧹 8. Technical Debt (Tech Debt)
 
-> Известные проблемы, некритичные, но давим.
+> Known problems, non-critical, but we keep pushing them down.
 
-- [ ] ⬜ `telegramRuntime.activeTopicThreadId` — мёртвый fallback (поручено отдельному агенту)
-- [ ] ⬜ `wireTelegramListSection` — мёртвая ветка `data-topic-id` (поручено отдельному агенту)
-- [ ] ⬜ `loadForumTopics` — мёртвый `hasBackend`-флаг (поручено отдельному агенту)
-- [ ] 🟡 **Распил renderer.js** (7763 строки) — виджет-код в `widgets/<id>/widget.js`, ядро остаётся (агент в работе, ветка `fix/renderer-split`)
-- [ ] ⬜ `.gitignore`/гигиена — `Cargo.lock`, `Server - SSH.cmd` (незакоммиченные артефакты)
+- [ ] ⬜ `telegramRuntime.activeTopicThreadId` — dead fallback (assigned to a separate agent)
+- [ ] ⬜ `wireTelegramListSection` — dead `data-topic-id` branch (assigned to a separate agent)
+- [ ] ⬜ `loadForumTopics` — dead `hasBackend` flag (assigned to a separate agent)
+- [ ] 🟡 **renderer.js split** (7763 lines) — widget code goes to `widgets/<id>/widget.js`, the core stays (agent in progress, branch `fix/renderer-split`)
+- [ ] ⬜ `.gitignore`/hygiene — `Cargo.lock`, `Server - SSH.cmd` (uncommitted artifacts)
 
 ---
 
-## 🗺️ Схема архитектуры (ASCII)
+## 🗺️ Architecture Diagram (ASCII)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        SHELL (ядро)                          │
+│                        SHELL (core)                          │
 │  ┌───────────────┬────────────────┬──────────────────────┐  │
-│  │  Каркас        │  Реестр команд  │  Единая БД (redb)    │  │
-│  │  окна/оверлеи  │  + шина событий  │  WIDGET/EXPLORER/   │  │
-│  │  layout/модули │  (invoke/events) │  TELEGRAM/VPN/...   │  │
+│  │  Window frame  │  Command list   │  Single DB (redb)    │  │
+│  │  win/overlays  │  + event bus     │  WIDGET/EXPLORER/   │  │
+│  │  layout/mods   │  (invoke/events) │  TELEGRAM/VPN/...   │  │
 │  └───────┬────────┴────────┬────────┴──────────┬──────────┘  │
 │          │                 │                   │             │
 │  ┌───────▼────────┐  ┌─────▼──────┐  ┌─────────▼──────────┐  │
-│  │ Tauri-мост     │  │ CLI-мост   │  │ ИИ-мост (MCP)      │  │
-│  │ invoke/listen  │  │ build/dev/ │  │ модули/стили/      │  │
-│  │ emit + redb    │  │ mods/theme/│  │ настройки          │  │
+│  │ Tauri door     │  │ CLI door   │  │ AI door (MCP)      │  │
+│  │ invoke/listen  │  │ build/dev/ │  │ mods/styles/       │  │
+│  │ emit + redb    │  │ mods/theme/│  │ settings           │  │
 │  │                │  │ ai/doctor  │  │                    │  │
 │  └───────┬────────┘  └─────┬──────┘  └─────────┬──────────┘  │
 │          │                 │                   │             │
 │  ┌───────▼─────────────────▼───────────────────▼──────────┐  │
-│  │           МОДУЛЬНЫЙ API (стабильный контракт)            │  │
+│  │           MODULE API (stable contract)                   │  │
 │  │   invoke(cmd) · events.subscribe · db.get/set · ui      │  │
-│  │   + grants (белый список разрешений из mod.toml)        │  │
+│  │   + grants (permission allowlist from mod.toml)         │  │
 │  └───────┬─────────────────┬───────────────────┬──────────┘  │
 │          │                 │                   │             │
 │  ┌───────▼──────┐  ┌───────▼──────┐  ┌────────▼───────────┐  │
-│  │ Lua-модули    │  │ Rust-модули  │  │ JS-виджеты          │  │
-│  │ (без сборки,  │  │ (автосборка) │  │ (frontend/widgets/  │  │
+│  │ Lua modules    │  │ Rust modules  │  │ JS widgets          │  │
+│  │ (no build,    │  │ (auto build) │  │ (frontend/widgets/  │  │
 │  │  hot-reload)  │  │              │  │  <id>/widget.js)    │  │
 │  └───────────────┘  └──────────────┘  └────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
-   Внешние сервисы (бандл в установщик):
-   mpv/libmpv · yt-dlp · xray  — управляются как процессы
+   External services (bundled in the installer):
+   mpv/libmpv · yt-dlp · xray  — run as managed processes
 ```
 
 ---
 
-## 📌 Правила доски
+## 📌 Board Rules
 
-1. **Ядро** — только через PR/меня. **Модули** — любой пользователь (через API).
-2. **Обновление ядра не должно ломать модули** — модули держатся за API, а не за внутренности.
-3. **Новый модуль = манифест + код (Lua/Rust) + JS-виджет** — регистрация через общий реестр (`mod_<id>_<cmd>`).
-4. Статусы обновлять при каждом решении.
+1. **Core** — only via PR/me. **Modules** — any user (via the API).
+2. **A core update must not break modules** — modules depend on the API, not on internals.
+3. **A new module = manifest + code (Lua/Rust) + JS widget** — registered through the shared registry (`mod_<id>_<cmd>`).
+4. Update statuses with every decision.
