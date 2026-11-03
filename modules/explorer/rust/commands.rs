@@ -92,8 +92,11 @@ pub fn get_user_places() -> Result<Vec<UserPlace>, String> {
         if let Some(p) = path {
             let s = p.to_string_lossy().to_string();
             if !s.is_empty() {
+                // The name Explorer shows, in the user's language; the English
+                // name only when the shell does not answer.
+                let name = crate::drives::shell_display_name(&s).unwrap_or_else(|| name.to_string());
                 places.push(UserPlace {
-                    name: name.to_string(),
+                    name,
                     path: s,
                     kind: kind.to_string(),
                 });
@@ -115,7 +118,8 @@ pub fn get_user_places() -> Result<Vec<UserPlace>, String> {
         let recycle = PathBuf::from("C:\\$Recycle.Bin");
         if recycle.exists() {
             places.push(UserPlace {
-                name: "Recycle Bin".to_string(),
+                name: crate::drives::shell_display_name(crate::drives::RECYCLE_BIN)
+                    .unwrap_or_else(|| "Recycle Bin".to_string()),
                 path: recycle.to_string_lossy().to_string(),
                 kind: "recycle".to_string(),
             });

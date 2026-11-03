@@ -763,10 +763,20 @@ fn gui_cmd(args: &[String]) -> Result<String, String> {
                     }
                 }
             }
-            "wait" => {
-                let ms = body.parse::<u64>().unwrap_or(0).min(10_000);
-                std::thread::sleep(Duration::from_millis(ms));
-            }
+            "wait" => match body.parse::<u64>() {
+                Ok(ms) if ms <= 10_000 => std::thread::sleep(Duration::from_millis(ms)),
+                // A silent clamp made `wait:60000` last 10 s and look like 60.
+                Ok(ms) => {
+                    ok = false;
+                    receipt["error"] = serde_json::json!(format!(
+                        "wait:{ms} is over the 10000 ms limit; use several wait steps"
+                    ));
+                }
+                Err(_) => {
+                    ok = false;
+                    receipt["error"] = serde_json::json!(format!("wait:{body} is not a number of milliseconds"));
+                }
+            },
             "click" | "type" => {
                 let (target, text_value) = match (kind, body.split_once(':')) {
                     ("type", Some((target, text))) => (target, Some(text)),

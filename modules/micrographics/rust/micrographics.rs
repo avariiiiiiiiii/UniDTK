@@ -285,8 +285,11 @@ impl Location {
     }
 }
 
-/// Coordinates stay in process memory: a fresh Windows fix must match before
-/// a previous city name can be reused, including after permission changes.
+/// The last named place, with its coordinates. It is stored in the module's
+/// store (`windows/place-fix-v1`) and restored at start, so the panel names the
+/// place before the first network answer. A fresh Windows fix must still match
+/// these coordinates before the stored name is reused, including after
+/// permission changes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct PlaceName {
     latitude: f64,

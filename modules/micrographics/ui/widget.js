@@ -87,14 +87,15 @@ function paintCell(el, spec) {
 
 
 function settingsFor(id, preview) {
-  if (preview) return { x: 8, y: 8, mgScale: 1, mgStyle: "mechanical", mgLayout: 2 };
+  if (preview) return { x: 8, y: 8, mgScale: 1, mgStyle: "mechanical" };
   const pos = config.positions[id] || (config.positions[id] = {}), before = JSON.stringify(pos);
   pos.x = Number.isFinite(pos.x) ? pos.x : 28;
   pos.y = Number.isFinite(pos.y) ? pos.y : 28;
   pos.mgScale = clamp(Number(pos.mgScale) || 1, 0.55, 3);
   pos.mgStyle = STYLES.includes(pos.mgStyle) ? pos.mgStyle : "mechanical";
-  pos.mgLayout = 2;
-  delete pos.mgWidth; delete pos.w; delete pos.h;
+  // The layout is the theme's `mgLayout` ("panel" | "pills"), applied as
+  // `data-mg-layout`; the old per-card number is dropped like the old sizes.
+  delete pos.mgLayout; delete pos.mgWidth; delete pos.w; delete pos.h;
   if (before !== JSON.stringify(pos)) saveConfig();
   return pos;
 }

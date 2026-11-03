@@ -22,8 +22,8 @@ pub fn get_all_drives() -> Result<Vec<DriveInfo>, String> {
 
             let (total_space, free_space) = get_drive_space_info(&drive_path);
 
-            let display = get_volume_label(&drive_path)
-                .map(|label| format!("{} ({})", label, drive_path))
+            let display = shell_display_name(&drive_path)
+                .or_else(|| get_volume_label(&drive_path).map(|label| format!("{} ({})", label, drive_path)))
                 .or_else(|| {
                     if drive_type == 4 {
                         // DRIVE_REMOTE (Network drive / mapped SMB share)
@@ -199,4 +199,57 @@ pub struct DriveInfo {
     pub is_removable: bool,
     pub total_space: Option<u64>,
     pub free_space: Option<u64>,
+}
+
+/// The shell's parsing name of the Recycle Bin. `C:\$Recycle.Bin` is only its
+/// storage on one drive and is shown as "$Recycle.Bin"; this name is the folder
+/// Explorer shows.
+pub const RECYCLE_BIN: &str = "shell:RecycleBinFolder";
+
+/// The name Windows Explorer shows for a path or a shell parsing name, in the
+/// user's language: "Рабочий стол", "Корзина", "Локальный диск (C:)". `None` when
+/// the shell does not know it.
+pub fn shell_display_name(path: &str) -> Option<String> {
+    use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY};
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+    // The shell needs COM on the calling thread. These calls run on blocking
+    // workers, so the apartment is entered and left here; a thread that already
+    // has another mode (RPC_E_CHANGED_MODE) is used as it is.
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let name = unsafe {
+        SHCreateItemFromParsingName::<_, _, IShellItem>(windows::core::PCWSTR(wide.as_ptr()), None)
+            .and_then(|item| item.GetDisplayName(SIGDN_NORMALDISPLAY))
+            .ok()
+            .map(|text| {
+                let name = text.to_string().unwrap_or_default();
+                CoTaskMemFree(Some(text.0 as *const _));
+                name
+            })
+    };
+    if com.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    name.filter(|name| !name.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_display_name;
+
+    #[test]
+    fn the_shell_names_the_system_drive_and_nothing_for_a_missing_path() {
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()) + "\\";
+        let name = shell_display_name(&system).expect("the system drive has a shell name");
+        assert!(name.contains(&system[..2]), "{name} names {system}");
+        assert_eq!(shell_display_name(r"Z:\no\such\folder\here"), None);
+    }
+
+    #[test]
+    fn the_recycle_bin_has_its_explorer_name_not_its_storage_name() {
+        let name = shell_display_name(super::RECYCLE_BIN).expect("the shell knows the Recycle Bin");
+        assert_ne!(name, "$Recycle.Bin");
+        eprintln!("recycle bin: {name}");
+    }
 }

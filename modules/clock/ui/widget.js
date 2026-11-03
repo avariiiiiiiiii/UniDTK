@@ -25,7 +25,7 @@ function renderClock(card, widgetId) {
   `;
   switcher.addEventListener("click", (e) => {
     e.stopPropagation();
-    const versions = ["digital", "gooey", "digital-stacked", "digital-vertical", "analogue", "analogue-dot", "analogue-bezel", "analogue-cmf", "rings", "minimal-lines", "grid-second", "nothing-watch-pro"];
+    const versions = ["digital", "gooey", "digital-stacked", "digital-vertical", "analogue", "analogue-dot", "analogue-bezel", "analogue-cmf", "rings", "minimal-lines", "grid-second", "nothing-watch-pro", "gothic"];
     const curIdx = versions.indexOf(container.dataset.version);
     const nextIdx = (curIdx + 1) % versions.length;
     const nextVer = versions[nextIdx];

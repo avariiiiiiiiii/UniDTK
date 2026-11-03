@@ -105,7 +105,7 @@ function renderClock(card, widgetId) {
 - A card with no stored `version` shows `digital`.
 - `updateClockFace` clears the container, toggles a class for four of the styles (`gothic`, `grid-second`, `nothing-watch-pro`, `gooey`), writes the markup for the chosen style, and calls `updateClockTime()` so the new face shows the current time at once.
 
-`updateClockFace` is a chain of `if (version === ...)` branches, each writing a fixed template. Thirteen names are recognised. The switcher cycles twelve of them; `gothic` is recognised but not cycled (see Known gaps). The gooey branch does not write markup itself: it calls `renderGooeyClock` in `gooey.js` (Step 6).
+`updateClockFace` is a chain of `if (version === ...)` branches, each writing a fixed template. Thirteen names are recognised, and the switcher cycles through all thirteen. The gooey branch does not write markup itself: it calls `renderGooeyClock` in `gooey.js` (Step 6).
 
 ---
 
@@ -234,8 +234,7 @@ The test folders check the expand and collapse animation, not the time display. 
 
 ## Known gaps
 
-- **The switcher cannot reach `gothic`.** `updateClockFace` renders it (widget.js, line 54) and the morph tests use it, but the cycle at line 28 leaves it out. A card shows it only when its stored `version` is already `gothic`.
-- **Six of the twelve cycled faces have no morph test.** The runtime and UI checks cover `rings`, `digital`, `analogue`, `grid-second`, `gooey`, `nothing-watch-pro` and `gothic`. `digital-stacked`, `digital-vertical`, `analogue-dot`, `analogue-bezel`, `analogue-cmf` and `minimal-lines` are not in either list.
+- **Six of the thirteen cycled faces have no morph test.** The runtime and UI checks cover `rings`, `digital`, `analogue`, `grid-second`, `gooey`, `nothing-watch-pro` and `gothic`. `digital-stacked`, `digital-vertical`, `analogue-dot`, `analogue-bezel`, `analogue-cmf` and `minimal-lines` are not in either list.
 - **Hardcoded colours and a keyword easing.** `clock.css` writes `#333` (lines 133 and 154), `rgba(170, 170, 170, 0.8)` (line 121) and `#ff6e00` (lines 189 and 193). `.version-switcher` uses the keyword `ease` at line 98. These break [theme.tokens-only](../reference/desk.md#r-theme.tokens-only).
 - **Placeholder content.** The `analogue-dot` face shows the literal text "СБ 23 / 156 ккал / 6 240 шагов" (widget.js, lines 98-102), and `nothing-watch-pro` shows "CMF BY NOTHING" (line 126). No data source feeds either.
 - **The interval failure is silent.** `_startWidgetLoops().catch(() => {})` hides a failed import of `widget.js`, so the faces freeze with no message (Step 8).

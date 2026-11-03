@@ -186,8 +186,6 @@ The module's cache store is opened with `StoreSpec::cache("weather")`. The keys 
 
 On restart, `restore()` runs first. It removes the old keys `weather/snapshot` and `weather/location`, because they came from IP-derived coordinates, and it does not restore them. If permission was granted, the cached snapshot comes back marked stale, so the panel shows the last values with the warning at once. If permission was not granted, the snapshot starts empty with status `permission-required`, and only the IP indicator is restored.
 
-Warning: the comment on `PlaceName` says that coordinates "stay in process memory". That is not what the code does. The place-name record is written with its latitude and longitude to `windows/place-fix-v1`, and `restore()` reads it back. See the first item under Known gaps.
-
 The panel's own layout settings are stored elsewhere. `settingsFor` keeps `x`, `y`, `mgScale`, and `mgStyle` in `config.positions[id]` and saves them through `saveConfig()` from `core/ui/unidtk-core.js`. The module does not decide where that file lives.
 
 ---
@@ -204,7 +202,7 @@ The layout runs in `widget.js` on the browser side. It gets three inputs: the pa
 
 `settingsFor()` in `widget.js` clamps the scale to 0.55 through 3, falls back to the `mechanical` style, and drops the obsolete width and height keys. The three styles (`mechanical`, `outline`, `symbols`) change only the wording and the preferred width of the block, which is 430, 340, or 290 px times the scale. A cell's font is not shrunk to fit, so a crowded screen shows more rows and not smaller type.
 
-The `pills` layout draws one tinted pill behind each run of a group. It is used only when the document has `data-material="jelly"` and `data-mg-layout="pills"`, which the theme engine writes. See the second item under Known gaps.
+The `pills` layout draws one tinted pill behind each run of a group. It is used only when the document has `data-material="jelly"` and `data-mg-layout="pills"`, which the theme engine writes from the theme's `mgLayout` field; the choice in the Look menu is stored in the theme, not in the card.
 
 Cells are reused, not rebuilt. `paintCell` changes only the text, the kind, and the glyph of an existing node, and the layout reads the measured sizes in one batch before it writes positions. A relayout keeps the DOM nodes and the scroll position.
 
@@ -272,6 +270,4 @@ The files under `tests/` run in the real WebView:
 
 ## Known gaps
 
-- **Coordinates are persisted, against the code comment.** The comment on `PlaceName` in `micrographics.rs` says coordinates stay in process memory. The code writes the record with `latitude` and `longitude` to `windows/place-fix-v1` (in `commit_place_name_on_network`), and `restore()` reads it back. The comment, the behaviour, or both need correcting.
-- **The layout option is overridden.** `settingsFor` in `widget.js` sets `mgLayout` to `2` on every call. `metadata.json` offers `panel` and `pills`, and the pills mode is read from the document's `data-mg-layout` attribute, not from the saved setting. The saved choice has no effect on the layout.
-- **One test imports a path that does not match the file layout.** `tests/network.js` imports `/modules/micrographics/composition.js`, but the file is at `modules/micrographics/ui/composition.js`. The code does not show how the WebView serves module files, so whether this import resolves is not established here.
+- No gap is known. Note that `tests/network.js` imports `/modules/micrographics/composition.js`: the build copies each module's `ui/` folder to `/modules/<id>/`, which is the path the page loads `widget.js` from as well.

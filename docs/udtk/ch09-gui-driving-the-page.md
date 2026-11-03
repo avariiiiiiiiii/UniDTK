@@ -15,7 +15,7 @@ udtk gui [--json] [--force] <step>...
 | `type:<target>:<text>` | Clicks the target to focus it, then inserts the text (`Input.insertText`) |
 | `press:<key>` or `press:<mod>+<key>` | Presses one key. Modifiers are `ctrl`, `shift`, `alt`, `meta` |
 | `tree` | Returns the semantic tree of the page |
-| `wait:<ms>` | Pauses, at most 10 000 ms |
+| `wait:<ms>` | Pauses, at most 10 000 ms; a longer or non-numeric value fails the step instead of being clamped |
 
 The `<target>` is resolved by the page's own harness (Chapter 5, 5.5): a numeric id from the tree, a stable reference `r<N>`, a test id written `@name`, an accessible name, or a selector.
 
