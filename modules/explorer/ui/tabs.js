@@ -181,13 +181,17 @@ export class TabManager {
                 <svg class="tab-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                 </svg>
-                <span class="tab-title" aria-label="${tab.path}">${tab.title}</span>
+                <span class="tab-title"></span>
                 <button class="tab-close" aria-label="Закрыть вкладку">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                     </svg>
                 </button>
             `;
+            // Set as text, not markup: a folder name is data.
+            const title = el.querySelector('.tab-title');
+            title.textContent = tab.title;
+            title.setAttribute('aria-label', tab.path);
 
             el.addEventListener('click', (e) => {
                 if (!e.target.closest('.tab-close')) {

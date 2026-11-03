@@ -50,7 +50,7 @@ pub const COMMANDS: CommandSpec =
 /// call looked undeclared — the gate test in `main.rs` now compares the manifest against
 /// the handler list so that cannot come back.
 pub const FRONTEND_LOG: CommandSpec =
-    CommandSpec::write("frontend_log", "Append a frontend record to the journal", "{message}");
+    CommandSpec::write("frontend_log", "Append a frontend record to the journal", "{message, level?}");
 
 // ── Modules (read-only surface) ────────────────────────────────────────────────
 

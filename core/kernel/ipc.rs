@@ -578,7 +578,8 @@ fn handle_frontend_log(_server: &IpcServer, args: &Args) -> Result<serde_json::V
         .get("message")
         .and_then(|value| value.as_str())
         .ok_or("frontend_log requires {message}")?;
-    crate::logging::log_frontend(message);
+    let level = args.get("level").and_then(|value| value.as_str());
+    crate::logging::log_frontend(message, level);
     Ok(serde_json::Value::Null)
 }
 

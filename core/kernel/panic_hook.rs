@@ -21,7 +21,7 @@ pub fn install_panic_hook() {
             .take(4)
             .collect::<Vec<_>>()
             .join(" | ");
-        crate::logging::log_backend("panic", summary);
+        crate::logging::log_backend_at("ERROR", "panic", summary);
         crate::logging::flush();
         // 2. Synchronous crash report (independent of the logging pipeline).
         write_crash_log(&report);

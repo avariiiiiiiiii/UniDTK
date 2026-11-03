@@ -278,7 +278,7 @@ pub fn ipc_call(
         // The writes answer with the same shape as the Tauri commands of the same name:
         // the caller gets the resulting state, so the effect is readable, not assumed.
         "set_system_volume" => Some(json_arg(args, "level").and_then(|level| {
-            set_system_volume(level as u8)
+            set_system_volume(volume_level(level))
                 .and_then(|volume| serde_json::to_value(volume).map_err(|e| e.to_string()))
         })),
         "set_system_mute" => Some(
@@ -295,6 +295,11 @@ pub fn ipc_call(
 }
 
 /// Reads one numeric argument, or says which one is missing.
+/// Clamps before narrowing: `300 as u8` would wrap to 44, not stop at 100.
+fn volume_level(level: u64) -> u8 {
+    level.min(100) as u8
+}
+
 fn json_arg(args: &serde_json::Value, name: &str) -> Result<u64, String> {
     args.get(name)
         .and_then(|value| value.as_u64())
@@ -329,5 +334,20 @@ impl unidtk_api::Module for GlyphBarModule {
             state.stop();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::volume_level;
+
+    #[test]
+    fn volume_clamps_before_it_narrows() {
+        assert_eq!(volume_level(0), 0);
+        assert_eq!(volume_level(55), 55);
+        assert_eq!(volume_level(100), 100);
+        assert_eq!(volume_level(256), 100);
+        assert_eq!(volume_level(300), 100);
+        assert_eq!(volume_level(u64::MAX), 100);
     }
 }

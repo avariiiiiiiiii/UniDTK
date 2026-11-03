@@ -457,8 +457,8 @@ fn vpn_set_home_server_config(config: vpn::HomeServerConfig) -> Result<vpn::VpnS
 }
 
 #[tauri::command(async)]
-fn frontend_log(message: String) {
-    crate::logging::log_frontend(&message);
+fn frontend_log(message: String, level: Option<String>) {
+    crate::logging::log_frontend(&message, level.as_deref());
 }
 
 #[tauri::command(async)]

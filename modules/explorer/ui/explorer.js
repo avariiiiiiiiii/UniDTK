@@ -955,7 +955,7 @@ class NothingExplorer {
                     <div class="file-icon ${item.total_space ? 'drive-icon' : ''}">
                         <img src="${iconSrc}" alt="" draggable="false">
                     </div>
-                    <div class="file-name" aria-label="${item.name}">${item.name}</div>
+                    <div class="file-name" aria-label="${escapeHtml(item.name)}">${escapeHtml(item.name)}</div>
                     ${freeSpace ? `<div class="file-size">${freeSpace} free</div>
                     <div class="drive-bar" aria-label="${freeSpace} свободно из ${totalSpace}"><span style="width:${item.total_space ? Math.max(4, Math.round(100 * (1 - (item.free_space || 0) / item.total_space))) : 0}%"></span></div>` : ''}
                 `;
@@ -1004,7 +1004,7 @@ class NothingExplorer {
                 row.innerHTML = `
                     <div class="col-name">
                         <img src="${iconSrc}" class="row-icon" alt="" draggable="false">
-                        <span class="row-name" aria-label="${item.name}">${item.name}</span>
+                        <span class="row-name" aria-label="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
                     </div>
                     <div class="col-size">${size}</div>
                     <div class="col-type">${type}</div>
@@ -1189,7 +1189,7 @@ class NothingExplorer {
                 <div class="file-icon ${isImg ? 'has-thumb' : ''}">
                     <img src="${iconSrc}" class="${imgClass}" alt="" draggable="false" loading="lazy" decoding="async">
                 </div>
-                <div class="file-name" aria-label="${item.name}">${item.name}</div>
+                <div class="file-name" aria-label="${escapeHtml(item.name)}">${escapeHtml(item.name)}</div>
             `;
             this.installIconFallback(el.querySelector('img'), item);
 
@@ -1235,7 +1235,7 @@ class NothingExplorer {
             row.innerHTML = `
                 <div class="col-name">
                     <img src="${iconSrc}" class="${imgClass}" alt="" draggable="false" loading="lazy" decoding="async">
-                    <span class="row-name" aria-label="${item.name}">${item.name}</span>
+                    <span class="row-name" aria-label="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
                 </div>
                 <div class="col-size">${size}</div>
                 <div class="col-type">${type}</div>
@@ -1953,7 +1953,8 @@ class NothingExplorer {
 
     async showProperties(item) {
         if (!item?.path) return;
-        this.previewPanel.showProperties(item);
+        this.previewPanel.showFile(item);
+        this.previewPanel.expand();
     }
 
     bindEvents() {
@@ -2200,7 +2201,7 @@ class NothingExplorer {
                 const activeItems = this.tabManager.getActiveTab()?.items || [];
                 const singleItem = activeItems.find(i => i.path === selectedPath);
                 if (singleItem) {
-                    this.previewPanel.update(singleItem);
+                    this.previewPanel.showFile(singleItem);
                 }
             }
         };

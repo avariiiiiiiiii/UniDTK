@@ -73,4 +73,9 @@ export class PreviewPanel {
         const panel = document.getElementById('previewPanel');
         panel.classList.toggle('collapsed');
     }
+
+    /** Opens the panel if it is collapsed: "Properties" must show something. */
+    expand() {
+        document.getElementById('previewPanel')?.classList.remove('collapsed');
+    }
 }

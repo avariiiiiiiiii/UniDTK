@@ -81,10 +81,15 @@ pub fn dropped_count() -> u64 {
 
 /// Append a backend log line (best-effort; no-op before [`init`]).
 pub fn log_backend(module: &str, message: impl AsRef<str>) {
+    log_backend_at("INFO", module, message);
+}
+
+/// Append a backend log line at `level` (`INFO`, `WARN` or `ERROR`).
+pub fn log_backend_at(level: &str, module: &str, message: impl AsRef<str>) {
     enqueue(LogEntry {
         id: next_id(),
         ts: now_millis(),
-        level: "INFO".to_string(),
+        level: normalize_level(Some(level)).to_string(),
         source: "backend".to_string(),
         module: module.to_string(),
         message: message.as_ref().to_string(),
@@ -92,12 +97,13 @@ pub fn log_backend(module: &str, message: impl AsRef<str>) {
     });
 }
 
-/// Append a frontend log line (best-effort; no-op before [`init`]).
-pub fn log_frontend(message: &str) {
+/// Append a frontend log line (best-effort; no-op before [`init`]). The page
+/// names the level; anything it does not recognise is recorded as `INFO`.
+pub fn log_frontend(message: &str, level: Option<&str>) {
     enqueue(LogEntry {
         id: next_id(),
         ts: now_millis(),
-        level: "INFO".to_string(),
+        level: normalize_level(level).to_string(),
         source: "frontend".to_string(),
         module: "frontend".to_string(),
         message: message.to_string(),
@@ -284,4 +290,31 @@ fn now_millis() -> i64 {
 
 fn next_id() -> u64 {
     LOG_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
+
+/// The three levels the store keeps. `WARN` and `ERROR` are never dropped when
+/// the queue is full, so a caller cannot invent a level that escapes that rule.
+fn normalize_level(level: Option<&str>) -> &'static str {
+    match level.map(str::to_ascii_uppercase).as_deref() {
+        Some("WARN" | "WARNING") => "WARN",
+        Some("ERROR") => "ERROR",
+        _ => "INFO",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_level;
+
+    #[test]
+    fn levels_are_normalized_to_the_three_the_store_keeps() {
+        assert_eq!(normalize_level(None), "INFO");
+        assert_eq!(normalize_level(Some("info")), "INFO");
+        assert_eq!(normalize_level(Some("WARN")), "WARN");
+        assert_eq!(normalize_level(Some("warning")), "WARN");
+        assert_eq!(normalize_level(Some("error")), "ERROR");
+        assert_eq!(normalize_level(Some("ERROR")), "ERROR");
+        assert_eq!(normalize_level(Some("debug")), "INFO");
+        assert_eq!(normalize_level(Some("FATAL!")), "INFO");
+    }
 }

@@ -244,6 +244,16 @@ fn cdp_get(path: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(body).map_err(|e| format!("bad CDP json: {e} (resp len {})", resp.len()))
 }
 
+/// How many WebView2 pages answer over CDP; an error when none does.
+fn page_alive() -> Result<usize, String> {
+    let targets = cdp_get("/json")?;
+    let pages = targets.as_array().map_or(0, |list| list.iter().filter(|t| t["type"] == "page").count());
+    if pages == 0 {
+        return Err("CDP answers with no page".to_string());
+    }
+    Ok(pages)
+}
+
 fn cdp_list_cmd() -> Result<String, String> {
     let targets = cdp_get("/json")?;
     Ok(serde_json::to_string_pretty(&targets).unwrap_or_default())
@@ -1745,6 +1755,12 @@ fn run_cmd(args: &[String]) -> Result<String, String> {
         cmd.arg(arg);
     }
     cmd.creation_flags(NO_WINDOW);
+    // The app logs to its own file. Inherited stdout/stderr would keep the
+    // caller's pipe open for the app's whole life, so a script or agent reading
+    // `udtk run` would wait until the app exits.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
     Ok(format!("launched {}", exe.display()))
 }
@@ -3079,7 +3095,18 @@ fn run_ping_check() -> (bool, String) {
                             {
                                 out.push_str(&format!("  [OK] logs telemetry: {stats_out}\n"));
                             }
-                            (true, out)
+                            // The kernel can answer while its WebView is gone, which leaves
+                            // the desk empty: the page has to answer too.
+                            match page_alive() {
+                                Ok(pages) => {
+                                    out.push_str(&format!("  [OK] page: {pages} WebView2 page(s) answer over CDP\n"));
+                                    (true, out)
+                                }
+                                Err(e) => {
+                                    out.push_str(&format!("  [FAIL] page: the kernel answers, the WebView does not ({e})\n"));
+                                    (false, out)
+                                }
+                            }
                         } else {
                             (false, format!("  [FAIL] IPC ping: error: {}\n", val["error"].as_str().unwrap_or("unknown")))
                         }
