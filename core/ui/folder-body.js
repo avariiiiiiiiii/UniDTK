@@ -5,7 +5,7 @@
  * or removes, dragging reorders, Ctrl+V pastes copied files or a link. Right
  * click and dragging only act inside the opened folder; clicks elsewhere on
  * the desk are untouched. A shortcut whose file is gone says so and offers
- * «Найти…» / «Убрать».
+ * "Find…" / "Remove".
  */
 
 import { listen, invoke } from "@unidtk/bridge";

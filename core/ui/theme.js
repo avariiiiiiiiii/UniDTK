@@ -985,7 +985,7 @@ function applyColors(colors) {
   applyTheme(next, { persist: true });
 }
 
-/** "Перемешать цвета": a new random coloring; the old one stays restorable. */
+/** "Shuffle colours": a new random coloring; the old one stays restorable. */
 export function shuffleColors() {
   previousColors = { palette: { ...currentTheme.palette }, tintMap: { ...currentTheme.tintMap } };
   applyColors(rollColors(newColorSeed()));
@@ -1112,7 +1112,7 @@ function migrateSizesToPreset(newPreset, oldTheme) {
 /**
  * Reset all known widget sizes to the ACTIVE preset's defaults
  * (positions x/y are preserved). Returns the number of widgets reset.
- * Menu door: "Сбросить размеры по пресету".
+ * Menu door: "Reset sizes to preset".
  */
 export function resetSizesToPreset() {
   if (!configRef || !configRef.positions) return 0;

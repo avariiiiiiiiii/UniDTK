@@ -1,4 +1,4 @@
-//! Lightweight localhost IPC server for agent/CLI debugging (architecture §5.3).
+//! Lightweight localhost IPC server for agent/CLI debugging (r[ipc.socket-read-only]).
 //!
 //! Listens on 127.0.0.1:26540 and speaks a tiny JSON protocol:
 //!   request:  {"cmd": "ping" | "status" | "player_status" | "vpn_status" | ...,
@@ -34,8 +34,8 @@ use std::thread;
 
 pub const IPC_PORT: u16 = 26540;
 
-/// Сколько запросов обслуживаем одновременно. Каждое соединение — отдельный
-/// поток, поэтому лишние получают `busy` вместо бесконтрольного роста.
+/// How many requests are served concurrently. Each connection is a separate
+/// thread, so extra requests receive `busy` instead of unbounded growth.
 const MAX_INFLIGHT: usize = 8;
 static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 

@@ -592,16 +592,15 @@ fn main() {
 "#,
     );
 
-    // tauri_build копирует bundle.resources в каталог профиля безусловно, а
-    // назначение в этом окне часто занято: сам запущенный `udtk` (он же
-    // запускает и эту сборку) замапил libmpv-2.dll/DirectML.dll как свои
-    // импорты, ort держит свой symlink DirectML, крупные файлы сканирует
-    // антивирус — везде os error 32. Наполнение профиля уже даёт наша
-    // стадинг (copy_native_binaries/stage_dist) плюс сами бинарники cargo;
-    // ресурсы для установщика читает отдельный процесс бандлера прямо из
-    // tauri.conf.json. Копию ресурсов отключаем: не-объект в RFC 7386
-    // (json_patch::merge) заменяет значение, поэтому пустой массив обнуляет
-    // список, не трогая остальной конфиг.
+    // tauri_build copies bundle.resources into the profile directory unconditionally, but
+    // the destination in this window is often already in use: the running `udtk` (which also
+    // launches this build) has mapped libmpv-2.dll/DirectML.dll as its own imports, ort holds
+    // its own DirectML symlink, and antivirus scans the large files; everywhere this gives
+    // os error 32. Filling the profile is already done by our staging
+    // (copy_native_binaries/stage_dist) plus the cargo binaries themselves; the installer
+    // resources are read by a separate bundler process directly from tauri.conf.json.
+    // We disable the resource copy: a non-object in RFC 7386 (json_patch::merge) replaces
+    // the value, so an empty array clears the list without touching the rest of the config.
     let mut cfg: serde_json::Value = std::env::var("TAURI_CONFIG")
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())

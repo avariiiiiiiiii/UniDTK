@@ -245,7 +245,7 @@ function updateClockTime() {
   });
 }
 
-// в”Ђв”Ђв”Ђ Expand / Collapse with Dashboard/Folder в”Ђв”Ђв”Ђ
+// --- Expand / Collapse with Dashboard/Folder ---
 
 async function renderClockDashboard(body, widgetId) {
   const version = config.positions[widgetId]?.version || "digital";

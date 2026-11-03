@@ -269,9 +269,9 @@ impl PlayerManager {
         {
             let mut state = self.state.lock().expect("player state lock poisoned");
             state.is_playlist_session = queue_ids.len() > 1;
-            // Стартовый трек сессии — в историю. Без него первый ИИ-переход
-            // после ручного next возвращается на него же (A-B-A: петля
-            // «Проспал → A Kind of Deutsch → Проспал» из живой сессии).
+            // The session's starting track goes into history. Without it, the first AI transition
+            // after a manual next returns to the same track (A-B-A loop: "Prospal → A Kind of Deutsch → Prospal"
+            // from a live session; "Prospal" is a transliterated track title).
             if let Some(start_id) = queue_ids.get(start_index) {
                 state.ai_dj_history.push(start_id.clone());
                 if state.ai_dj_history.len() > 50 {
@@ -1005,12 +1005,12 @@ mod tests {
         assert!(state.ai_dj_history.is_empty());
     }
 
-    /// Стартовый трек плейлиста обязан попадать в `ai_dj_history`: без него
-    /// первый переход после ручного next возвращается на него же (A-B-A —
-    /// «Проспал → A Kind of Deutsch → Проспал» из живой сессии 27.09).
+    /// The playlist's starting track must be recorded in `ai_dj_history`: without it, the
+    /// first transition after a manual next returns to the same track (A-B-A —
+    /// "Prospal → A Kind of Deutsch → Prospal" from a live session on 27.09).
     #[test]
     fn test_load_queue_records_session_start_in_history() {
-        // load_tracks фильтрует по существованию файла — кладём настоящий.
+        // load_tracks filters by file existence, so we create a real file.
         let dir = std::env::temp_dir().join(format!("unidtk-hist-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("start.mp3");
@@ -1035,8 +1035,8 @@ mod tests {
         .expect("upsert_track");
 
         let pm = PlayerManager::new(ConfigStore::load_or_default(), db);
-        // mpv в тестовой среде может не поднять файл (нет DLL/битый content) —
-        // запись о старте сессии обязана произойти до запуска воспроизведения.
+        // In the test environment mpv may fail to open the file (missing DLL or broken content),
+        // so the session-start record must be written before playback is started.
         let _ = pm.load_queue(vec!["start_id".to_string()], 0);
 
         let state = pm.state.lock().expect("state lock");

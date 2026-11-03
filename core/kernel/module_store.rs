@@ -1,19 +1,19 @@
-//! Отдельные файловые хранилища модулей — реализация [`unidtk_api::StoreFactory`].
+//! Separate file stores of modules: the implementation of [`unidtk_api::StoreFactory`].
 //!
-//! Зачем модулю свой файл: redb держит **одного писателя на файл**. Модуль,
-//! который пишет помногу и подолгу (плеер сохраняет эмбеддинги отдельной
-//! транзакцией на каждый трек), в общей базе выстроил бы в очередь запись UI —
-//! сохранение позиций виджетов, вкладок проводника, правок плейлистов. Свой файл
-//! даёт свою очередь записи и свою надёжность коммита.
+//! Why a module gets its own file: redb keeps **one writer per file**. A module
+//! that writes a lot and for long stretches (the player saves embeddings in a separate
+//! transaction for each track) would, in the shared database, queue up UI writes: saving widget
+//! positions, explorer tabs, playlist edits. Its own file gives it its own write queue and
+//! its own commit durability.
 //!
-//! Ядро владеет и путём, и хендлом: модуль объявляет [`StoreSpec`] и получает
-//! обычный [`unidtk_api::ModuleDb`] — того же вида, что и общий срез. Поэтому
-//! модулю не нужно знать, где физически лежат его ключи, и переезд каталогов
-//! (Program Files / AppData) не задевает ни один модуль.
+//! The core owns both the path and the handle: a module declares a [`StoreSpec`] and receives an
+//! ordinary [`unidtk_api::ModuleDb`], the same kind as the shared slice. So the module
+//! does not need to know where its keys physically live, and moving the directories
+//! (Program Files / AppData) affects no module.
 //!
-//! Раскладка внутри каталога данных:
-//!   `mods/<slug>/<name>.redb`  — данные пользователя (ACID, попадают в бэкап)
-//!   `cache/<slug>/<name>.redb` — производные данные (удаляемы, без fsync)
+//! Layout inside the data directory:
+//!   `mods/<slug>/<name>.redb`  — user data (ACID, included in backups)
+//!   `cache/<slug>/<name>.redb` — derived data (deletable, no fsync)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ use unidtk_api::{ModuleDb, ModuleId, StoreFactory, StoreInfo, StoreKind, StoreSp
 
 use crate::module_db::{RedbModuleDb, MODULE_KV};
 
-/// Уже выданное хранилище — для [`StoreFactory::list`].
+/// Store already issued — for [`StoreFactory::list`].
 struct Opened {
     module: String,
     name: String,
@@ -32,12 +32,12 @@ struct Opened {
     path: PathBuf,
 }
 
-/// Фабрика файловых хранилищ поверх redb.
+/// Factory of file stores on top of redb.
 pub struct RedbStoreFactory {
-    /// Каталог данных (`%LOCALAPPDATA%\UniDTK`), под ним — `mods/` и `cache/`.
+    /// Data directory (`%LOCALAPPDATA%\UniDTK`); under it are `mods/` and `cache/`.
     root: PathBuf,
-    /// redb лочит файл эксклюзивно, поэтому на каждый путь — один общий хендл.
-    /// Раньше этот кэш был вынужден жить в самом модуле (AI DJ), теперь он тут.
+    /// redb locks the file exclusively, so each path gets one shared handle.
+    /// This cache used to have to live in the module itself (AI DJ); now it lives here.
     handles: Mutex<HashMap<PathBuf, Arc<Database>>>,
     opened: Mutex<Vec<Opened>>,
 }
@@ -47,7 +47,7 @@ impl RedbStoreFactory {
         Self::with_root(unidtk_api::paths::data_dir())
     }
 
-    /// Свой корень вместо каталога данных — для тестов.
+    /// Own root instead of the data directory, for tests.
     pub fn with_root(root: PathBuf) -> Self {
         Self {
             root,
@@ -67,7 +67,7 @@ impl RedbStoreFactory {
             .join(format!("{}.redb", spec.name))
     }
 
-    /// Забрать прежний файл хранилища из каталога данных на новое место.
+    /// Move a previous store file from the data directory to its new location.
     fn adopt_legacy(&self, target: &Path, spec: &StoreSpec) {
         if target.exists() {
             return;
@@ -82,7 +82,7 @@ impl RedbStoreFactory {
                     return;
                 }
             }
-            // Один том → rename; иначе копируем и убираем исходник.
+            // Same volume → rename; otherwise copy and remove the source.
             if std::fs::rename(&old, target).is_err() {
                 if std::fs::copy(&old, target).is_err() {
                     continue;
@@ -93,16 +93,16 @@ impl RedbStoreFactory {
         }
     }
 
-    /// Развернуть прежние таблицы модуля в плоские ключи хранилища.
+    /// Expand a module's previous tables into flat store keys.
     ///
-    /// Пока модуль держал данные в собственных redb-таблицах, схема была его
-    /// личным делом; контракт даёт одно пространство ключей, поэтому старую
-    /// раскладку надо один раз переписать с префиксами. Делает это ядро, потому
-    /// что redb знает только оно, а имена таблиц и префиксы объявляет модуль
-    /// через [`StoreSpec::legacy_tables`].
+    /// While the module kept its data in its own redb tables, the schema was its
+    /// private business; the contract provides one key namespace, so the old
+    /// layout must be rewritten once with prefixes. The core does this, because only
+    /// it knows redb, while the table names and prefixes are declared by the module
+    /// via [`StoreSpec::legacy_tables`].
     ///
-    /// Идемпотентно: после переезда таблицы больше нет, второй вызов не находит
-    /// ничего. Поэтому вызывается на каждом открытии, а не «один раз по флагу».
+    /// Idempotent: after the move the table no longer exists, so a second call finds
+    /// nothing. Therefore it is called on every open, not "once per flag".
     fn flatten_legacy_tables(db: &Database, tables: &[(&'static str, String)]) -> Vec<String> {
         let mut moved = Vec::new();
         if tables.is_empty() {
@@ -112,7 +112,7 @@ impl RedbStoreFactory {
             Ok(txn) => txn,
             Err(_) => return moved,
         };
-        // Разовая операция: надёжность важнее скорости.
+        // One-off operation: durability matters more than speed.
         txn.set_durability(Durability::Immediate);
         for (table_name, prefix) in tables {
             let def: TableDefinition<&str, &[u8]> = TableDefinition::new(table_name);
@@ -127,7 +127,7 @@ impl RedbStoreFactory {
                         .collect()
                     })
                     .unwrap_or_default(),
-                // Таблицы нет — переезжать нечему.
+                // No table: there is nothing to migrate.
                 Err(_) => continue,
             };
             if rows.is_empty() {
@@ -187,7 +187,7 @@ impl StoreFactory for RedbStoreFactory {
         }
         let db = self.handle(&path)?;
 
-        // Прежняя раскладка модуля (собственные таблицы) → плоские ключи.
+        // The module's previous layout (its own tables) → flat keys.
         for line in Self::flatten_legacy_tables(&db, &spec.legacy_tables) {
             unidtk_api::log(format!(
                 "store {}/{}: migrated legacy {}",
@@ -197,8 +197,8 @@ impl StoreFactory for RedbStoreFactory {
             ));
         }
 
-        // Надёжность — политика ядра по объявленному виду: производные данные
-        // пересобираемы, поэтому платить fsync за каждую пачку незачем.
+        // Durability is the core's policy for the declared kind: derived data
+        // can be rebuilt, so paying an fsync for every batch is pointless.
         let durability = match spec.kind {
             StoreKind::OwnedCache => Durability::Eventual,
             _ => Durability::Immediate,
@@ -299,7 +299,7 @@ mod tests {
         let factory = factory(&root);
         let id = ModuleId::new("mp3-player");
 
-        // Прежнее имя в каталоге данных — как у unidtk_ai_dj.redb.
+        // The previous name in the data directory, the same as unidtk_ai_dj.redb.
         let legacy = root.join("unidtk_ai_dj.redb");
         {
             let db = Database::create(&legacy).unwrap();
@@ -316,7 +316,7 @@ mod tests {
 
         assert!(root.join("cache").join("mp3_player").join("ai_dj.redb").is_file());
         assert!(!legacy.exists(), "legacy file must be moved, not copied");
-        // Переезд не должен терять данные.
+        // The move must not lose data.
         assert_eq!(
             store.kv_get("emb:kept").unwrap().as_deref(),
             Some(&b"kept"[..])
@@ -330,8 +330,8 @@ mod tests {
         let factory = factory(&root);
         let id = ModuleId::new("mp3-player");
 
-        // Прежняя раскладка модуля: две его собственные таблицы в своём файле.
-        // Путь — тот же, что выделит фабрика (`cache/<slug>/<name>.redb`).
+        // The module's previous layout: its two own tables in their own file.
+        // The path is the same one the factory allocates (`cache/<slug>/<name>.redb`).
         let path = root.join("cache").join("mp3_player").join("ai_dj.redb");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         {
@@ -354,12 +354,12 @@ mod tests {
             .legacy_tables(&[("embeddings", "emb:"), ("analyses", "ana:")]);
         let store = factory.open(&id, &spec).unwrap();
 
-        // Старые строки доступны уже как префиксованные ключи.
+        // The old rows are now available as prefixed keys.
         assert_eq!(store.kv_get("emb:t1").unwrap().as_deref(), Some(&b"vec1"[..]));
         assert_eq!(store.kv_get("ana:t1").unwrap().as_deref(), Some(&b"json"[..]));
         assert_eq!(store.kv_count("emb:").unwrap(), 1);
 
-        // Идемпотентность: повторное открытие ничего не портит.
+        // Idempotency: reopening does not break anything.
         drop(store);
         let again = factory.open(&id, &spec).unwrap();
         assert_eq!(again.kv_count("emb:").unwrap(), 1);

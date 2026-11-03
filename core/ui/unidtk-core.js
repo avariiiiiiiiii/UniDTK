@@ -20,13 +20,13 @@ window.addEventListener("contextmenu", (e) => {
   e.preventDefault();
 }, { capture: true });
 
-// в”Ђв”Ђв”Ђ Icon system: name-based в†’ type-based fallback в”Ђв”Ђв”Ђ
+// ─── Icon system: name-based → type-based fallback ───
 
 
 
 const widgetsCanvas = document.getElementById("widgets");
 
-// в”Ђв”Ђв”Ђ State в”Ђв”Ђв”Ђ
+// ─── State ───
 let editMode = false;
 let config = { order: [], align: "left" };
 let cachedWidgetTypes = [];
@@ -108,7 +108,7 @@ listen("sync-tasks", (event) => {
   }
 }).catch(() => {});
 
-// в”Ђв”Ђв”Ђ Load config from file в”Ђв”Ђв”Ђ
+// ─── Load config from file ───
 
 
 
@@ -190,7 +190,7 @@ function placeOnCanvas(pos, card = null) {
   };
 }
 
-// Pin a laid-out card to its nearest screen corner. Only «Готово» calls this:
+// Pin a laid-out card to its nearest screen corner. Only "Done" calls this:
 // the canvas is the real one then, never a size reported mid-sleep.
 function pinToNearestCorner(pos, card) {
   const canvasW = widgetsCanvas.clientWidth || window.innerWidth;
@@ -308,7 +308,7 @@ async function createWidgetInstance(widgetType) {
   if (!config.positions) config.positions = {};
   if (!Array.isArray(config.hidden)) config.hidden = [];
 
-  // Если базовый виджет этого типа был скрыт — возвращаем его, а не плодим инстанс.
+  // If the base widget of this type was hidden, restore it instead of creating a new instance.
   if (config.hidden.includes(widgetType)) {
     config.hidden = config.hidden.filter((id) => id !== widgetType);
     await saveConfig();
@@ -348,7 +348,7 @@ async function hideBaseWidget(widgetId) {
   await syncWidgets();
 }
 
-// в”Ђв”Ђв”Ђ Load widgets в”Ђв”Ђв”Ђ
+// ─── Load widgets ───
 
 // Widget list the desktop should show: modules + folders from the backend,
 // with special types pinned for the built-ins. Null when nothing came back.
@@ -638,8 +638,8 @@ function buildWidgetCard(w, layout) {
       });
     }
 
-    // Музыкальный виджет полностью управляется собственными touch-зонами,
-    // поэтому общий click-handler ему не нужен (иначе клик мимо зон раскрывал бы плеер в дашборд).
+    // The music widget is driven entirely by its own touch zones,
+    // so it does not need the shared click handler (otherwise a click outside the zones would expand the player into the dashboard).
     // Micrographics is ambient: it has nothing to open, and it covers the largest
     // area on the desktop, so a click target on it would swallow clicks meant for
     // the desktop behind it and expand it as if it were a folder.
@@ -689,7 +689,7 @@ function disposeWidgetCard(card) {
 let _syncInFlight = null;
 let _syncAgain = false;
 // Reconcile the desktop with the in-memory config without resetting the DOM
-// (architecture §4): cards that should go are disposed and removed, missing
+// (r[desk.relayout-not-reset]): cards that should go are disposed and removed, missing
 // ones are built, folder cards pick up renamed titles and edited shortcuts in
 // place. Everything else — player, Telegram, clocks — keeps running.
 async function syncWidgets() {
@@ -781,7 +781,7 @@ async function loadWidgets() {
   const widgets = await fetchRenderableWidgets();
   if (!widgets) return;
 
-  // в”Ђв”Ђв”Ђ Arrange widgets в”Ђв”Ђв”Ђ
+  // ─── Arrange widgets ───
   disposeClockMorphs();
   widgetsCanvas.querySelectorAll('.micrographics-card').forEach((card) => card._geometryController?.dispose());
   _dockResizeObserver?.disconnect();
@@ -1184,7 +1184,7 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
     card._collapseTimer = null;
   }
 
-  // Enforce Widget Mutual Exclusion (unicoremodmotion.md §4.8)
+  // Enforce Widget Mutual Exclusion (r[motion.widget-integrity])
   captureDockGeometry(card);
   card._dockGeometryFrozen = true;
   expandSequence++;
@@ -1359,7 +1359,7 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
     });
 }
 
-// в”Ђв”Ђв”Ђ Clock Dashboard Content в”Ђв”Ђв”Ђ
+// ─── Clock Dashboard Content ───
 
 
 
@@ -1367,7 +1367,7 @@ function getShortcutIcon(name, type) {
   const s = 'width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"';
   const key = name.toLowerCase().trim();
 
-  // в”Ђв”Ђ Name-based icons в”Ђв”Ђ
+  // ── Name-based icons ──
 
   const named = {
     // AI Assistants
@@ -1491,7 +1491,7 @@ function getShortcutIcon(name, type) {
       <circle cx="19" cy="16" r="0.8" fill="currentColor" stroke="none"/>
     </svg>`,
 
-    // Network вЂ” servers
+    // Network — servers
     "server tools": `<svg ${s}>
       <rect x="3" y="3" width="18" height="7" rx="2"/>
       <rect x="3" y="14" width="18" height="7" rx="2"/>
@@ -1531,7 +1531,7 @@ function getShortcutIcon(name, type) {
       <path d="M9 13h6"/>
     </svg>`,
 
-    // в”Ђв”Ђ Games в”Ђв”Ђ
+    // ── Games ──
 
     "steam": `<svg ${s}>
       <circle cx="12" cy="12" r="8.5"/>
@@ -1609,7 +1609,7 @@ function getShortcutIcon(name, type) {
 
   if (named[key]) return named[key];
 
-  // в”Ђв”Ђ Type-based fallback в”Ђв”Ђ
+  // ── Type-based fallback ──
 
   const byType = {
     folder: `<svg ${s}>
@@ -1705,7 +1705,7 @@ function escapeHtml(str) {
   }[c]));
 }
 
-// в”Ђв”Ђв”Ђ Special Widget: Music Player в”Ђв”Ђв”Ђ
+// ─── Special Widget: Music Player ───
 
 
 
@@ -1819,20 +1819,20 @@ listen("wallpaper-wheel", (event) => {
 window.addEventListener("error", (e) => showDebugMessage(`Ошибка: ${e.message}`));
 window.addEventListener("unhandledrejection", (e) => showDebugMessage(`Необработанный промис: ${e.reason}`));
 
-// в”Ђв”Ђв”Ђ System buttons в”Ђв”Ђв”Ђ
+// ─── System buttons ───
 
 document.getElementById("openMenu")?.addEventListener("click", (e) => {
   openMenu(e.currentTarget);
 });
 
-// в”Ђв”Ђв”Ђ Visibility-driven refresh в”Ђв”Ђв”Ђ
+// ─── Visibility-driven refresh ───
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     try { updateClockTime(); } catch {}
   }
 });
 
-// в”Ђв”Ђв”Ђ Init в”Ђв”Ђв”Ђ
+// ─── Init ───
 
 // ─── Shell Explorer (fullscreen overlay; not a desktop widget) ───
 
@@ -1930,8 +1930,8 @@ function setupDragReorder() {
     const applyMove = (ev) => {
       const deltaX = ev.clientX - startX;
       const deltaY = ev.clientY - startY;
-      // Alt: симметричное масштабирование — растягиваем во ВСЕ стороны равномерно
-      // (как в Photoshop / Figma). Центр виджета остаётся на месте.
+      // Alt: symmetric scaling, stretching evenly in ALL directions
+      // (as in Photoshop / Figma). The widget's centre stays in place.
       const isAlt = ev.altKey;
 
       if (isResize) {
@@ -1972,7 +1972,7 @@ function setupDragReorder() {
           card.style.height = newHeight + "px";
           card._glyphBarGeometry.layout();
         } else if (isResizeCorner) {
-            // Угол: при alt — растягиваем равномерно во все 4 стороны
+            // Corner: with alt, stretch evenly in all 4 directions
             const dx = isAlt ? deltaX * 2 : deltaX;
             const dy = isAlt ? deltaY * 2 : deltaY;
             let newWidth = Math.round(startWidth + dx);
@@ -1987,7 +1987,7 @@ function setupDragReorder() {
             card.style.height = newHeight + "px";
         } else if (isResizeRight || isResizeLeft) {
             let rawDelta = isResizeRight ? deltaX : -deltaX;
-            if (isAlt) rawDelta *= 2; // растягиваем сразу в обе стороны
+            if (isAlt) rawDelta *= 2; // stretch in both directions at once
             let newWidth = Math.round(startWidth + rawDelta);
             newWidth = Math.max(minW, Math.min(newWidth, 800));
             const widthDiff = newWidth - startWidth;
@@ -2060,8 +2060,8 @@ function setupDragReorder() {
       }
       clearNestMarks();
       
-      // Сохраняем ТОЛЬКО геометрию, не теряя пользовательских настроек
-      // (authUser, autoShuffle, version и т.п.)
+      // Save ONLY the geometry, without losing user settings
+      // (authUser, autoShuffle, version, etc.)
       let saveW = card.offsetWidth;
       let saveH = card.offsetHeight;
       // Glyph bar: store square side + derived height (offsetWidth was stuck at
@@ -2073,7 +2073,7 @@ function setupDragReorder() {
           saveH = laid.height;
         }
       }
-      // In memory only: «Готово» saves the whole arrangement, «Отменить» drops it.
+      // In memory only: "Done" saves the whole arrangement, "Cancel" drops it.
       config.positions[widgetId] = {
         ...config.positions[widgetId],
         x: parseInt(card.style.left),
@@ -2139,12 +2139,12 @@ function setupDesktopOutsideClickHandler() {
   });
 }
 
-// в”Ђв”Ђв”Ђ Edit mode toggle в”Ђв”Ђв”Ђ
+// ─── Edit mode toggle ───
 
 
 
-// One arrangement session: entering snapshots the layout, «Готово» pins every
-// card to its nearest corner and saves once, «Отменить» / Esc restores it all.
+// One arrangement session: entering snapshots the layout, "Done" pins every
+// card to its nearest corner and saves once, "Cancel" / Esc restores it all.
 const arrangeBar = document.getElementById("arrangeBar");
 let arrangeSnapshot = null;
 let arrangeOnExit = null;
@@ -2233,7 +2233,7 @@ arrangeBar?.addEventListener("click", (e) => {
   }
 });
 
-// «+ Папка» while arranging: the folder lands on the desk at once, ready to drag.
+// "+ Folder" while arranging: the folder lands on the desk at once, ready to drag.
 arrangeBar?.querySelector(".arrange-folder")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.currentTarget;
@@ -2241,7 +2241,7 @@ arrangeBar?.querySelector(".arrange-folder")?.addEventListener("submit", async (
   const iconKey = form.querySelector('[data-folder-icon][aria-checked="true"]')?.dataset.folderIcon || "folder";
   const { createFolder } = await import("./folders.js");
   const folder = await createFolder(input.value, iconKey);
-  // The new card counts as part of this arrangement: «Отменить» removes it.
+  // The new card counts as part of this arrangement: "Cancel" removes it.
   arrangeSnapshot?.createdFolders.push(folder.id);
   input.value = "";
   form.hidden = true;
@@ -2266,7 +2266,7 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest(".widget-add")) closeWidgetAddPopover();
 });
 
-// в”Ђв”Ђв”Ђ Debug в”Ђв”Ђв”Ђ
+// ─── Debug ───
 
 
 

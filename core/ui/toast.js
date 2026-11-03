@@ -2,7 +2,7 @@
  * UniDTK — one toast for the whole UI (toast.js)
  *
  * Replaces alert/confirm: a short status line at the bottom of the screen with
- * an optional action. Irreversible actions run at once and offer «Отменить»
+ * an optional action. Irreversible actions run at once and offer "Undo"
  * here for a few seconds instead of asking first.
  */
 

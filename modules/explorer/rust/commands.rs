@@ -12,8 +12,8 @@ pub fn create_shared_search() -> SharedSearch {
     Arc::new(Mutex::new(SearchEngine::new(100)))
 }
 
-/// Модуль проводника: единственное состояние — поисковый индекс, который ядро
-/// кладёт в managed-state для обёрток команд.
+/// Explorer module: its only state is the search index, which the core
+/// puts into managed state for the command wrappers.
 pub struct ExplorerModule {
     search: SharedSearch,
 }

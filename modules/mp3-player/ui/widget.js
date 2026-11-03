@@ -158,8 +158,8 @@ async function getMusicTrackById(trackId) {
 }
 
 // ─── Music In-Widget Popups (Library & Settings) ───
-// Попапы являются дочерними элементами карточки плеера (.music-widget),
-// центрируются точно по плееру и перемещаются вместе с ним.
+// Popups are child elements of the player card (.music-widget),
+// centered exactly on the player and moved together with it.
 
 function openMusicPopup(card, type) {
   if (editMode || !card) return;
@@ -252,7 +252,7 @@ function closeAllMusicPopups(card) {
   card.style.zIndex = "";
 }
 
-// Алиасы для обратной совместимости
+// Aliases for backward compatibility
 function openMusicSatellite(card, sat) {
   openMusicPopup(card, "library");
 }
@@ -342,8 +342,8 @@ async function renderMusicMenu(body, musicId) {
   const progressPct = body.querySelector(".music-ai-progress-pct");
   const progressFill = body.querySelector(".music-ai-progress-fill");
 
-  // Докачка AI DJ модели — отдельный ход со своей поверхностью: не смешивается
-  // с прогрессом анализа библиотеки (music-ai-progress-wrap).
+  // The AI DJ model download is a separate flow with its own surface: it is not mixed
+  // with the library analysis progress (music-ai-progress-wrap).
   const modelWrap = body.querySelector(".music-ai-model-wrap");
   const modelError = body.querySelector(".music-ai-model-error");
   const modelProgress = body.querySelector(".music-ai-model-progress");
@@ -368,8 +368,8 @@ async function renderMusicMenu(body, musicId) {
     if (modelError) modelError.style.display = "none";
   };
 
-  // Поверхность докачки не всплывает под открытым графом: состояния
-  // обновляются и при закрытом поповере, но show только когда граф спрятан.
+  // The download surface does not pop up over an open graph: states are
+  // updated even while the popover is closed, but shown only when the graph is hidden.
   const modelUiVisible = () => !graphContainer || graphContainer.style.display === "none";
 
   const showModelProgress = (fileName, bytesDone, bytesTotal) => {
@@ -475,8 +475,8 @@ async function renderMusicMenu(body, musicId) {
           if (progressFill) progressFill.style.width = `${pct}%`;
         }
       } else if (status?.model_present === false) {
-        // Модели нет: кнопка индекса работает кнопкой скачивания, текст
-        // задаёт статус докачки (offer / downloading / error).
+        // No model: the index button works as the download button; its text
+        // is set by the download status (offer / downloading / error).
         if (status?.model_downloading) {
           const bytesDone = typeof status.model_download_bytes_done === "number"
             ? status.model_download_bytes_done : 0;
@@ -484,7 +484,7 @@ async function renderMusicMenu(body, musicId) {
             ? status.model_download_bytes_total : 0;
           showModelProgress(modelCurrentFile, bytesDone, bytesTotal);
         } else if (modelState !== "error") {
-          // После ошибки интерфейс не сбрасываем: там retry-кнопка и текст.
+          // After an error we do not reset the UI: the retry button and text are there.
           showModelOffer();
         }
       } else {
@@ -548,15 +548,15 @@ async function renderMusicMenu(body, musicId) {
     e.stopPropagation();
     if (editMode || indexBtn.disabled) return;
 
-    // Без модели кнопка индекса — это кнопка докачки: сначала модель,
-    // анализ без неё невозможен (бэкенд отвечает той же ошибкой).
+    // Without a model the index button is the download button: the model comes first,
+    // since analysis is impossible without it (the backend replies with the same error).
     if (modelState === "offer" || modelState === "error") {
       indexBtn.disabled = true;
       indexBtn.textContent = "Скачивание модели…";
       try {
         const outcome = await invoke("ai_dj_model_download");
         if (outcome?.result === "already_present") {
-          // Появилась, пока был интерфейс — вернуться к обычной разметке.
+          // It appeared while the UI was open — switch back to the normal markup.
           hideModelUi();
           await updateAiDjStatus();
         } else {
@@ -641,8 +641,8 @@ async function renderMusicMenu(body, musicId) {
     console.warn("Failed to listen to ai-dj-progress:", err);
   });
 
-  // Докачка модели: свой ход и своё событие — не смешивается с ai-dj-progress
-  // (там сканируется библиотека).
+  // Model download: its own flow and its own event — not mixed with ai-dj-progress
+  // (that one scans the library).
   let unlistenModel = null;
   listen("ai-dj-model", (event) => {
     if (!body.isConnected) return;
@@ -654,7 +654,7 @@ async function renderMusicMenu(body, musicId) {
     } else if (p.stage === "error") {
       showModelError(p.message || "Скачивание модели не удалось");
     } else if (p.stage === "done") {
-      // Модель валидна и на месте — обычная разметка и статус из бэкенда.
+      // The model is valid and in place — normal markup and status from the backend.
       hideModelUi();
       updateAiDjStatus();
     }
@@ -796,7 +796,7 @@ async function renderMusicMenu(body, musicId) {
     return closest;
   };
 
-  // Вписать облако узлов в кадр: вызывается сразу после раскладки и на фиксации.
+  // Fit the node cloud into the frame: called right after layout and when the layout is frozen.
   const fitView = () => {
     if (!graphContainer || graphNodes.length === 0) return;
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -817,10 +817,10 @@ async function renderMusicMenu(body, musicId) {
     panY = -((minY + maxY) / 2) * zoom;
   };
 
-  // Очередь для запуска из графа: обход по его рёбрам. Пока у текущего узла
-  // есть непройденные соседи — идём в самого похожего из них; когда локальный
-  // кластер исчерпан, подключаемся по сильнейшему оставшемуся ребру к уже
-  // пройденным (каждый следующий трек — сосед в графе, а не случайный).
+  // Queue for playback started from the graph: a walk along its edges. While the current node
+  // has unvisited neighbours, go to the most similar of them; when the local
+  // cluster is exhausted, connect via the strongest remaining edge to an already
+  // visited node (each next track is a neighbour in the graph, not a random one).
   const buildGraphPlaybackQueue = (startId) => {
     const nodes = graphData?.nodes || [];
     const ids = nodes.map((node) => node.id);
@@ -839,7 +839,7 @@ async function renderMusicMenu(body, musicId) {
 
     const visited = new Set([startId]);
     const queue = [startId];
-    const frontier = new Map(); // id -> лучший счёт ребра к пройденным
+    const frontier = new Map(); // id -> best edge score to visited nodes
     const consider = (from) => {
       for (const [nid, score] of adjacency.get(from) || []) {
         if (visited.has(nid)) continue;
@@ -914,16 +914,16 @@ async function renderMusicMenu(body, musicId) {
 
       graphEdges = data.edges || [];
 
-      // Сразу вписываем облако в кадр: симуляция идёт на глазах, без «пустого»
-      // ожидания и без прыжка зума в конце.
+      // Fit the cloud into the frame right away: the simulation runs in view, with no
+      // "empty" wait and no zoom jump at the end.
       fitView();
 
       let tick = 0;
       const maxTicks = 320;
-      // Fruchterman–Reingold: k — «идеальная» дистанция. Отталкивание ~k²/d
-      // раскрывает граф, притяжение по рёбрам ~d²/k держит топологию; форму
-      // задаёт баланс сил, а не стартовая раскладка. Кулинга нет — иначе
-      // симуляция застывала бы в не-равновесии.
+      // Fruchterman–Reingold: k is the "ideal" distance. Repulsion ~k²/d
+      // opens up the graph, attraction along edges ~d²/k holds the topology; the shape is
+      // set by the balance of forces, not by the starting layout. There is no culling,
+      // otherwise the simulation would freeze in a non-equilibrium state.
       const k = 62;
       const repulsionCutoff = k * 3;
       const forceScale = 0.012;
@@ -936,8 +936,8 @@ async function renderMusicMenu(body, musicId) {
           return;
         }
 
-        // 1. Слабая гравитация к центру — только чтобы изолированные куски не
-        //    улетали; стягиванием форму не задаём.
+        // 1. Weak gravity toward the centre — only so that isolated pieces do not
+        //    fly away; we do not shape the layout by pulling it together.
         const kCenter = 0.00025;
         for (let i = 0; i < N; i++) {
           const n = graphNodes[i];
@@ -945,7 +945,7 @@ async function renderMusicMenu(body, musicId) {
           n.vy -= n.y * kCenter;
         }
 
-        // 2. Притяжение по рёбрам (d²/k): ближе по вкусу — короче ребро.
+        // 2. Attraction along edges (d²/k): more similar tracks get shorter edges.
         for (let e = 0; e < graphEdges.length; e++) {
           const [u, v, score] = graphEdges[e];
           const n1 = graphNodes[u];
@@ -964,7 +964,7 @@ async function renderMusicMenu(body, musicId) {
           n2.vy -= fy;
         }
 
-        // 3. Пространственная сетка с целочисленными ключами (без строк и GC).
+        // 3. Spatial grid with integer keys (no strings, no GC).
         const cellSize = repulsionCutoff;
         const grid = new Map();
         for (let i = 0; i < N; i++) {
@@ -980,8 +980,8 @@ async function renderMusicMenu(body, musicId) {
           cell.push(i);
         }
 
-        // 4. Отталкивание (k²/d): вблизи сильнее притяжения — именно оно
-        //    раскрывает граф вместо стягивания в круг.
+        // 4. Repulsion (k²/d): stronger than attraction at close range — it is this
+        //    that opens up the graph instead of pulling it into a circle.
         for (let i = 0; i < N; i++) {
           const n1 = graphNodes[i];
           const cx = Math.floor(n1.x / cellSize);
@@ -1013,8 +1013,8 @@ async function renderMusicMenu(body, musicId) {
           }
         }
 
-        // 5. Интеграция: демпфирование и ограничение скорости. Равновесие
-        //    достигается балансом сил, а не затуханием к нулю.
+        // 5. Integration: damping and speed limiting. Equilibrium is reached by the
+        //    balance of forces, not by decay toward zero.
         const maxSpeed = 9.0;
         const damping = 0.85;
         let totalSpeed = 0;
@@ -1122,8 +1122,8 @@ async function renderMusicMenu(body, musicId) {
 
       if (!hasDragged && hoveredNode) {
         const targetId = hoveredNode.id;
-        // Очередь — обход по рёбрам графа: next/prev ходят по соседям, а не
-        // крутят один трек (player_load_queue с одним id зацикливался).
+        // The queue is a walk along the graph's edges: next/prev move to neighbours instead of
+        // cycling a single track (player_load_queue with one id used to loop).
         const trackIds = buildGraphPlaybackQueue(targetId);
         showDebugMessage(`AI DJ: ${hoveredNode.title || targetId} (${trackIds.length} в очереди по графу)`);
         try {
@@ -1657,11 +1657,11 @@ async function startMusicMetadataLoop(card) {
   card._visibilityHandler = onVisibilityChange;
 }
 
-// в”Ђв”Ђв”Ђ Special Widget: Glyph (Nothing Phone-style light strip) в”Ђв”Ђв”Ђ
+// --- Special Widget: Glyph (Nothing Phone-style light strip) ---
 //
-// Используем АБСОЛЮТНЫЕ пиксельные координаты в SVG (без viewBox), а не растягиваемый
-// viewBox — тогда stroke-width в px не масштабируется при изменении размера виджета.
-// Толщина линии всегда константна (GLYPH_STROKE), а длина/форма меняется при resize.
+// We use ABSOLUTE pixel coordinates in the SVG (no viewBox) instead of a stretchable
+// viewBox, so stroke-width in px does not scale when the widget is resized.
+// The line thickness is always constant (GLYPH_STROKE); the length/shape changes on resize.
 
 async function renderMusicDashboard(body, widgetId, options = {}) {
   if (!body) return;
@@ -1691,7 +1691,7 @@ async function renderMusicDashboard(body, widgetId, options = {}) {
     return;
   }
 
-  // Названия плейлистов приходят из локальной qbc-библиотеки.
+  // Playlist names come from the local qbc library.
   if (typeof options.beforeCommit === "function") {
     await options.beforeCommit();
     if (!isCurrentRender()) return;
@@ -1868,7 +1868,7 @@ async function renderMusicDashboard(body, widgetId, options = {}) {
     }
   });
 
-  // Безопасно заполняем обложки без мутации структуры DOM
+  // Fill the cover art safely, without mutating the DOM structure
   body.querySelectorAll(".music-playlist-item").forEach(async (item) => {
     const i = Number(item.dataset.idx);
     const p = playlists[i];
@@ -1902,12 +1902,12 @@ async function renderMusicDashboard(body, widgetId, options = {}) {
     }
   });
 
-  // ── ПКМ-меню плейлиста ────────────────────────────────────────────────────
-  // Свои классы (.music-context-menu/.music-cm-*), общий стиль с меню проводника,
-  // но без зависимости от его CSS/модуля. Показывает число треков, локальное
-  // переименование и удаление (файлы остаются на диске).
-  // Меню живёт на уровне документа (клиентские координаты) и открывается через
-  // SurfaceManager — как меню проводника: анимация, слои, жизненный цикл.
+  // ── Playlist right-click menu ─────────────────────────────────────────────
+  // Its own classes (.music-context-menu/.music-cm-*), sharing the Explorer menu's style,
+  // but without depending on its CSS/module. Shows the track count, local
+  // rename, and delete (files stay on disk).
+  // The menu lives at document level (client coordinates) and opens through
+  // SurfaceManager, like the Explorer menu: animation, layers, lifecycle.
   document.querySelectorAll(".music-context-menu").forEach((el) => el.remove());
   const playlistMenu = document.createElement("div");
   playlistMenu.className = "music-context-menu";
@@ -2004,7 +2004,7 @@ async function renderMusicDashboard(body, widgetId, options = {}) {
 
     if (!playlistMenu.isConnected) document.body.appendChild(playlistMenu);
 
-    // Измеряем и вписываем в экран до открытия серфейса.
+    // Measure it and fit it on screen before the surface opens.
     playlistMenu.style.left = "0px";
     playlistMenu.style.top = "0px";
     playlistMenu.style.display = "block";
@@ -2050,7 +2050,7 @@ async function renderMusicDashboard(body, widgetId, options = {}) {
     });
   };
 
-  // Единое делегирование кликов на уровне сетки (Event Delegation)
+  // Single click delegation at the grid level (Event Delegation)
   const grid = body.querySelector(".shortcuts-grid");
   if (grid) {
     grid.addEventListener("contextmenu", (e) => {

@@ -4,7 +4,7 @@
  * Why this file exists: the interface used to talk to Tauri from ~13 files, each
  * importing `@tauri-apps/api/core` or a plugin directly. That made the transport
  * impossible to change in one place — which is exactly what the frontend migration
- * (the H3 record in `docs/cliudtk.md`) needs. The UI imports *this* module; only this module knows
+ * (`docs/history/rfcs/udtk-migration.md`, H3) needs. The UI imports *this* module; only this module knows
  * how a call reaches the kernel.
  *
  * Rules this file keeps:
@@ -32,7 +32,7 @@ import {
 import { openPath } from "@tauri-apps/plugin-opener";
 
 // Re-exported untouched: plugins and asset URLs stay on Tauri for the whole migration
-// (moving them is a separate stage, §10.22 «что не делать»).
+// (moving them is a separate stage; see "what not to do" in H3 of `docs/history/rfcs/udtk-migration.md`).
 export {
   convertFileSrc,
   appDataDir,

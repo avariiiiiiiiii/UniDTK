@@ -565,9 +565,9 @@ impl SyncManager {
                     warning: Some(detail),
                 });
             }
-            // Часть записей недоступна в источнике (удалены/приватны/регион):
-            // yt-dlp выходит с кодом 1, хотя скачивать больше нечего — это
-            // пропуск, а не сбой синхронизации.
+            // Some entries are unavailable at the source (deleted/private/region-locked):
+            // yt-dlp exits with code 1 even though there is nothing left to download. This is
+            // a skip, not a sync failure.
             let (errors, unavailable) = yt_dlp_error_stats(&stderr_lines);
             if errors > 0 && errors == unavailable {
                 return Ok(YtDlpRun {
@@ -718,8 +718,8 @@ fn ytdlp_marker_path(config: &ConfigStore) -> PathBuf {
     config.path().with_file_name(".ytdlp_last_update")
 }
 
-/// Время (unix seconds) последней авто-проверки yt-dlp — для статуса подмодуля
-/// в реестре настроек.
+/// Time (unix seconds) of the last automatic yt-dlp check, for the submodule status
+/// in the settings registry.
 pub fn ytdlp_last_update(config: &ConfigStore) -> Option<u64> {
     fs::read_to_string(ytdlp_marker_path(config))
         .ok()
@@ -831,9 +831,9 @@ fn parse_progress_line(line: &str) -> Option<f64> {
     number.parse::<f64>().ok()
 }
 
-/// Сколько строк-ошибок yt-dlp и сколько из них — «запись недоступна в
-/// источнике» (удалена/приватна/регион). Такие пропуски не должны помечать
-/// синк как сбой: качать больше нечего, плейлист просто короче источника.
+/// Counts the yt-dlp error lines, and how many of them mean "entry unavailable at the
+/// source" (deleted/private/region-locked). Such skips must not mark the sync as failed:
+/// there is nothing more to download, the playlist is simply shorter than the source.
 fn yt_dlp_error_stats(stderr_lines: &Arc<Mutex<Vec<String>>>) -> (usize, usize) {
     let Ok(guard) = stderr_lines.lock() else {
         return (0, 0);

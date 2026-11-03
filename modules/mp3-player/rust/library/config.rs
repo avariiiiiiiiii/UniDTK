@@ -77,8 +77,8 @@ impl ConfigStore {
         fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
 
         let path = dir.join("config.toml");
-        // Переезд конфига из Roaming: там он лежал до перехода на каталог данных.
-        // Без этого потерялся бы `library_dir` и библиотека «опустела».
+        // Config migration from Roaming: the config lived there before the switch to the data directory.
+        // Without this, `library_dir` would be lost and the library would appear empty.
         if !path.exists() {
             let legacy = legacy_app_config_dir().join("config.toml");
             if legacy.is_file() && fs::copy(&legacy, &path).is_ok() {
@@ -121,9 +121,9 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// Точечное изменение под локом: и мутация, и запись на диск идут под одним
-    /// захватом, поэтому параллельный `save_config` из UI не может затереть
-    /// правку или оставить на диске состояние, которого не было в памяти.
+    /// Targeted change under the lock: both the mutation and the write to disk happen under one
+    /// lock hold, so a concurrent `save_config` from the UI cannot overwrite the edit or leave
+    /// on disk a state that was never in memory.
     pub fn mutate<F>(&self, apply: F) -> Result<AppConfig, String>
     where
         F: FnOnce(&mut AppConfig),
@@ -185,8 +185,8 @@ impl AppConfig {
         if self.auto_sync_interval_hours < 0.25 {
             self.auto_sync_interval_hours = 0.25;
         }
-        // Кроссфейд AI DJ: единственный владелец диапазона (0–10 с) — реестр
-        // подмодулей объявляет те же границы.
+        // AI DJ crossfade: this is the only owner of the range (0–10 s); the submodule
+        // registry declares the same bounds.
         self.ai_dj_crossfade_seconds = self.ai_dj_crossfade_seconds.clamp(0.0, 10.0);
         self
     }
@@ -332,21 +332,21 @@ fn toml_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-/// Каталог конфига — каталог данных приложения, а не Roaming.
+/// The config directory is the application data directory, not Roaming.
 ///
-/// Внутри абсолютные пути и `cookies_browser`: такой конфиг машинно-зависим и
-/// не должен «ехать» вместе с перемещаемым профилем пользователя.
+/// It contains absolute paths and `cookies_browser`, so this config is machine-specific and
+/// must not travel with the user's roaming profile.
 pub fn app_config_dir() -> PathBuf {
     unidtk_api::paths::data_dir()
 }
 
-/// Библиотека по умолчанию — под каталогом данных. Переопределяется
-/// `library_dir` в конфиге: музыка это пользовательский контент.
+/// The default library lives under the data directory. It can be overridden by
+/// `library_dir` in the config, because music is user content.
 fn default_library_dir() -> PathBuf {
     unidtk_api::paths::music_dir()
 }
 
-/// Прежний каталог конфига в Roaming (`%APPDATA%\qbc-music`) — только для переезда.
+/// The former config directory in Roaming (`%APPDATA%\qbc-music`) — used only for migration.
 fn legacy_app_config_dir() -> PathBuf {
     match env::var_os("APPDATA") {
         Some(appdata) => PathBuf::from(appdata).join("qbc-music"),

@@ -4,10 +4,10 @@
 //! in the module's own store, and builds a similarity graph for intelligent
 //! track transitions.
 //!
-//! Хранилище — **отдельный файл**, который выделяет ядро по объявлению модуля
-//! (`unidtk_api::StoreSpec::cache("ai_dj")`, см. `core/kernel/module_store.rs`).
-//! Поэтому путь здесь не собирается, и `redb` модулю не нужен: он работает с
-//! тем же `unidtk_api::ModuleDb`, что и общий срез базы.
+//! The store is a **separate file** that the kernel allocates from the module's declaration
+//! (`unidtk_api::StoreSpec::cache("ai_dj")`, see `core/kernel/module_store.rs`).
+//! So the path is not built here, and the module does not need `redb`: it works with the
+//! same `unidtk_api::ModuleDb` as the shared database slice.
 
 use std::{
     collections::HashMap,
@@ -22,17 +22,17 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use unidtk_api::{DbOp, ModuleDb};
 
-/// Эмбеддинги и анализы живут в одном пространстве ключей, поэтому у каждого
-/// свой префикс. Наружу `kv_list` отдаёт ключ уже без префикса.
+/// Embeddings and analyses live in one key space, so each has its own prefix.
+/// `kv_list` returns keys to the caller already without the prefix.
 const EMB: &str = "emb:";
 const ANA: &str = "ana:";
 
-/// Размерность эмбеддинга discogs-maest-129e.
+/// Embedding dimension of discogs-maest-129e.
 const EMBEDDING_DIM: usize = 400;
 
-/// Относительный путь модели AI DJ в любом каталоге (поставка, каталог данных,
-/// dev-обход репозитория). Контракт раскладки для всего: и для загрузчика
-/// модели, и для виджета, поэтому он объявлен публично — один раз, здесь.
+/// Relative path of the AI DJ model inside any base directory (install package, data directory,
+/// dev repository checkout). It is the layout contract for everything: both the model loader
+/// and the widget use it, so it is declared publicly, once, here.
 pub const MODEL_REL: &str = "discogs-maest-129e/model.onnx";
 
 fn emb_key(track_id: &str) -> String {
@@ -80,21 +80,21 @@ pub enum EnergyCurve {
     Any,
 }
 
-/// Хранилище AI DJ, выданное ядром при загрузке модуля.
+/// AI DJ store, issued by the kernel when the module is loaded.
 ///
-/// Модуль не собирает путь сам: объявление `StoreSpec::cache("ai_dj")` делает
-/// `commands::AppState::bootstrap`, а расположение файла и надёжность коммита
-/// выбирает ядро (см. `core/kernel/module_store.rs`).
+/// The module does not build the path itself: `commands::AppState::bootstrap` makes the
+/// `StoreSpec::cache("ai_dj")` declaration, and the kernel chooses the file location and the
+/// commit durability (see `core/kernel/module_store.rs`).
 static AI_DJ_STORE: OnceLock<Arc<dyn ModuleDb>> = OnceLock::new();
 
-/// Выдать хранилище AI DJ — вызывает модуль при bootstrap, получив его из
+/// Hand over the AI DJ store. The module calls this during bootstrap, after receiving it from
 /// [`unidtk_api::ModuleContext::store`].
 pub fn set_store(store: Arc<dyn ModuleDb>) {
     let _ = AI_DJ_STORE.set(store);
 }
 
-/// Хранилище AI DJ. Если ядро его ещё не выдало — это ошибка: молча писать в
-/// память в рантайме означало бы тихую потерю всего анализа.
+/// AI DJ store. If the kernel has not issued it yet, that is an error: silently writing to
+/// memory at runtime would mean silently losing all analysis.
 pub fn ai_dj_store() -> Result<Arc<dyn ModuleDb>, String> {
     AI_DJ_STORE
         .get()
@@ -102,7 +102,7 @@ pub fn ai_dj_store() -> Result<Arc<dyn ModuleDb>, String> {
         .ok_or_else(|| "ai-dj: store is not initialized (module bootstrap skipped)".to_string())
 }
 
-/// Сколько треков проанализировано — по хранилищу, не поднимая движок.
+/// How many tracks have been analyzed, read from the store without starting the engine.
 pub fn analyzed_count() -> usize {
     match ai_dj_store() {
         Ok(store) => store.kv_count(EMB).unwrap_or(0) as usize,
@@ -110,30 +110,30 @@ pub fn analyzed_count() -> usize {
     }
 }
 
-/// Ревизия анализа: растёт при каждой записи/очистке эмбеддингов — по ней
-/// инвалидируется кэш графа сходства.
+/// Analysis revision: it grows on every embedding write or clear, and the similarity-graph
+/// cache is invalidated by it.
 static ANALYSIS_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn bump_analysis_revision() {
     ANALYSIS_REVISION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Кэш собранного графа сходства: хранилище → (ревизия анализа, отпечаток
-/// треков, граф). Сборка стоит ~n² скалярных произведений, а попап плеера
-/// открывается часто — повторный вызов должен получать готовый граф.
+/// Cache of the built similarity graph: store -> (analysis revision, track fingerprint,
+/// graph). Building costs ~n² dot products, and the player popup opens often, so a repeated
+/// call must get the ready graph.
 ///
-/// Ключ — идентичность хранилища, а не его путь: путь теперь знает только ядро,
-/// а у одного хранилища должен быть ровно один кэш (в тестах хранилища разные).
+/// The key is the store's identity, not its path: only the kernel knows the path now,
+/// and one store must have exactly one cache (tests use different stores).
 static GRAPH_CACHE: std::sync::OnceLock<Mutex<HashMap<usize, (u64, u64, SimilarityGraph)>>> =
     std::sync::OnceLock::new();
 
-/// Ключ кэша — адрес хранилища: один `Arc`, значит один кэш.
+/// Cache key is the store's address: one `Arc` means one cache.
 fn store_key(store: &Arc<dyn ModuleDb>) -> usize {
     Arc::as_ptr(store) as *const () as usize
 }
 
-/// Дешёвый отпечаток набора треков (id/title/artist): правка метаданных
-/// (например, синхронизация) тоже инвалидирует кэш графа.
+/// Cheap fingerprint of the track set (id/title/artist): a metadata edit
+/// (for example, a sync) also invalidates the graph cache.
 fn tracks_fingerprint(tracks: &[crate::library::db::Track]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut mix = |bytes: &[u8]| {
@@ -155,7 +155,7 @@ fn tracks_fingerprint(tracks: &[crate::library::db::Track]) -> u64 {
 
 /// AI DJ engine — manages embeddings, similarity graph, and transition paths.
 pub struct AiDj {
-    /// Хранилище модуля: отдельный файл, путь выбирает ядро.
+    /// Module store: a separate file; the kernel chooses the path.
     store: Arc<dyn ModuleDb>,
     /// In-memory cache of embeddings (track_id -> embedding).
     embeddings: HashMap<String, Embedding>,
@@ -178,8 +178,8 @@ impl AiDj {
         Ok(())
     }
 
-    /// Создать движок поверх хранилища модуля: в рантайме это `ai_dj_store()`,
-    /// в тестах — хранилище в памяти.
+    /// Create the engine on top of the module store: at runtime this is `ai_dj_store()`,
+    /// in tests it is an in-memory store.
     pub fn new(store: Arc<dyn ModuleDb>) -> Self {
         Self {
             store,
@@ -194,7 +194,7 @@ impl AiDj {
         self.analyses.clear();
 
         for (key, bytes) in self.store.kv_list(EMB)? {
-            // `kv_list` отдаёт ключ с запрошенным префиксом — id трека это хвост.
+            // `kv_list` returns the key with the requested prefix; the track id is the remainder.
             let track_id = key.strip_prefix(EMB).unwrap_or(&key).to_string();
             // Deserialize: 400 x f32 = 1600 bytes
             if bytes.len() >= EMBEDDING_DIM * 4 {
@@ -239,7 +239,7 @@ impl AiDj {
         }
         let analysis_json = serde_json::to_vec(analysis).map_err(|e| e.to_string())?;
 
-        // Эмбеддинг и анализ едут вместе: половина записи бессмысленна.
+        // The embedding and the analysis are written together: half of a record is meaningless.
         self.store.kv_batch(vec![
             DbOp::Set {
                 key: emb_key(track_id),
@@ -251,7 +251,7 @@ impl AiDj {
             },
         ])?;
 
-        // Набор эмбеддингов изменился — кэш графа сходства больше не актуален.
+        // The embedding set has changed, so the similarity-graph cache is no longer valid.
         bump_analysis_revision();
 
         Ok(())
@@ -499,9 +499,9 @@ impl AiDj {
         queue
     }
 
-    /// Граф сходства из кэша, если ревизия анализа и отпечаток треков совпадают.
-    /// Публичный: путь «AI DJ выключен» может отдать готовый граф, не загружая
-    /// эмбеддинги из хранилища.
+    /// Similarity graph from the cache, if the analysis revision and the track fingerprint match.
+    /// Public: the "AI DJ disabled" path can return a ready graph without loading
+    /// embeddings from the store.
     pub fn cached_graph(
         store: &Arc<dyn ModuleDb>,
         tracks: &[crate::library::db::Track],
@@ -535,9 +535,8 @@ impl AiDj {
 
     /// Build a compact similarity graph with top-k nearest neighbors for Canvas visualization.
     ///
-    /// Пересборка — O(n²) скалярных произведений (n = число проанализированных
-    /// треков), поэтому результат кэшируется по (ревизия анализа, отпечаток
-    /// треков): попап открывается часто, а набор меняется редко.
+    /// Rebuilding is O(n²) dot products (n = number of analyzed tracks), so the result is cached
+    /// by (analysis revision, track fingerprint): the popup opens often, but the set changes rarely.
     pub fn build_similarity_graph(&self, tracks: &[crate::library::db::Track], k: usize) -> SimilarityGraph {
         if let Some(graph) = Self::cached_graph(&self.store, tracks) {
             return graph;
@@ -547,16 +546,16 @@ impl AiDj {
         graph
     }
 
-    /// Сборка без кэша: нормы эмбеддингов считаются один раз, top-k держится
-    /// вставкой по индексам — без `String`-клонов на каждую пару и без
-    /// сортировки массивов длиной n.
+    /// Build without the cache: embedding norms are computed once, top-k is kept
+    /// by insertion via indices, with no `String` clones per pair and no
+    /// sorting of arrays of length n.
     fn build_similarity_graph_uncached(
         &self,
         tracks: &[crate::library::db::Track],
         k: usize,
     ) -> SimilarityGraph {
         let mut nodes = Vec::new();
-        // (эмбеддинг, его норма) — индекс строки совпадает с индексом узла.
+        // (embedding, its norm) — the row index matches the node index.
         let mut rows: Vec<(&Embedding, f32)> = Vec::new();
 
         for track in tracks {
@@ -624,7 +623,7 @@ impl AiDj {
     pub fn clear(&mut self) {
         self.embeddings.clear();
         self.analyses.clear();
-        // Одной транзакцией: поштучные удаления дали бы коммит на каждый трек.
+        // One transaction: deleting entries one by one would commit once per track.
         let mut ops = Vec::new();
         if let Ok(list) = self.store.kv_list(EMB) {
             for (key, _) in list {
@@ -637,7 +636,7 @@ impl AiDj {
             }
         }
         let _ = self.store.kv_batch(ops);
-        // Анализ стёрт — кэш графа сходства инвалидируется.
+        // The analysis has been erased, so the similarity-graph cache is invalidated.
         bump_analysis_revision();
     }
 
@@ -1123,8 +1122,8 @@ pub fn unload_session() {
 /// 2. If the .onnx file is small (< 50MB, e.g. discogs-maest-129e graph is 122KB),
 ///    an external weights file (model.onnx.data) must also exist and be > 10MB.
 ///
-/// Публичный предикат: им пользуется и загрузчик модели (решать, докачивать ли
-/// файлы), и ядро-обёртка — проверка валидности должна быть одна на всех.
+/// Public predicate: both the model loader (deciding whether to download missing
+/// files) and the kernel wrapper use it, so there must be a single validity check for all.
 pub fn is_valid_onnx_model(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -1157,8 +1156,8 @@ pub fn is_valid_onnx_model(path: &Path) -> bool {
     })
 }
 
-/// Публичный поиск модели: точка истины «модель здесь и валидна» — её
-/// одинаково читают ONNX-загрузчик и фетчер (не докачивать валидный файл).
+/// Public model lookup: the single source of truth for "the model is here and valid".
+/// The ONNX loader and the fetcher read it the same way (a valid file is not downloaded again).
 pub fn find_model_path() -> Result<std::path::PathBuf, String> {
     if let Ok(p) = std::env::var("AI_DJ_MODEL_PATH") {
         let pb = std::path::PathBuf::from(p);
@@ -1169,14 +1168,14 @@ pub fn find_model_path() -> Result<std::path::PathBuf, String> {
 
     let install = unidtk_api::paths::install_dir();
     let mut candidates = vec![
-        // Приходит с установщиком — рядом с программой (Program Files).
+        // Shipped with the installer, next to the program (Program Files).
         install.join("models").join(MODEL_REL),
-        // Докачана или положена вручную — в каталоге данных.
+        // Downloaded later or placed manually, in the data directory.
         unidtk_api::paths::models_dir().join(MODEL_REL),
     ];
 
-    // Dev-прогон из чекаута: `udtk build` кладёт модель в `target/release/models`,
-    // а исходник живёт в `opt/models` — обходим дерево репозитория.
+    // Dev run from a checkout: `udtk build` puts the model in `target/release/models`,
+    // while the source lives in `opt/models` — we walk the repository tree.
     for ancestor in install.ancestors().take(4).skip(1) {
         candidates.push(ancestor.join("opt").join("models").join(MODEL_REL));
     }
@@ -1333,8 +1332,8 @@ mod tests {
         assert_eq!(similar[0].0, "track2"); // Most similar to track1
     }
 
-    /// Свежее хранилище в памяти: движок работает с тем же контрактом, что и в
-    /// рантайме, а путь и файл в тестах больше не участвуют.
+    /// A fresh in-memory store: the engine works with the same contract as at runtime,
+    /// and tests no longer involve any path or file.
     fn unique_store() -> Arc<dyn ModuleDb> {
         crate::library::db::memory_module_db()
     }
@@ -1597,20 +1596,20 @@ mod tests {
 
         let graph = dj.build_similarity_graph(&tracks, 1);
         assert_eq!(graph.nodes.len(), 3);
-        // k=1: ближайшая пара a↔b обязана быть соединена.
+        // k=1: the nearest pair a↔b must be connected.
         let connected = graph.edges.iter().any(|(u, v, _)| {
             let (left, right) = (graph.nodes[*u].id.as_str(), graph.nodes[*v].id.as_str());
             (left == "a" && right == "b") || (left == "b" && right == "a")
         });
         assert!(connected, "a↔b must be the top edge: {:?}", graph.edges);
 
-        // Повторный вызов отдаёт кэшированный граф.
+        // A repeated call returns the cached graph.
         let cached = dj.build_similarity_graph(&tracks, 1);
         assert_eq!(cached.nodes.len(), graph.nodes.len());
         assert_eq!(cached.edges.len(), graph.edges.len());
         assert!(AiDj::cached_graph(&store, &tracks).is_some());
 
-        // Новая запись эмбеддинга инвалидирует кэш.
+        // A new embedding write invalidates the cache.
         let analysis = TrackAnalysis {
             track_id: "d".into(),
             bpm: None,

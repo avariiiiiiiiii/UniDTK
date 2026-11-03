@@ -46,7 +46,7 @@
   stroke-width: 2;
 }
 
-/* Nothing OS: тонкое белое кольцо с красным акцентом */
+/* Nothing OS: thin white ring with a red accent */
 .ring-progress {
   fill: none;
   stroke: rgb(var(--fg-rgb));
@@ -227,7 +227,7 @@
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
 }
 
-/* --- Music playlist context menu (ПКМ в библиотеке) --- */
+/* --- Music playlist context menu (right-click in the library) --- */
 .music-context-menu {
   position: absolute;
   display: none;
@@ -848,8 +848,8 @@
 
 .music-popup.graph-view {
   width: 380px !important;
-  /* Высота под весь контент графа: заголовок 48 + селектор 35 + статус 18 +
-     граф 350 + отступы — иначе низ графа срезался (body overflow: hidden). */
+  /* Height that fits all graph content: header 48 + selector 35 + status 18 +
+     graph 350 + padding. Without it the bottom of the graph was clipped (body overflow: hidden). */
   height: 536px !important;
 }
 

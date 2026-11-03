@@ -32,8 +32,8 @@ ort = { version = "2.0.0-rc.13" }
 symphonia = { version = "0.5", features = ["mp3", "flac", "ogg", "wav", "aac", "isomp4", "alac", "vorbis"] }
 tauri = { version = "2" }
 tokio = { version = "1", features = ["rt", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
-# Докачка AI DJ модели: HTTPS-клиент (дефолт = rustls, без openssl) с
-# SOCKS-транспортом для обхода локальной сети и SHA-256 для проверки целостности.
+# On-demand download of the AI DJ model: HTTPS client (default = rustls, no openssl) with
+# a SOCKS transport for reaching it through the local network and SHA-256 for integrity checks.
 ureq = { version = "2", features = ["socks-proxy"] }
 sha2 = "0.10"
 

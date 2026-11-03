@@ -443,7 +443,7 @@
 
 .menu-details[open] > summary::before { transform: rotate(90deg); }
 
-/* ─── «Папки» ───────────────────────────────────────────────────────────── */
+/* ─── Folders ───────────────────────────────────────────────────────────── */
 
 .menu-folder {
   margin: 10px 0;
@@ -509,7 +509,7 @@
 .menu-start-app:hover { background: rgba(var(--bg-elev-rgb), 0.1); }
 .menu-start-app .menu-row-name { flex: 1; }
 
-/* ─── «Вид» ─────────────────────────────────────────────────────────────── */
+/* ─── Appearance ─────────────────────────────────────────────────────────────── */
 
 .menu-themes {
   display: grid;

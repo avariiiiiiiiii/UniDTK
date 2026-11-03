@@ -4,8 +4,8 @@
 //! right, and the command map underneath in plain text. The emblem is coloured
 //! from its own geometry (titanium serpent with crimson accent, ice planet, pale
 //! rings) and modulated per cell by a photo-derived shade byte: the serpent body
-//! carries the luminance of the source ouroboros painting (docs/unidtkascii.md
-//! §5), Saturn and the rings stay brand-coloured. The wordmark features "Uni" in
+//! carries the luminance of the source ouroboros painting (docs/dev/ascii-art.md,
+//! "Recorded Variants"), Saturn and the rings stay brand-coloured. The wordmark features "Uni" in
 //! chrome and "DTK" in German flag colors (Schwarz/Graphite, Rot, Gold);
 //! everything is plain UTF-8 when stdout is not a console, `NO_COLOR` is set or
 //! the console refused VT processing, so the output stays pipe-friendly.

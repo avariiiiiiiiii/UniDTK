@@ -14,10 +14,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Ensure that the directory holding the app (and therefore `udtk.exe`) is
 /// present in the User PATH environment variable (`HKCU\Environment`).
 ///
-/// Ничего не копируется: CLI лежит рядом с программой, и это **единственная**
-/// его копия. Раньше `udtk.exe` дублировался в `%LOCALAPPDATA%\UniDTK\bin`, а две
-/// копии одного бинарника неизбежно расходятся по версиям — в PATH мог оказаться
-/// вчерашний CLI при сегодняшнем приложении.
+/// Nothing is copied: the CLI lives next to the program, and this is its **only**
+/// copy. Previously `udtk.exe` was duplicated into `%LOCALAPPDATA%\UniDTK\bin`, and two
+/// copies of one binary inevitably drift apart in version: the PATH could end up
+/// pointing at yesterday's CLI alongside today's application.
 pub fn ensure_cli_in_path() -> Result<PathBuf, String> {
     let dir = unidtk_api::paths::install_dir();
     if !dir.join("udtk.exe").is_file() {

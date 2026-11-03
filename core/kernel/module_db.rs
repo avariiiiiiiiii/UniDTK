@@ -1,32 +1,32 @@
-//! Реализация [`unidtk_api::ModuleDb`] поверх общей базы UniDTK.
+//! Implementation of [`unidtk_api::ModuleDb`] on top of the shared UniDTK database.
 //!
-//! Модуль не получает ни `raw_db()`, ни право придумывать имена таблиц в общем
-//! пространстве: ядро выдаёт ему [`RedbModuleDb`], который сам добавляет к
-//! каждому ключу префикс `mods/<id>/`. Всё, что модуль пишет, физически лежит в
-//! его собственном срезе ключей, и ни один другой модуль туда не попадёт.
+//! A module receives neither `raw_db()` nor the right to invent table names in the shared
+//! namespace: the core hands it a [`RedbModuleDb`], which itself prepends the
+//! `mods/<id>/` prefix to every key. Everything a module writes physically lives in
+//! its own key slice, and no other module can reach it.
 //!
-//! Первый реальный потребитель — библиотека mp3-player: ядро выдаёт ей срез
-//! `mods/mp3_player/…` через [`unidtk_api::ModuleContext`], а перенос старых
-//! таблиц плеера делает `library_migration.rs`.
+//! The first real consumer is the mp3-player library: the core gives it the slice
+//! `mods/mp3_player/…` via [`unidtk_api::ModuleContext`], and the migration of the player's
+//! old tables is done by `library_migration.rs`.
 
 use std::sync::Arc;
 
 use redb::{Database, Durability, ReadableTableMetadata, TableDefinition};
 use unidtk_api::{DbOp, ModuleDb, ModuleId};
 
-/// Срез ключей всех модулей: `mods/<slug>/<key>` → байты.
+/// Key slice of all modules: `mods/<slug>/<key>` → bytes.
 pub(crate) const MODULE_KV: TableDefinition<&str, &[u8]> = TableDefinition::new("module_kv");
 
-/// Префикс, который ядро добавляет к ключам модуля.
+/// Prefix that the core prepends to a module's keys.
 pub(crate) fn scope_prefix(id: &ModuleId) -> String {
     format!("mods/{}/", id.storage_slug())
 }
 
-/// Хранилище одного модуля.
+/// Storage of a single module.
 ///
-/// Одна и та же реализация обслуживает два случая: срез общей базы ядра
-/// (`scope = "mods/<id>/"`) и отдельный файл модуля (`scope` пустой — тогда все
-/// ключи файла принадлежат модулю).
+/// One and the same implementation serves two cases: a slice of the core's shared database
+/// (`scope = "mods/<id>/"`) and a module's separate file (`scope` empty, in which case all
+/// keys in the file belong to the module).
 pub struct RedbModuleDb {
     db: Arc<Database>,
     scope: String,
@@ -34,18 +34,18 @@ pub struct RedbModuleDb {
 }
 
 impl RedbModuleDb {
-    /// Создать срез ключей для модуля `id` в базе `db`.
+    /// Create a key slice for module `id` in database `db`.
     pub fn new(db: Arc<Database>, id: &ModuleId) -> Self {
         Self {
             db,
             scope: scope_prefix(id),
-            // Общая база — данные пользователя: коммит по умолчанию синхронный.
+            // The shared database holds user data: commits are synchronous by default.
             durability: Durability::Immediate,
         }
     }
 
-    /// Хранилище целиком в отдельном файле: префикса нет, все ключи — свои.
-    /// Надёжность выбирает ядро по объявленному [`unidtk_api::StoreKind`].
+    /// The whole store in a separate file: there is no prefix, and all keys are its own.
+    /// The core picks durability from the declared [`unidtk_api::StoreKind`].
     pub fn dedicated(db: Arc<Database>, durability: Durability) -> Self {
         Self {
             db,
@@ -99,7 +99,7 @@ impl ModuleDb for RedbModuleDb {
         let txn = self.db.begin_read().map_err(|e| e.to_string())?;
         let table = match txn.open_table(MODULE_KV) {
             Ok(table) => table,
-            // Таблица создаётся лениво, при первой записи: до неё список пуст.
+            // The table is created lazily, on first write: until then the list is empty.
             Err(_) => return Ok(Vec::new()),
         };
         let full_prefix = self.full_key(prefix);
@@ -110,9 +110,9 @@ impl ModuleDb for RedbModuleDb {
             if !key.starts_with(&full_prefix) {
                 break;
             }
-            // Наружу ключ отдаётся без префикса модуля, но С префиксом запроса:
-            // иначе вызывающий не смог бы переиспользовать полученный ключ в
-            // `kv_remove`/`kv_batch` — а именно так чистятся связи плейлистов.
+            // The key is returned without the module prefix, but WITH the query prefix;
+            // otherwise the caller could not reuse the received key in
+            // `kv_remove`/`kv_batch`, and that is exactly how playlist links are cleaned up.
             out.push((key[self.scope.len()..].to_string(), value.value().to_vec()));
         }
         Ok(out)
@@ -146,8 +146,8 @@ impl ModuleDb for RedbModuleDb {
     }
 
     fn kv_count(&self, prefix: &str) -> Result<u64, String> {
-        // Весь файл модуля: счётчик берётся из B-дерева, без обхода.
-        // В общем срезе так нельзя — там под len() попали бы ключи всех модулей.
+        // Whole module file: the counter is read from the B-tree, without a scan.
+        // This is not possible in the shared slice: len() would count the keys of all modules.
         if self.scope.is_empty() && prefix.is_empty() {
             let txn = self.db.begin_read().map_err(|e| e.to_string())?;
             let table = match txn.open_table(MODULE_KV) {
@@ -187,7 +187,7 @@ mod tests {
             telegram.kv_get("last_tag").unwrap().as_deref(),
             Some(&b"Germany"[..])
         );
-        // Список видит только своё.
+        // The list only sees the module's own keys.
         let listed = vpn.kv_list("").unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].0, "last_tag");
@@ -209,8 +209,8 @@ mod tests {
             .into_iter()
             .map(|(k, _)| k)
             .collect();
-        // Служебный префикс модуля срезан, запрошенный — сохранён: полученный
-        // ключ обязан годиться для `kv_remove` без склейки префикса заново.
+        // The module's internal prefix is stripped, the requested one is kept: the returned
+        // key must be usable for `kv_remove` without re-attaching the prefix.
         assert_eq!(keys, vec!["cache/a".to_string(), "cache/b".to_string()]);
 
         let _ = std::fs::remove_dir_all(&dir);

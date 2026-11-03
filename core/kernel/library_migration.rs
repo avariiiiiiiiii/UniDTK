@@ -1,15 +1,15 @@
-//! Одноразовая миграция библиотеки mp3-player из старых таблиц `shell.redb`
-//! (`tracks`, `playlists`, `playlist_tracks`) в срез контракта
-//! `mods/mp3_player/…` (см. `module_db.rs`).
+//! One-off migration of the mp3-player library from the old `shell.redb` tables
+//! (`tracks`, `playlists`, `playlist_tracks`) into the contract slice
+//! `mods/mp3_player/…` (see `module_db.rs`).
 //!
-//! Плеер больше не получает сырой движок базы, поэтому перенос делает ядро —
-//! ровно один раз, на старте, до публикации стора и до бутстрапа музыки.
-//! Данные, маркер схемы и удаление таблиц-источников разделены на транзакции
-//! redb: запись среза + маркер — **одна** транзакция (обрыв не оставит
-//! половинчатого состояния), удаление — вторая, только после сверки счётчиков.
+//! The player no longer receives the raw database engine, so the core does the migration:
+//! exactly once, at startup, before the store is published and before music bootstrap.
+//! The data, the schema marker and the deletion of the source tables are split into
+//! redb transactions: writing the slice + the marker is **one** transaction (an interruption
+//! will not leave a half-done state); deletion is a second one, only after the counts are verified.
 //!
-//! Перед открытием базы ядро делает страховочную копию файла
-//! (`shell.redb.pre-module-kv.bak`) и никогда её не перезаписывает.
+//! Before opening the database, the core makes a safety copy of the file
+//! (`shell.redb.pre-module-kv.bak`) and never overwrites it.
 
 use redb::{Database, ReadableTable, TableDefinition};
 use std::path::{Path, PathBuf};
@@ -21,20 +21,20 @@ use crate::module_db::{scope_prefix, MODULE_KV};
 
 const MODULE_ID: &str = "mp3-player";
 const SCHEMA_KEY: &str = "schema";
-/// Версия раскладки: 2 — библиотека живёт в срезе модуля.
+/// Layout version: 2 means the library lives in the module slice.
 const SCHEMA_VALUE: &[u8] = b"2";
 
 const TRACK_PREFIX: &str = "track/";
 const PLAYLIST_PREFIX: &str = "playlist/";
 const LINK_PREFIX: &str = "pt/";
 
-// Имена и типы старых таблиц один в один как в `modules/mp3-player/rust/library/db.rs`
-// до перехода на контракт — иначе redb их не откроет.
+// Names and types of the old tables, identical to those in `modules/mp3-player/rust/library/db.rs`
+// before the switch to the contract; otherwise redb will not open them.
 const LEGACY_TRACKS: TableDefinition<&str, &[u8]> = TableDefinition::new("tracks");
 const LEGACY_PLAYLISTS: TableDefinition<&str, &[u8]> = TableDefinition::new("playlists");
 const LEGACY_PLAYLIST_TRACKS: TableDefinition<&str, &[u8]> = TableDefinition::new("playlist_tracks");
-// Индексы по added_at/last_played в контракт не переезжают: они только
-// поддерживались при записи и никогда не читались.
+// The indexes on added_at/last_played are not moved into the contract: they were only
+// maintained on write and were never read.
 const LEGACY_INDEX_ADDED_AT: TableDefinition<i64, &str> =
     TableDefinition::new("idx_tracks_added_at");
 const LEGACY_INDEX_LAST_PLAYED: TableDefinition<i64, &str> =
@@ -49,12 +49,12 @@ pub struct MigrationReport {
 struct Legacy {
     tracks: Vec<(String, Vec<u8>)>,
     playlists: Vec<(String, Vec<u8>)>,
-    /// Ключи уже в формате среза: `pt/<playlist_id>/<pos>`.
+    /// Keys already in slice format: `pt/<playlist_id>/<pos>`.
     links: Vec<(String, Vec<u8>)>,
 }
 
-/// Страховочная копия `shell.redb` перед первым запуском с module-kv.
-/// Копия делается до открытия базы и никогда не перезаписывается.
+/// Safety copy of `shell.redb` made before the first launch with module-kv.
+/// The copy is made before the database is opened and is never overwritten.
 pub fn backup_before_migration(db_path: &Path) -> Result<Option<PathBuf>, String> {
     if !db_path.is_file() {
         return Ok(None);
@@ -79,9 +79,9 @@ pub fn backup_before_migration(db_path: &Path) -> Result<Option<PathBuf>, String
     }
 }
 
-/// `Ok(None)` — схема уже актуальна, миграция не нужна.
-/// `Ok(Some(report))` — срез создан (данные перенесены или зафиксирована
-/// пустая схема на чистой установке).
+/// `Ok(None)` — the schema is already current; no migration is needed.
+/// `Ok(Some(report))` — the slice was created (data migrated, or an empty
+/// schema recorded on a clean install).
 pub fn migrate_if_needed(db: &Arc<Database>) -> Result<Option<MigrationReport>, String> {
     let scope = scope_prefix(&ModuleId::new(MODULE_ID));
     if schema_is_current(db, &scope)? {
@@ -104,7 +104,7 @@ fn schema_is_current(db: &Arc<Database>, scope: &str) -> Result<bool, String> {
     let txn = db.begin_read().map_err(|e| e.to_string())?;
     let table = match txn.open_table(MODULE_KV) {
         Ok(table) => table,
-        // Таблица создаётся лениво: до первой записи схемы нет.
+        // The table is created lazily: there is no schema until the first write.
         Err(_) => return Ok(false),
     };
     let marker = format!("{scope}{SCHEMA_KEY}");
@@ -137,8 +137,8 @@ fn read_legacy(db: &Arc<Database>) -> Result<Legacy, String> {
     if let Ok(table) = txn.open_table(LEGACY_PLAYLIST_TRACKS) {
         for entry in table.iter().map_err(|e| e.to_string())? {
             let (key, value) = entry.map_err(|e| e.to_string())?;
-            // Legacy-ключ: `<playlist_id>_<pos:08>`; позиция — всегда после
-            // последнего подчёркивания.
+            // Legacy key: `<playlist_id>_<pos:08>`; the position is always after
+            // the last underscore.
             if let Some((playlist_id, position)) = key.value().rsplit_once('_') {
                 if position.len() >= 8 && position.bytes().all(|b| b.is_ascii_digit()) {
                     links.push((
@@ -157,7 +157,7 @@ fn read_legacy(db: &Arc<Database>) -> Result<Legacy, String> {
     })
 }
 
-/// Срез модуля и маркер схемы — одной транзакцией.
+/// Module slice and schema marker, in one transaction.
 fn write_slice(db: &Arc<Database>, scope: &str, legacy: &Legacy) -> Result<(), String> {
     let txn = db.begin_write().map_err(|e| e.to_string())?;
     {
@@ -187,7 +187,7 @@ fn write_slice(db: &Arc<Database>, scope: &str, legacy: &Legacy) -> Result<(), S
     Ok(())
 }
 
-/// Сверка: в срезе должно оказаться ровно столько ключей, сколько перенесли.
+/// Verification: the slice must contain exactly as many keys as were migrated.
 fn verify_slice(db: &Arc<Database>, scope: &str, legacy: &Legacy) -> Result<(), String> {
     let txn = db.begin_read().map_err(|e| e.to_string())?;
     let table = txn.open_table(MODULE_KV).map_err(|e| e.to_string())?;
@@ -299,12 +299,12 @@ mod tests {
             slice.get("mods/mp3_player/schema").unwrap().unwrap().value(),
             b"2"
         );
-        // Старые таблицы удалены.
+        // The old tables are deleted.
         assert!(txn.open_table(LEGACY_TRACKS).is_err());
         assert!(txn.open_table(LEGACY_PLAYLIST_TRACKS).is_err());
         drop(txn);
 
-        // Повторный запуск миграцию не повторяет.
+        // A repeated launch does not repeat the migration.
         assert!(migrate_if_needed(&db).unwrap().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,29 +1,27 @@
-//! Докачка модели AI DJ (`discogs-maest-129e`) в каталог данных.
+//! Downloads the AI DJ model (`discogs-maest-129e`) into the data directory.
 //!
-//! Когда модель не пришла с установщиком, модуль достаёт её сам — по явному
-//! действию пользователя в виджете: триггер [`start_download`], прогресс —
-//! событие `ai-dj-model`. Модель весит ~331 МБ, поэтому правила такие:
+//! When the model did not arrive with the installer, the module fetches it itself, triggered by an
+//! explicit user action in the widget: the trigger is [`start_download`], progress is reported by the
+//! `ai-dj-model` event. The model is about 331 MB, so the rules are:
 //!
-//! * файлы идут через `.part`-временные имена и переименовываются атомарно:
-//!   недокачанный кусок никогда не похож на готовую модель (валидность
-//!   проверяет [`ai_dj::is_valid_onnx_model`]);
-//! * HTTP Range resume: после обрыва (таймаут чтения, RST, перезапуск
-//!   приложения) докачка продолжается с сохранённого смещения;
-//! * сначала прямой HTTPS; при повторных отказах тот же URL уходит через SOCKS
-//!   `127.0.0.1:12908` (sing-box, как в модуле vpn). ByeDPI (12909) намеренно
-//!   не задействован. Если и SOCKS не отвечает — честная ошибка
-//!   «модель недоступна, нужен VPN»;
-//! * синглфлайт: повторный запрос не кладёт 331 МБ дважды;
-//! * ход не под `ONNX_SESSION`: у докачки своя нить и свой статический мьютекс;
-//! * ни `init`, ни автозапуск ничего не сетят — загрузчик будят только из
-//!   команды `ai_dj_model_download`.
+//! * files are written under temporary `.part` names and renamed atomically: a partially downloaded
+//!   piece never looks like a finished model (validity is checked by [`ai_dj::is_valid_onnx_model`]);
+//! * HTTP Range resume: after an interruption (read timeout, RST, application restart) the download
+//!   continues from the saved offset;
+//! * direct HTTPS is tried first; after repeated failures the same URL goes through the SOCKS proxy
+//!   `127.0.0.1:12908` (sing-box, as in the vpn module). ByeDPI (12909) is intentionally not used.
+//!   If SOCKS does not respond either, the error is reported honestly:
+//!   "model unavailable, VPN required";
+//! * single-flight: a repeated request does not download the 331 MB twice;
+//! * the run is not under `ONNX_SESSION`: the download has its own thread and its own static mutex;
+//! * neither `init` nor autostart sets anything up; the downloader is woken only by the
+//!   `ai_dj_model_download` command.
 //!
-//! Гарантии integrity: точный размер — из ответа сервера (`Content-Length` /
-//! `Content-Range`), SHA-256 — считается поточно во время скачивания и
-//! пересчитывается при resume (по префиксу `.part`), результат пишется в
-//! sidecar-манифест `download_manifest.json` рядом с моделью. Хеш-константы
-//! заранее не хардкодятся: источник может сменить файл, а неверная константа
-//! закодировала бы отказ скачивания в бинарник.
+//! Integrity guarantees: the exact size comes from the server response (`Content-Length` /
+//! `Content-Range`); SHA-256 is computed incrementally while downloading and recomputed on resume
+//! (from the `.part` prefix); the result is written to the sidecar manifest `download_manifest.json`
+//! next to the model. Hash constants are not hardcoded in advance: the source may change the file,
+//! and a wrong constant would bake a download failure into the binary.
 
 use std::{
     fs,
@@ -41,11 +39,11 @@ use sha2::Digest;
 
 use crate::ai::ai_dj;
 
-// ── Имена файлов и каталог ───────────────────────────────────────────────────
+// ── File names and directory ─────────────────────────────────────────────────
 
-/// Каталог модели внутри `unidtk_api::paths::models_dir()` — выводится из
-/// `MODEL_REL` (`discogs-maest-129e/model.onnx`), поэтому раскладка берётся из
-/// одного места: контракта загрузчика ([`ai_dj::MODEL_REL`]).
+/// Model directory inside `unidtk_api::paths::models_dir()`. It is derived from `MODEL_REL`
+/// (`discogs-maest-129e/model.onnx`), so the layout comes from one place: the loader's contract
+/// ([`ai_dj::MODEL_REL`]).
 fn model_rel_dir() -> String {
     Path::new(ai_dj::MODEL_REL)
         .parent()
@@ -53,7 +51,7 @@ fn model_rel_dir() -> String {
         .unwrap_or_else(|| ".".to_string())
 }
 
-/// Имя файла графа (122 КБ) — хвост `MODEL_REL`.
+/// Graph file name (122 KB), the tail of `MODEL_REL`.
 fn graph_file() -> String {
     Path::new(ai_dj::MODEL_REL)
         .file_name()
@@ -61,20 +59,20 @@ fn graph_file() -> String {
         .unwrap_or_else(|| "model.onnx".to_string())
 }
 
-/// Внешние веса (347 MB): компаньон `model.onnx.data`, которого требует
-/// `is_valid_onnx_model` для графов меньше 50 MB.
+/// External weights (347 MB): the companion file `model.onnx.data`, which
+/// `is_valid_onnx_model` requires for graphs smaller than 50 MB.
 fn weights_file() -> String {
     format!("{0}.data", graph_file())
 }
 
-/// Порядок скачивания: сначала маленький граф — за один запрос проверяется,
-/// что источник отвечает, потом тянется длинная цепочка весов.
+/// Download order: the small graph first, so a single request confirms the source is responding;
+/// then the long chain of weights is fetched.
 const FILE_ORDER: [&str; 2] = ["graph", "weights"];
 
-/// Суффикс временного файла: `model.onnx.data.part`.
+/// Temporary file suffix: `model.onnx.data.part`.
 const PART_SUFFIX: &str = ".part";
 
-/// Sidecar-манифест по соседству с моделью.
+/// Sidecar manifest next to the model.
 const MANIFEST_NAME: &str = "download_manifest.json";
 
 fn file_for(kind: &str) -> String {
@@ -88,42 +86,41 @@ fn final_path_for(dir: &Path, kind: &str) -> PathBuf {
     dir.join(file_for(kind))
 }
 
-/// `.part`-имя — дословное добавление суффикса к полному имени файла.
-/// `with_extension` здесь портит имена (`model.onnx` → `model.part`).
+/// The `.part` name is the literal addition of the suffix to the full file name.
+/// `with_extension` would corrupt the names here (`model.onnx` → `model.part`).
 fn part_path_of(final_path: &Path) -> PathBuf {
     let mut os = final_path.as_os_str().to_os_string();
     os.push(PART_SUFFIX);
     PathBuf::from(os)
 }
 
-// ── Сеть: таймауты, транспорты, источник ─────────────────────────────────────
+// ── Network: timeouts, transports, source ────────────────────────────────────
 
-/// SOCKS-порт sing-box на локали (как в модуле vpn, вход `socks-in`).
+/// Local sing-box SOCKS port (as in the vpn module, the `socks-in` inbound).
 const SOCKS_PORT: u16 = 12908;
 
-/// Сколько всего попыток на файл; внутри попытки — свой список транспортов.
+/// Total number of attempts per file; each attempt has its own list of transports.
 const MAX_ATTEMPTS: u32 = 5;
-/// Бэкофф между попытками: 1, 2, 4, 8, 16 c — обрыв на 200 MB не должен
-/// откладывать resume на минуты.
+/// Backoff between attempts: 1, 2, 4, 8, 16 s. An interruption at 200 MB must not
+/// delay the resume by minutes.
 const BACKOFF_STEP: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(16);
 
-/// Таймауты соединения. Интент иной, чем у micrographics: тот закрывает
-/// короткие ответы метео-API «overall»-таймаутом; докачка живёт минутами,
-/// поэтому общий таймаут не ставится вовсе, а `timeout_read` работает как
-/// детектор застоя — если за 30 c не пришло ни байта, попытка обрывается и
-/// возобновляется со смещения.
+/// Connection timeouts. The intent differs from micrographics: that module cuts off short
+/// weather-API responses with an "overall" timeout; a download lasts minutes, so no overall
+/// timeout is set at all, and `timeout_read` acts as a stall detector: if no byte arrives for
+/// 30 s, the attempt is aborted and resumed from the offset.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const USER_AGENT: &str = "unidtk-mp3-player/1.0";
-/// Окно прогресса в событии `ai-dj-model`: не чаще, чем раз в 250 мс.
+/// Progress window for the `ai-dj-model` event: at most once every 250 ms.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
-/// Размер буфера потоковой записи (64 KiB).
+/// Streaming write buffer size (64 KiB).
 const CHUNK: usize = 64 * 1024;
 
-/// Транспорт попытки. ByeDPI (порт 12909) сюда не входит по построению.
+/// Transport of an attempt. ByeDPI (port 12909) is excluded from this by design.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Transport {
     Direct,
@@ -156,11 +153,11 @@ impl Transport {
     }
 }
 
-/// Какие транспорты пробовать в этой попытке.
+/// Which transports to try in this attempt.
 ///
-/// Политика «прямой HTTPS first»: первый заход — только прямой; если отказ
-/// повторился — сразу SOCKS; дальние попытки идут по цепочке direct → socks,
-/// потому что с живой сетью прямой транспорт может ожить.
+/// Policy "direct HTTPS first": the first attempt uses direct only; if it fails and the failure
+/// repeats, SOCKS is used right away; later attempts follow the chain direct → socks, because
+/// with a working network the direct transport may recover.
 fn transports_for_attempt(attempt: u32) -> &'static [Transport] {
     match attempt {
         1 => &[Transport::Direct],
@@ -169,24 +166,23 @@ fn transports_for_attempt(attempt: u32) -> &'static [Transport] {
     }
 }
 
-/// Бэкофф: 1s · 2^(n-1) с потолком [`BACKOFF_MAX`].
+/// Backoff: 1 s · 2^(n-1), capped at [`BACKOFF_MAX`].
 fn backoff_delay(attempt: u32) -> Duration {
     BACKOFF_STEP
         .saturating_mul(1u32 << (attempt.saturating_sub(1).min(4)))
         .min(BACKOFF_MAX)
 }
 
-/// База источника по умолчанию — заявленный UPF-репозиторий на Hugging Face.
+/// Default source base: the declared UPF repository on Hugging Face.
 ///
-/// Проверено в рантайме: в репо `mtg-upf/discogs-maest-30s-pw-129e` файлов
-/// `model.onnx(.data)` нет ни в корне, ни среди siblings API — ONNX-экспорт
-/// делали локально (в чекауте он лежит в `opt/models`). Такой URL честно
-/// отвечает 404, и загрузчик отдаёт пользователю понятную ошибку, пока
-/// источник не появится. Перекрыть адрес можно без пересборки:
-/// `AI_DJ_MODEL_URL=<база-до-файлов>/`.
+/// Verified at runtime: the repo `mtg-upf/discogs-maest-30s-pw-129e` has no
+/// `model.onnx(.data)` files, neither at the root nor among the API siblings. The ONNX export
+/// was made locally (in the checkout it lies in `opt/models`). This URL honestly returns 404,
+/// and the loader shows the user a clear error until the source appears. The address can be
+/// overridden without rebuilding: `AI_DJ_MODEL_URL=<base-up-to-the-files>/`.
 const DEFAULT_SOURCE_BASE: &str = "https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e/resolve/main";
 
-/// Переопределяемый источник: база, от которой достраиваются имена файлов.
+/// Overridable source: the base from which the file names are built.
 fn source_url(file_name: &str) -> String {
     let base = match std::env::var("AI_DJ_MODEL_URL") {
         Ok(url) if !url.trim().is_empty() => url.trim().trim_end_matches('/').to_string(),
@@ -195,14 +191,13 @@ fn source_url(file_name: &str) -> String {
     format!("{base}/{file_name}")
 }
 
-// ── Каталог модели и тестовый шов ─────────────────────────────────────────────
+// ── Model directory and test seam ─────────────────────────────────────────────
 
-/// Каталог, в котором живёт докачанная модель:
+/// Directory where the downloaded model lives:
 /// `%LOCALAPPDATA%\UniDTK\models\discogs-maest-129e\`.
 ///
-/// Тесты обязаны выставить [`TEST_BASE_DIR`]: без переопределения функция
-/// паникует, чтобы unit-тест физически не смог писать в пользовательский
-/// AppData.
+/// Tests must set [`TEST_BASE_DIR`]: without the override the function
+/// panics, so a unit test physically cannot write into the user's AppData.
 #[cfg(test)]
 static TEST_BASE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -221,14 +216,14 @@ fn model_dir() -> PathBuf {
     }
 }
 
-/// Тестовый шов для проверки «модель уже есть»: в рантайме предикат лоадера,
-/// в тестах — флаг-подмена.
+/// Test seam for checking "model already present": at runtime it is the loader's predicate,
+/// in tests it is a flag override.
 #[cfg(test)]
 static TEST_PRESENCE: Mutex<Option<bool>> = Mutex::new(None);
 
-/// «Модель присутствует и валидна» — ровно предикат лоадера
-/// ([`ai_dj::find_model_path`]), так что докачка затевается только тогда,
-/// когда анализ реально упёрся бы в отсутствие модели.
+/// "Model is present and valid": exactly the loader's predicate
+/// ([`ai_dj::find_model_path`]), so a download is started only when the analysis
+/// would actually fail for lack of the model.
 pub fn is_model_present() -> bool {
     #[cfg(test)]
     {
@@ -240,7 +235,7 @@ pub fn is_model_present() -> bool {
     ai_dj::find_model_path().is_ok()
 }
 
-// ── State machine: синглфлайт ────────────────────────────────────────────────
+// ── State machine: single-flight ─────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
@@ -263,9 +258,9 @@ impl Phase {
 struct Runtime {
     epoch: u64,
     phase: Phase,
-    /// Скачанные байты цепочки: готовые файлы + текущий `.part`.
+    /// Downloaded bytes of the chain: finished files + the current `.part`.
     bytes_done: u64,
-    /// Полный объём цепочки, когда сервер дал размеры.
+    /// Full size of the chain, once the server has reported the sizes.
     bytes_total: Option<u64>,
     file: Option<String>,
     attempt: u32,
@@ -295,21 +290,21 @@ fn lock_runtime() -> std::sync::MutexGuard<'static, Runtime> {
 
 static NEXT_EPOCH: AtomicU64 = AtomicU64::new(0);
 
-/// Замороженный срез состояния докачки — его читает `ai_dj_status`.
+/// Frozen snapshot of the download state; read by `ai_dj_status`.
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
     /// `idle` | `running` | `error`.
     pub phase: &'static str,
-    /// Текст последней ошибки (`phase = error`); вычищается при новом запуске.
+    /// Text of the last error (`phase = error`); cleared on a new start.
     pub error: Option<String>,
-    /// Файл текущей попытки (`model.onnx.data` / `model.onnx`).
+    /// File of the current attempt (`model.onnx.data` / `model.onnx`).
     pub file: Option<String>,
-    /// Скачанные байты цепочки.
+    /// Downloaded bytes of the chain.
     pub bytes_done: u64,
-    /// Полный объём цепочки, когда сервер дал размеры.
+    /// Full size of the chain, once the server has reported the sizes.
     pub bytes_total: Option<u64>,
     pub attempt: u32,
-    /// `direct` | `socks` — транспорт текущей попытки.
+    /// `direct` | `socks`: transport of the current attempt.
     pub source: Option<&'static str>,
 }
 
@@ -326,7 +321,7 @@ fn snapshot_of(rt: &Runtime) -> Snapshot {
 }
 
 impl Snapshot {
-    /// Прямой ответ команды: результат триггера + живой срез состояния.
+    /// Direct command response: the trigger result plus a live state snapshot.
     fn into_result(self, result: &'static str) -> serde_json::Value {
         serde_json::json!({
             "result": result,
@@ -346,12 +341,12 @@ pub fn snapshot() -> Snapshot {
     snapshot_of(&rt)
 }
 
-/// Захват состояния под новый запуск. Синглфлайт: уже идущий ход не
-/// подменяется, валидная модель не докачивается второй раз.
+/// Claims the state for a new run. Single-flight: a run already in progress is not
+/// replaced, and a valid model is not downloaded a second time.
 fn try_begin(update: impl FnOnce(&mut Runtime)) -> Result<&'static str, &'static str> {
     let mut rt = lock_runtime();
-    // Уже идёт? Это проверяется раньше presence: во время валидации
-    // завершающего хода модель могла уже появиться — пусть доживёт своя нить.
+    // Already running? This is checked before presence: during validation of the final
+    // step the model may already have appeared, so let its own thread finish.
     if rt.phase == Phase::Running {
         return Err("running");
     }
@@ -362,11 +357,11 @@ fn try_begin(update: impl FnOnce(&mut Runtime)) -> Result<&'static str, &'static
     Ok("started")
 }
 
-/// Триггер докачки — не ждёт окончания и не трогает сессию ONNX.
-/// Ответ немедленный: `{"result": "started" | "running" | "already_present"}`.
+/// Download trigger: does not wait for completion and does not touch the ONNX session.
+/// The response is immediate: `{"result": "started" | "running" | "already_present"}`.
 ///
-/// Ошибку докачки команда не возвращает: долговая работа идёт в своей нити и
-/// живёт в событии `ai-dj-model` (`stage:"error"`) и в [Snapshot] / статусе.
+/// The command does not return download errors: the long-running work happens in its own thread and
+/// reports through the `ai-dj-model` event (`stage:"error"`) and through [Snapshot] / status.
 pub fn start_download() -> Result<serde_json::Value, String> {
     let epoch = NEXT_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
     let outcome = try_begin(|rt: &mut Runtime| {
@@ -381,15 +376,15 @@ pub fn start_download() -> Result<serde_json::Value, String> {
     });
     match outcome {
         Ok("started") => {
-            // Нить забирает ход и публикует прогресс событиями; команда
-            // возвращается сразу, не ожидая 331 МБ.
+            // The thread takes over the run and publishes progress as events; the command
+            // returns immediately without waiting for the 331 MB.
             match std::thread::Builder::new()
                 .name("ai-dj-model-fetch".into())
                 .spawn(move || worker(epoch))
             {
                 Ok(_handle) => Ok(snapshot().into_result("started")),
                 Err(error) => {
-                    // Нить не взлетела: честная ошибка вместо «запущено».
+                    // The thread failed to start: report an honest error instead of "started".
                     let message = format!("не удалось запустить поток загрузки: {error}");
                     let mut rt = lock_runtime();
                     if rt.epoch == epoch && rt.phase == Phase::Running {
@@ -411,16 +406,16 @@ pub fn start_download() -> Result<serde_json::Value, String> {
                 }
             }
         }
-        // Уже есть валидная модель или уже идёт ход — идемпотентные ответы.
+        // A valid model is already present or a run is already in progress: idempotent responses.
         Ok(other) => Ok(snapshot().into_result(other)),
         Err(other) => Ok(snapshot().into_result(other)),
     }
 }
 
-// ── Прогресс и события ───────────────────────────────────────────────────────
+// ── Progress and events ──────────────────────────────────────────────────────
 
-/// Событие `ai-dj-model`: единственный канал, по которому виджет видит ход
-/// докачки и ошибку. С потоком анализа (`ai-dj-progress`) не смешивается.
+/// The `ai-dj-model` event: the only channel through which the widget sees the download
+/// progress and errors. It is not mixed with the analysis stream (`ai-dj-progress`).
 fn emit_stage(
     stage: &str,
     file: Option<String>,
@@ -444,7 +439,7 @@ fn emit_stage(
     unidtk_api::emit("ai-dj-model", payload);
 }
 
-/// Срез прогресса одного файла, который нить отдаёт в runtime и в событие.
+/// Progress snapshot of one file, which the thread hands to the runtime and to the event.
 #[derive(Clone, Copy, Debug)]
 struct FileProgress {
     bytes_done: u64,
@@ -467,8 +462,8 @@ impl FileProgress {
     }
 }
 
-/// Обновление runtime только если ход всё ещё тот же (нить нового триггера
-/// не должна затираться старой нитью и наоборот).
+/// Updates the runtime only if the run is still the same one (a new trigger's thread
+/// must not be overwritten by the old thread, or the other way around).
 fn report_progress(epoch: u64, done_before: u64, file: &str, progress: FileProgress) {
     let mut rt = lock_runtime();
     if rt.epoch != epoch || rt.phase != Phase::Running {
@@ -481,14 +476,14 @@ fn report_progress(epoch: u64, done_before: u64, file: &str, progress: FileProgr
     rt.source = Some(progress.source);
 }
 
-// ── Ход загрузки ─────────────────────────────────────────────────────────────
+// ── Download run ─────────────────────────────────────────────────────────────
 
 fn worker(epoch: u64) {
     let outcome = run_chain(epoch);
     let (message, snap) = {
         let mut rt = lock_runtime();
-        // Ход мог быть перебит новым триггером (синглфлайт это не допускает,
-        // но актуальное состояние актуальную нить затирать не должна).
+        // The run may have been preempted by a new trigger (single-flight should not allow this,
+        // but the current state must not be overwritten by a thread that is no longer current).
         if rt.epoch != epoch || rt.phase != Phase::Running {
             return;
         }
@@ -523,9 +518,9 @@ fn worker(epoch: u64) {
     }
 }
 
-/// Цепочка по обоим файлам: маленький граф (быстрая проверка источника),
-/// затем длинные веса. После завершения — проверка тем же предикатом, что
-/// пользуется загрузчик.
+/// Chain over both files: the small graph first (a quick check that the source responds),
+/// then the long weights. Afterwards the result is verified with the same predicate
+/// that the loader uses.
 fn run_chain(epoch: u64) -> Result<(), String> {
     let dir = model_dir();
     fs::create_dir_all(&dir)
@@ -566,9 +561,9 @@ fn run_chain(epoch: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// Одиночная ошибка попытки: Fatal закрывает файл целиком (источник битый),
-/// Retryable сохраняет `.part` и идёт на следующую попытку (опционально
-/// со сбросом смещения).
+/// Single attempt failure: Fatal abandons the whole file (the source is broken),
+/// Retryable keeps the `.part` and moves on to the next attempt (optionally
+/// with an offset reset).
 #[derive(Debug)]
 enum AttemptFail {
     Fatal(String),
@@ -585,8 +580,8 @@ fn fetch_file(
     let file_name = file_for(kind);
     let url = source_url(&file_name);
 
-    // Файл этого хода может быть уже на диске с прошлой цепочки (граф готов,
-    // оборвало на весах, наоборот): фиксируем его и не качаем заново.
+    // This file may already be on disk from a previous chain (graph finished, interrupted during the
+    // weights, or the reverse): record it and do not download it again.
     if final_path.is_file() {
         if let Ok(meta) = fs::metadata(final_path) {
             let size = meta.len();
@@ -657,14 +652,14 @@ fn fetch_file(
         }
     }
 
-    // Честная ошибка: не «тихая» неудача и не паника скрытого состояния.
+    // Honest error: not a silent failure and not a panic over hidden state.
     Err(format!(
         "AI DJ модель недоступна: не отвечает ни прямая сеть, ни SOCKS {SOCKS_PORT}. Держите VPN или задайте рабочий источник в AI_DJ_MODEL_URL. Последняя причина: {last_fail}"
     ))
 }
 
-/// Одна попытка скачать файл: Range-resume c текущего смещения `.part`,
-/// потоковая запись, сквозной SHA-256 и валидация размера/хеша.
+/// One attempt to download a file: Range resume from the current `.part` offset,
+/// streaming write, end-to-end SHA-256, and size/hash validation.
 #[allow(clippy::too_many_arguments)]
 fn download_attempt(
     epoch: u64,
@@ -691,13 +686,13 @@ fn download_attempt(
         .map_err(classify_request_error)?;
 
     let status = response.status();
-    // Свидетели integrity: точный размер и (если сервер расскажет) хеш.
+    // Integrity witnesses: the exact size and (if the server reports it) the hash.
     let (total, expected_sha) = read_total(&response);
 
     let mut offset = offset;
     let total = match status {
         206 => {
-            // Проверяем, что сервер согласился с нашим смещением.
+            // Check that the server agreed with our offset.
             let full = response
                 .header("content-range")
                 .and_then(parse_content_range)
@@ -717,10 +712,10 @@ fn download_attempt(
         }
         200 => {
             if offset > 0 {
-                // Сервер проигнорировал Range — резюме невозможно, ".part"
-                // обязан начаться с нуля. Если сброс не удался, писать поверх
-                // нельзя (получится смесь со старым содержимым) — попытка
-                // повторяется после честной ошибки.
+                // The server ignored the Range header, so resuming is impossible and ".part"
+                // must start from zero. If the reset fails, we must not write over it
+                // (the result would be a mix with the old content); the attempt
+                // is retried after an honest error.
                 truncate_part(part_path).map_err(|e| AttemptFail::Retryable {
                     message: format!("сервер проигнорировал Range, а .part не сброшен: {e}"),
                     reset_offset: true,
@@ -801,9 +796,9 @@ fn download_attempt(
         }
     }
     if let Some(expected) = &expected_sha {
-        // Хеш, который дал сервер, не совпал: при resume это смешанные
-        // правки/кодировка — та же причина, что и у страницы, меняющейся
-        // на ходу. С обнулённым offset это битый источник.
+        // The hash the server gave did not match: when resuming, this means mixed
+        // edits/encoding, the same cause as a page that changes while it is being fetched.
+        // With a zeroed offset, the source itself is broken.
         if *expected != sha {
             let message = format!("SHA-256 не совпал с заявленным сервером ({expected})");
             return Err(if offset > 0 {
@@ -819,21 +814,21 @@ fn download_attempt(
     Ok((bytes, sha))
 }
 
-/// Классификация ошибки запроса до начала чтения тела.
+/// Classifies a request error before the response body is read.
 fn classify_request_error(error: ureq::Error) -> AttemptFail {
     match error {
         ureq::Error::Status(code, response) => {
             let status_text = response.status_text().to_string();
             let base = format!("HTTP {code} {status_text}").trim_end().to_string();
             match code {
-                // Источник навеки отвечает «нет»; остальное держим честно.
+                // The source permanently answers "no"; everything else is handled honestly.
                 401 | 403 | 404 | 405 | 410 => AttemptFail::Fatal(base),
-                // Смещение не по зубам серверу — .part больше файла.
+                // The server cannot serve this offset: .part is larger than the file.
                 416 => AttemptFail::Retryable {
                     message: format!("{base}: .part несовместим, начинаем заново"),
                     reset_offset: true,
                 },
-                // Капризы сервера и лимиты: попробовать снова.
+                // Server quirks and rate limits: try again.
                 408 | 425 | 429 => AttemptFail::Retryable {
                     message: base,
                     reset_offset: false,
@@ -848,13 +843,13 @@ fn classify_request_error(error: ureq::Error) -> AttemptFail {
         ureq::Error::Transport(transport) => {
             let message = transport.to_string();
             match transport.kind() {
-                // Плохой адрес — это не сбой сети, а ошибка конфигурации.
+                // A bad address is a configuration error, not a network failure.
                 ureq::ErrorKind::InvalidUrl
                 | ureq::ErrorKind::UnknownScheme
                 | ureq::ErrorKind::TooManyRedirects
                 | ureq::ErrorKind::InsecureRequestHttpsOnly => AttemptFail::Fatal(message),
-                // DNS, обрывы, таймауты, отказ SOCKS — сеть может ожить,
-                // или очередь уйдёт на другой транспорт.
+                // DNS, dropped connections, timeouts, SOCKS refusal: the network may recover,
+                // or the queue will move on to another transport.
                 _ => AttemptFail::Retryable {
                     message,
                     reset_offset: false,
@@ -864,10 +859,10 @@ fn classify_request_error(error: ureq::Error) -> AttemptFail {
     }
 }
 
-/// Чтение полного размера и (если дано) хеша из заголовков ответа.
-/// Итог: на 206 полный размер приходит в Content-Range; на 200 — в
-/// Content-Length. `ETag` со 64-hex хешем тянется как ожидаемый SHA-256
-/// (CDN Hugging Face отдаёт sha256 содержимого; слабый `W/…` игнорируется).
+/// Reads the full size and (if provided) the hash from the response headers.
+/// Result: on 206 the full size comes in Content-Range; on 200 it comes in
+/// Content-Length. An `ETag` containing a 64-hex hash is taken as the expected SHA-256
+/// (the Hugging Face CDN returns the content's sha256; a weak `W/…` tag is ignored).
 fn read_total(response: &ureq::Response) -> (Option<u64>, Option<String>) {
     let total = match response.status() {
         206 => response.header("content-range").and_then(parse_content_range),
@@ -885,7 +880,7 @@ fn response_hash(response: &ureq::Response) -> Option<String> {
             let value = response.header(header)?.trim();
             let value = value.trim_matches('"');
             if value.starts_with("W/") {
-                return None; // слабый etag не является хешем содержимого
+                return None; // a weak etag is not a content hash
             }
             is_sha256_hex(value).then(|| value.to_string())
         })
@@ -898,28 +893,28 @@ fn is_sha256_hex(candidate: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || (b'A'..=b'F').contains(&b))
 }
 
-/// `bytes 0-0/347471872` → 347471872 (полный размер файла).
+/// `bytes 0-0/347471872` → 347471872 (full file size).
 fn parse_content_range(value: &str) -> Option<u64> {
     let tail = value.trim().rsplit('/').next()?;
     tail.trim().parse::<u64>().ok().filter(|t| *t > 0)
 }
 
-/// Сколько байт уже лежит в `.part` (0, если файла нет).
+/// How many bytes are already in `.part` (0 if the file does not exist).
 fn resume_offset(part_path: &Path) -> u64 {
     fs::metadata(part_path)
         .map(|meta| if meta.is_file() { meta.len() } else { 0 })
         .unwrap_or(0)
 }
 
-/// Сброс `.part` до нулевого размера (truncate+create).
+/// Resets `.part` to zero size (truncate+create).
 fn truncate_part(part_path: &Path) -> Result<(), String> {
     fs::File::create(part_path)
         .map_err(|e| format!("{}: {e}", part_path.display()))?;
     Ok(())
 }
 
-/// Потоковая запись `.part` со сквозным хешем: на resume префикс хешируется
-/// в процессе, чтобы SHA-256 итогового файла был честным без перечитывания.
+/// Streaming write of `.part` with an end-to-end hash: on resume the existing prefix is hashed
+/// up front, so the final file's SHA-256 is correct without re-reading it.
 struct PartStream {
     file: fs::File,
     hasher: sha2::Sha256,
@@ -953,7 +948,7 @@ impl PartStream {
         Ok(())
     }
 
-    /// Durability перед переименованием: сброс на диск, итог (байты, hex).
+    /// Durability before the rename: flush to disk, return the result (bytes, hex).
     fn finish(self) -> (u64, String) {
         let _ = self.file.sync_all();
         let digest = self.hasher.finalize();
@@ -961,8 +956,8 @@ impl PartStream {
     }
 }
 
-/// Хешировать существующий файл (префикс `.part` при resume, готовый файл
-/// при локальном пропуске).
+/// Hashes an existing file (the `.part` prefix on resume, or the finished file
+/// when skipping locally).
 fn hash_into(path: &Path, hasher: &mut sha2::Sha256) -> Result<(), String> {
     let mut file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut buffer = vec![0u8; CHUNK];
@@ -978,7 +973,7 @@ fn hash_into(path: &Path, hasher: &mut sha2::Sha256) -> Result<(), String> {
     Ok(())
 }
 
-/// SHA-256 существующего файла строкой.
+/// SHA-256 of an existing file, as a string.
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut hasher = sha2::Sha256::new();
     hash_into(path, &mut hasher)?;
@@ -992,10 +987,10 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-// ── Sidecar-манифест ─────────────────────────────────────────────────────────
+// ── Sidecar manifest ─────────────────────────────────────────────────────────
 
-/// Строка манифеста про один файл: где их взяли и сколько в них байт/хеша.
-/// `revision` — коммит источника, если сервер его назвал (HF: x-repo-commit).
+/// Manifest entry for one file: where it came from and its size and hash.
+/// `revision` is the source commit, if the server named it (HF: x-repo-commit).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ManifestFile {
     pub url: String,
@@ -1003,14 +998,14 @@ pub struct ManifestFile {
     pub revision: Option<String>,
     pub size: u64,
     pub sha256: String,
-    /// Момент записи (unix-секунды).
+    /// Time of writing (Unix seconds).
     pub timestamp: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct DownloadManifest {
     pub version: u32,
-    /// Файлы по имени: `model.onnx`, `model.onnx.data`.
+    /// Files by name: `model.onnx`, `model.onnx.data`.
     pub files: std::collections::BTreeMap<String, ManifestFile>,
 }
 
@@ -1018,7 +1013,7 @@ fn manifest_path(dir: &Path) -> PathBuf {
     dir.join(MANIFEST_NAME)
 }
 
-/// Прочитать манифест; битый JSON не рушит ход — просто пусто, запись поверх.
+/// Reads the manifest; broken JSON does not break the run: it is simply treated as empty and overwritten.
 fn read_manifest(dir: &Path) -> Option<DownloadManifest> {
     let path = manifest_path(dir);
     let raw = fs::read_to_string(&path).ok()?;
@@ -1034,8 +1029,8 @@ fn read_manifest(dir: &Path) -> Option<DownloadManifest> {
     }
 }
 
-/// Дописать строку одного файла, сохранив соседние (graph+weights в одном
-/// манифесте, записанные в разные моменты цепочки).
+/// Appends one file's entry while keeping the neighbouring ones (graph and weights share one
+/// manifest but are written at different points in the chain).
 fn record_manifest(dir: &Path, file_name: &str, entry: ManifestFile) -> Result<(), String> {
     let mut manifest = read_manifest(dir).unwrap_or_default();
     manifest.version = 1;
@@ -1051,8 +1046,8 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// Сериализатор для всех тестов модуля: они крутят глобальное состояние
-    /// (runtime, тестовые швы, tempdir), поэтому идут строго по одному.
+    /// Serializer for all tests in the module: they manipulate global state
+    /// (runtime, test seams, tempdir), so they run strictly one at a time.
     static TEST_GUARD: Mutex<()> = Mutex::new(());
 
     fn fake_model_dir(name: &str) -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
@@ -1084,8 +1079,8 @@ mod tests {
         fs::write(path, bytes).expect("write file");
     }
 
-    /// Тестовый ответ с заголовками: у ureq 2.12 нет `Response::set`, зато есть
-    /// `FromStr`, который честно разбирает сырой HTTP-текст вместе с заголовками.
+    /// Test response with headers: ureq 2.12 has no `Response::set`, but it has
+    /// `FromStr`, which parses raw HTTP text including the headers.
     fn response_with(status: u16, text: &str, headers: &[(&str, &str)]) -> ureq::Response {
         let mut raw = format!("HTTP/1.1 {status} {text}\r\n");
         for (name, value) in headers {
@@ -1098,7 +1093,7 @@ mod tests {
         raw.parse::<ureq::Response>().expect("build test response")
     }
 
-    // ── имена и раскладка ────────────────────────────────────────────────────
+    // ── names and layout ─────────────────────────────────────────────────────
 
     #[test]
     fn file_layout_follows_the_loader_contract() {
@@ -1125,8 +1120,8 @@ mod tests {
 
     #[test]
     fn default_source_names_the_declared_upf_repo() {
-        // Проверяем дефолт, даже если в окружении пользователя задан
-        // AI_DJ_MODEL_URL: снимаем на время проверки и возвращаем на место.
+        // Check the default even if the user's environment sets
+        // AI_DJ_MODEL_URL: unset it for the duration of the check and restore it afterwards.
         let saved = std::env::var("AI_DJ_MODEL_URL").ok();
         std::env::remove_var("AI_DJ_MODEL_URL");
         let url = source_url("model.onnx");
@@ -1157,7 +1152,7 @@ mod tests {
         assert_eq!(url, "https://mirror.example/base/model.onnx");
     }
 
-    // ── rename/атомарность и resume-offset ──────────────────────────────────
+    // ── rename, atomicity and resume offset ─────────────────────────────────
 
     #[test]
     fn resume_offset_counts_only_real_bytes() {
@@ -1166,7 +1161,7 @@ mod tests {
         assert_eq!(resume_offset(&part), 0);
         write_file(&part, b"0123456789");
         assert_eq!(resume_offset(&part), 10);
-        // Не-файл на месте .part не должен обмануть offset.
+        // A non-file at the .part path must not fool the offset.
         fs::remove_file(&part).expect("remove part");
         fs::create_dir(&part).expect("create dir");
         assert_eq!(resume_offset(&part), 0);
@@ -1201,12 +1196,12 @@ mod tests {
     fn part_stream_rejects_offset_without_file() {
         let (dir, guard) = fake_model_dir("part-stream-missing");
         let part = part_path_of(&dir.join("model.onnx"));
-        // .part отсутствует, но offset > 0 — хешировать префикс не из чего.
+        // .part is missing but offset > 0: there is no prefix to hash.
         assert!(PartStream::open(&part, 7).is_err());
         clear_model_dir(&guard);
     }
 
-    // ── обработка заголовков и ошибок ureq ──────────────────────────────────
+    // ── header and ureq error handling ──────────────────────────────────────
 
     #[test]
     fn content_range_full_size_is_parsed() {
@@ -1229,8 +1224,8 @@ mod tests {
         let plain = response_with(200, "OK", &[("etag", "\"not-a-hash\"")]);
         assert_eq!(response_hash(&plain), None);
 
-        // x-linked-etag идёт первым в списке источников: при наличии обоих
-        // берется он, без аггрегации.
+        // x-linked-etag comes first in the list of sources: when both are present,
+        // it is taken as is, without aggregation.
         let linked =
             response_with(200, "OK", &[("x-linked-etag", &format!("\"{sha}\"")), ("etag", "zz")]);
         assert_eq!(response_hash(&linked).as_deref(), Some(sha.as_str()));
@@ -1268,7 +1263,7 @@ mod tests {
 
     #[test]
     fn transport_errors_split_by_kind() {
-        // Битый URL — конфигурация, не сеть: путь Fatal и без сети.
+        // A broken URL is configuration, not network: it takes the Fatal path, without any network access.
         let error = ureq::get("not a url")
             .call()
             .err()
@@ -1276,8 +1271,8 @@ mod tests {
         let fail = classify_request_error(error);
         assert!(matches!(fail, AttemptFail::Fatal(_)), "{fail:?}");
 
-        // Битая сеть (io::ConnectionReset) — retryable: сеть может ожить,
-        // transport может смениться на SOCKS.
+        // A network I/O error (io::ConnectionReset) is retryable: the network may recover,
+        // and the transport may switch to SOCKS.
         let error = ureq::Error::from(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "connection reset",
@@ -1301,7 +1296,7 @@ mod tests {
             transports_for_attempt(5),
             &[Transport::Direct, Transport::Socks]
         );
-        // ByeDPI 12909 никогда не появляется в списке транспортов.
+        // ByeDPI 12909 never appears in the transport list.
         assert_eq!(SOCKS_PORT, 12908);
         assert_ne!(SOCKS_PORT, 12909);
     }
@@ -1315,7 +1310,7 @@ mod tests {
         assert_eq!(backoff_delay(50), BACKOFF_MAX);
     }
 
-    // ── sidecar-манифест ─────────────────────────────────────────────────────
+    // ── sidecar manifest ─────────────────────────────────────────────────────
 
     #[test]
     fn manifest_roundtrip_and_merge() {
@@ -1336,8 +1331,8 @@ mod tests {
         )
         .expect("record graph");
 
-        // Вторая запись не должна стереть первую: файлы живут в одном
-        // манифесте, но пишутся в разные моменты цепочки.
+        // The second write must not erase the first: the files share one
+        // manifest but are written at different points in the chain.
         record_manifest(
             &model_dir,
             "model.onnx.data",
@@ -1361,7 +1356,7 @@ mod tests {
         assert_eq!(weights.size, 347_471_872);
         assert_eq!(weights.revision.as_deref(), Some("abc123"));
 
-        // Битый манифест не должен рушить ход: перезапишется при записи.
+        // A broken manifest must not break the run: it is overwritten on the next write.
         write_file(&manifest_path(&model_dir), b"{ broken");
         assert!(read_manifest(&model_dir).is_none());
         record_manifest(
@@ -1381,7 +1376,7 @@ mod tests {
         clear_model_dir(&guard);
     }
 
-    // ── state machine: синглфлайт и идемпотентные ответы ────────────────────
+    // ── state machine: single-flight and idempotent responses ───────────────
 
     #[test]
     fn try_begin_rejects_running_chain() {
@@ -1414,7 +1409,7 @@ mod tests {
         let (dir, guard) = fake_model_dir("single-flight");
         let _ = dir;
         set_presence(false);
-        // Первый ход: чистый запуск.
+        // First run: clean start.
         assert_eq!(
             try_begin(|rt| {
                 rt.phase = Phase::Running;
@@ -1422,9 +1417,9 @@ mod tests {
             }),
             Ok("started")
         );
-        // Вторая заявка при уже идущем ходе отклоняется — и её ingest не
-        // применяется: синглфлайт не должен дать новому триггеру затереть
-        // текущее состояние (байты, ошибку, файл) главного хода.
+        // A second request is rejected while a run is in progress, and its ingest is not
+        // applied: single-flight must not let the new trigger overwrite the current state
+        // (bytes, error, file) of the main run.
         assert_eq!(
             try_begin(|rt| {
                 rt.epoch = 43;
@@ -1434,7 +1429,7 @@ mod tests {
             }),
             Err("running")
         );
-        // Состояние первого хода живо: никто его не переписал.
+        // The first run's state is intact: nothing overwrote it.
         let rt = lock_runtime();
         assert_eq!(rt.epoch, 42);
         assert_eq!(rt.phase, Phase::Running);
@@ -1481,7 +1476,7 @@ mod tests {
             rt.phase = Phase::Running;
             rt.epoch = 9;
         }
-        // Нить со старым epoch не должна затереть актуальное состояние.
+        // A thread with an old epoch must not overwrite the current state.
         report_progress(
             8,
             10,
@@ -1498,7 +1493,7 @@ mod tests {
         assert_eq!(rt.file, None);
         assert_eq!(rt.epoch, 9);
         drop(rt);
-        // Свой epoch — обновляет.
+        // Its own epoch: it updates the state.
         report_progress(
             9,
             10,
@@ -1547,7 +1542,7 @@ mod tests {
         clear_model_dir(&guard);
     }
 
-    // ── события ─────────────────────────────────────────────────────────────
+    // ── events ──────────────────────────────────────────────────────────────
 
     #[test]
     fn model_event_payload_carries_the_contract_fields() {

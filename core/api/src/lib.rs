@@ -1,31 +1,31 @@
-//! `unidtk-api` — стабильный контракт между ядром и модулями.
+//! `unidtk-api`: the stable contract between the core and the modules.
 //!
-//! Здесь живёт **только** контракт. Никаких `tauri`-деталей ядра, никакого
-//! доступа к базе: модуль должен уметь собираться, не завися от **крейта ядра**,
-//! иначе обновление ядра снова начнёт ломать модули
-//! (`docs/architecture.md` §1.3). Типы Tauri-хоста (`AppHandle`, `Emitter`,
-//! `async_runtime`) при этом допустимы: модуль владеет своим рантаймом и получает
-//! хост через [`ModuleContext::host`].
+//! This crate holds **only** the contract. No `tauri` details of the core, no
+//! database access: a module must be able to build without depending on the **core crate**,
+//! otherwise an update of the core would start breaking modules again
+//! (r[modules.contract-only]). Tauri host types (`AppHandle`, `Emitter`,
+//! `async_runtime`) are allowed: a module owns its runtime and receives the
+//! host via [`ModuleContext::host`].
 //!
-//! Три вещи, которые модуль получает отсюда:
+//! Three things a module gets from here:
 //!
-//! 1. **Сервисы ядра** — [`log`], [`emit`], [`subscribe`], [`state`]. Это
-//!    глобальные функции, а не объект, который надо протаскивать через каждый
-//!    вызов: ядро подставляет свои реализации один раз при старте, модуль просто
-//!    зовёт их. Так модуль пишет лог и публикует события, не зная, что за этим
-//!    стоит Tauri и redb.
-//! 2. **Данные модуля** — [`ModuleDb`]. Ядро само выделяет модулю пространство
-//!    ключей по его id, поэтому «своя часть базы» появляется автоматически и
-//!    модуль не может занять чужое имя.
-//! 3. **Жизненный цикл** — [`Module`]: id, инициализация, остановка.
+//! 1. **Core services**: [`log`], [`emit`], [`subscribe`], [`state`]. These are
+//!    global functions, not an object that has to be passed through every
+//!    call: the core installs its implementations once at startup, and the module just
+//!    calls them. So a module writes logs and publishes events without knowing what
+//!    sits behind them (Tauri and redb).
+//! 2. **Module data**: [`ModuleDb`]. The core itself allocates the module a key namespace
+//!    from its id, so "its own part of the database" exists automatically, and the module
+//!    cannot take someone else's name.
+//! 3. **Lifecycle**: [`Module`]: id, initialization, shutdown.
 //!
-//! ## Почему сервисы глобальные, а не через контекст
+//! ## Why services are global rather than context-based
 //!
-//! Через `ctx` пришлось бы протянуть его в сотни мест (в одном `vpn.rs` больше
-//! сотни вызовов лога). Глобальный сервис-локатор даёт ту же изоляцию — модуль
-//! видит ровно объявленную здесь поверхность и ничего больше — но не заставляет
-//! переписывать каждую функцию. Доступ к данным, где действительно нужен
-//! контекст (какая база, какой id), по-прежнему идёт через [`ModuleContext`].
+//! Passing `ctx` around would mean threading it through hundreds of places (one `vpn.rs`
+//! alone has over a hundred log calls). A global service locator gives the same isolation:
+//! the module sees exactly the surface declared here and nothing more. But it does not force
+//! rewriting every function. Access to data, where a context is genuinely needed
+//! (which database, which id), still goes through [`ModuleContext`].
 
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
@@ -38,11 +38,11 @@ pub mod manifest;
 pub mod paths;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Идентификация модуля
+// Module identification
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Уникальный идентификатор модуля (`"mp3-player"`, `"telegram"`, `"vpn"`, ...).
-/// Обернут в тип, чтобы нельзя было случайно перепутать id и slug.
+/// Unique module identifier (`"mp3-player"`, `"telegram"`, `"vpn"`, ...).
+/// Wrapped in a type so that an id and a slug cannot be confused by accident.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ModuleId(String);
 
@@ -55,8 +55,8 @@ impl ModuleId {
         &self.0
     }
 
-    /// Превратить дефисы в подчеркивания: `"mp3-player"` -> `"mp3_player"`.
-    /// Полезно для префиксов таблиц в redb и ключей хранилищ.
+    /// Convert hyphens to underscores: `"mp3-player"` -> `"mp3_player"`.
+    /// Useful for table prefixes in redb and for store keys.
     pub fn storage_slug(&self) -> String {
         self.0.replace('-', "_")
     }
@@ -82,7 +82,7 @@ impl std::ops::Deref for ModuleId {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Сервис ядра: логи
+// Core service: logs
 // ═══════════════════════════════════════════════════════════════════════════════
 
 type LogFn = dyn Fn(&str) + Send + Sync;
@@ -93,14 +93,14 @@ thread_local! {
     static THREAD_CAPTURE: std::cell::RefCell<Option<Arc<Mutex<Vec<String>>>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Установить приёмник логов. Вызывает только ядро, один раз при старте.
+/// Install the log sink. Called only by the core, once at startup.
 pub fn set_logger(f: impl Fn(&str) + Send + Sync + 'static) {
     let _ = LOGGER.set(Box::new(f));
 }
 
-/// Выполнить функцию `f`, перехватывая все вызовы [`log`] в текущем потоке.
-/// Безопасен при паниках: перехваченные до паники логи НЕ теряются, а возвращаются
-/// вместе с результатом `std::thread::Result<R>`.
+/// Run function `f`, capturing all calls to [`log`] on the current thread.
+/// Safe under panics: logs captured before a panic are NOT lost; they are returned
+/// together with the result `std::thread::Result<R>`.
 pub fn capture_logs_unwind<F, R>(f: F) -> (std::thread::Result<R>, Vec<String>)
 where
     F: FnOnce() -> R,
@@ -134,8 +134,8 @@ where
     (res, logs)
 }
 
-/// Выполнить функцию `f`, перехватывая все вызовы [`log`] в текущем потоке.
-/// Потокобезопасно, не мешает другим потокам и восстанавливает состояние даже при панике.
+/// Run function `f`, capturing all calls to [`log`] on the current thread.
+/// Thread-safe, does not interfere with other threads, and restores state even on panic.
 pub fn capture_logs<F, R>(f: F) -> (R, Vec<String>)
 where
     F: FnOnce() -> R,
@@ -147,9 +147,9 @@ where
     }
 }
 
-/// Записать строку в общий журнал UniDTK (раньше — `crate::log_line`).
+/// Write a line to the shared UniDTK log (formerly `crate::log_line`).
 ///
-/// Безопасно вызывать до инициализации: тогда вызов молча ничего не делает.
+/// Safe to call before initialization: the call then silently does nothing.
 pub fn log(message: impl AsRef<str>) {
     let msg = message.as_ref();
     let _ = THREAD_CAPTURE.with(|tc| {
@@ -165,7 +165,7 @@ pub fn log(message: impl AsRef<str>) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Сервис ядра: события
+// Core service: events
 // ═══════════════════════════════════════════════════════════════════════════════
 
 type EmitFn = dyn Fn(&str, Value) + Send + Sync;
@@ -176,13 +176,13 @@ static BUS: OnceLock<Mutex<Bus>> = OnceLock::new();
 
 #[derive(Default)]
 struct Bus {
-    /// Подписчики по имени события.
+    /// Subscribers keyed by event name.
     handlers: HashMap<String, Vec<Handler>>,
-    /// Последнее опубликованное значение каждого события.
+    /// The last published value of each event.
     ///
-    /// Нужен, чтобы модуль мог узнать состояние без обратного вызова к
-    /// другому модулю: `telegram` спрашивает `state("vpn")`, вместо того чтобы
-    /// звать `vpn::is_connected()` — именно это разрывает цикл vpn↔telegram.
+    /// Needed so a module can learn the state without calling back into
+    /// another module: `telegram` asks `state("vpn")` instead of
+    /// calling `vpn::is_connected()`. This is exactly what breaks the vpn↔telegram cycle.
     last: HashMap<String, Value>,
 }
 
@@ -192,13 +192,13 @@ fn bus() -> &'static Mutex<Bus> {
 
 static EMIT_ORDER: Mutex<()> = Mutex::new(());
 
-/// Установить транспорт событий (Tauri emit). Вызывает только ядро.
+/// Install the event transport (Tauri emit). Called only by the core.
 pub fn set_emitter(f: impl Fn(&str, Value) + Send + Sync + 'static) {
     let _ = EMITTER.set(Box::new(f));
 }
 
-/// Опубликовать событие: запомнить последнее значение, раздать подписчикам и
-/// отправить во фронтенд.
+/// Publish an event: remember the last value, deliver it to subscribers, and
+/// send it to the frontend.
 pub fn emit(event: &str, payload: Value) {
     // The stored value and the transports must agree on which emit came last, so
     // concurrent emits pass through both in one order. Handlers run outside: they
@@ -222,7 +222,7 @@ pub fn emit(event: &str, payload: Value) {
     }
 }
 
-/// Подписаться на событие. Вызывается модулем при инициализации.
+/// Subscribe to an event. Called by a module during initialization.
 pub fn subscribe(event: &str, handler: impl Fn(Value) + Send + Sync + 'static) {
     if let Ok(mut bus) = bus().lock() {
         bus.handlers
@@ -232,38 +232,38 @@ pub fn subscribe(event: &str, handler: impl Fn(Value) + Send + Sync + 'static) {
     }
 }
 
-/// Последнее известное значение события (без ожидания следующего).
+/// The last known value of an event (without waiting for the next one).
 pub fn state(event: &str) -> Option<Value> {
     bus().lock().ok().and_then(|bus| bus.last.get(event).cloned())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Данные модуля: автоматически выделяемая часть базы
+// Module data: the automatically allocated part of the database
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Хранилище, выданное модулю ядром.
+/// A store issued to a module by the core.
 ///
-/// Ядро выделяет пространство имён по id модуля, поэтому модуль не объявляет
-/// ничего заранее и не может занять чужое имя: физически ключ выглядит как
-/// `mods/<id>/<key>`, а модуль видит только `<key>`.
+/// The core allocates the namespace from the module's id, so the module declares
+/// nothing in advance and cannot take someone else's name: physically the key looks like
+/// `mods/<id>/<key>`, while the module sees only `<key>`.
 ///
-/// Значения — непрозрачные байты: формат сериализации выбирает сам модуль
-/// (mp3-player хранит библиотеку как bincode поверх `kv_batch`/`kv_list`),
-/// ядро не знает ни формата, ни состава ключей.
+/// Values are opaque bytes: the serialization format is chosen by the module itself
+/// (mp3-player stores the library as bincode on top of `kv_batch`/`kv_list`);
+/// the core knows neither the format nor the set of keys.
 pub trait ModuleDb: Send + Sync {
     fn kv_get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
     fn kv_set(&self, key: &str, value: &[u8]) -> Result<(), String>;
     fn kv_remove(&self, key: &str) -> Result<(), String>;
-    /// Все пары с данным префиксом, в лексикографическом порядке ключей.
+    /// All pairs with the given prefix, in lexicographic key order.
     ///
-    /// Ключи возвращаются **с** запрошенным префиксом и без служебного префикса
-    /// модуля (`mods/<id>/`): полученный ключ можно сразу передать в
-    /// [`ModuleDb::kv_remove`] или [`DbOp::Remove`] — так чистятся связи
-    /// плейлистов, не собирая ключ заново.
+    /// Keys are returned **with** the requested prefix and without the module's internal
+    /// prefix (`mods/<id>/`): the received key can be passed straight to
+    /// [`ModuleDb::kv_remove`] or [`DbOp::Remove`]. This is how playlist links
+    /// are cleaned up, without rebuilding the key.
     fn kv_list(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, String>;
-    /// Применить пачку изменений атомарно (redb-реализация — одной транзакцией).
-    /// Нужна там, где одна логическая операция модуля трогает несколько ключей:
-    /// без неё запись рвётся на независимые коммиты.
+    /// Apply a batch of changes atomically (the redb implementation uses one transaction).
+    /// Needed where one logical operation of the module touches several keys:
+    /// without it, the write would split into independent commits.
     fn kv_batch(&self, ops: Vec<DbOp>) -> Result<(), String> {
         for op in ops {
             match op {
@@ -274,26 +274,26 @@ pub trait ModuleDb: Send + Sync {
         Ok(())
     }
 
-    /// Сколько ключей с данным префиксом лежит в хранилище.
+    /// How many keys with the given prefix are stored.
     ///
-    /// Отдельный метод, а не `kv_list(..).len()`, потому что у файлового
-    /// хранилища модуля подсчёт всего файла (пустой префикс) берётся из
-    /// B-дерева за O(1), а список эмбеддингов бывает в сотни элементов.
+    /// A separate method rather than `kv_list(..).len()`: for a module's file store,
+    /// counting the whole file (empty prefix) is read from the B-tree in O(1), while
+    /// the embeddings list can run to hundreds of elements.
     fn kv_count(&self, prefix: &str) -> Result<u64, String> {
         Ok(self.kv_list(prefix)?.len() as u64)
     }
 }
 
-/// Одна мутация в [`ModuleDb::kv_batch`].
+/// One mutation in [`ModuleDb::kv_batch`].
 pub enum DbOp {
     Set { key: String, value: Vec<u8> },
     Remove { key: String },
 }
 
-/// Хранилище модуля в оперативной памяти (для тестов, изоляции и `udtk doctor -modules`).
+/// In-memory module store (for tests, isolation and `udtk doctor -modules`).
 ///
-/// Реализует полный контракт [`ModuleDb`] без создания файлов на диске и без
-/// обращения к redb/sqlite.
+/// Implements the full [`ModuleDb`] contract without creating files on disk and without
+/// touching redb or sqlite.
 #[derive(Default)]
 pub struct InMemoryModuleDb {
     map: RwLock<BTreeMap<String, Vec<u8>>>,
@@ -348,43 +348,43 @@ impl ModuleDb for InMemoryModuleDb {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Хранилище модуля: срез общей базы или отдельный файл
+// Module store: a slice of the shared database or a separate file
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Какого рода хранилище нужен модулю.
+/// The kind of store a module needs.
 ///
-/// Модуль объявляет **что** ему нужно, ядро решает **где** это лежит и с какой
-/// надёжностью. Ни один модуль не имеет права собирать путь сам: расположение
-/// данных — знание ядра (иначе переезд каталогов задевает все модули сразу).
+/// The module declares **what** it needs; the core decides **where** it lives and with what
+/// durability. No module may build a path itself: the data location is core knowledge
+/// (otherwise moving the directories would affect all modules at once).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreKind {
-    /// Срез общей базы ядра (`mods/<id>/<key>`). Дёшево, но делит файл со всеми:
-    /// redb держит одного писателя, поэтому длинная серия записей здесь
-    /// выстраивает в очередь запись UI. Для мелкого состояния и конфигов.
+    /// A slice of the core's shared database (`mods/<id>/<key>`). Cheap, but shares the file with everyone:
+    /// redb keeps one writer, so a long series of writes here would
+    /// queue up UI writes. For small state and configs.
     Shared,
-    /// Отдельный файл. Данные пользователя: ACID, попадают в бэкап, «очисткой
-    /// кэша» не сносятся.
+    /// A separate file. User data: ACID, included in backups, not removed by a
+    /// "cache cleanup".
     OwnedDurable,
-    /// Отдельный файл. Производные и пересобираемые данные: запись без fsync на
-    /// каждый коммит, файл можно удалить целиком без потери смысла.
+    /// A separate file. Derived and rebuildable data: writes without fsync on
+    /// every commit; the file can be deleted as a whole without losing meaning.
     OwnedCache,
 }
 
-/// Объявление хранилища модулем.
+/// A store declaration made by a module.
 pub struct StoreSpec {
-    /// Короткое стабильное имя: из него ядро строит имя файла. Разделители пути
-    /// запрещены — см. [`StoreSpec::validate`].
+    /// A short stable name: the core builds the file name from it. Path separators
+    /// are forbidden; see [`StoreSpec::validate`].
     pub name: String,
     pub kind: StoreKind,
-    /// Имена прежних файлов этого хранилища: ядро само переносит их на новое
-    /// место и новое имя при первом открытии.
+    /// Names of this store's previous files: the core moves them itself to the new
+    /// location and new name on first open.
     pub legacy_files: Vec<String>,
-    /// Прежние таблицы модуля → префикс ключей в новом плоском пространстве.
+    /// Previous module tables → key prefix in the new flat namespace.
     ///
-    /// Пока модуль держал данные в собственных redb-таблицах, схема была его
-    /// личным делом. Контракт даёт одно пространство ключей, поэтому старую
-    /// раскладку нужно один раз переписать с префиксами — декларативно, иначе
-    /// (см. [`StoreSpec::legacy_tables`]).
+    /// While the module kept its data in its own redb tables, the schema was its
+    /// private business. The contract provides one key namespace, so the old
+    /// layout must be rewritten once with prefixes, declaratively (see
+    /// [`StoreSpec::legacy_tables`]).
     pub legacy_tables: Vec<(&'static str, String)>,
 }
 
@@ -398,27 +398,27 @@ impl StoreSpec {
         }
     }
 
-    /// Отдельный файл для производных/пересобираемых данных.
+    /// A separate file for derived or rebuildable data.
     pub fn cache(name: impl Into<String>) -> Self {
         Self::new(name, StoreKind::OwnedCache)
     }
 
-    /// Отдельный файл для данных пользователя.
+    /// A separate file for user data.
     pub fn durable(name: impl Into<String>) -> Self {
         Self::new(name, StoreKind::OwnedDurable)
     }
 
-    /// Объявить прежние имена файла — ядро переедет с них само.
+    /// Declare the previous file names; the core moves files from those names itself.
     pub fn legacy(mut self, files: &[&str]) -> Self {
         self.legacy_files = files.iter().map(|f| (*f).to_string()).collect();
         self
     }
 
-    /// Объявить прежние таблицы: `("embeddings", "emb:")` — строки таблицы
-    /// `embeddings` переезжают в ключи `emb:<прежний ключ>`.
+    /// Declare previous tables: `("embeddings", "emb:")` — the rows of table
+    /// `embeddings` move into keys `emb:<previous key>`.
     ///
-    /// Выполняет это ядро (см. [`StoreFactory::open`]): redb знает только оно,
-    /// модулю он недоступен. Операция идемпотентна — старой таблицы после неё нет.
+    /// Performed by the core (see [`StoreFactory::open`]): only it knows redb, and
+    /// the module has no access to it. The operation is idempotent: the old table no longer exists afterwards.
     pub fn legacy_tables(mut self, tables: &[(&'static str, &str)]) -> Self {
         self.legacy_tables = tables
             .iter()
@@ -427,8 +427,8 @@ impl StoreSpec {
         self
     }
 
-    /// Имя должно быть безопасным для файловой системы: никаких разделителей,
-    /// переходов вверх и путей — иначе объявление модуля стало бы дыркой.
+    /// The name must be safe for the file system: no separators, no upward
+    /// traversal, and no paths; otherwise a module declaration would become a hole.
     pub fn validate(&self) -> Result<(), String> {
         let ok = !self.name.is_empty()
             && self.name.len() <= 64
@@ -447,30 +447,30 @@ impl StoreSpec {
     }
 }
 
-/// Что ядро знает про хранилище модуля — для диагностики и очистки.
+/// What the core knows about a module's store, for diagnostics and cleanup.
 pub struct StoreInfo {
     pub name: String,
     pub kind: StoreKind,
-    /// `None` — хранилище внутри общей базы ядра.
+    /// `None`: the store lives inside the core's shared database.
     pub path: Option<std::path::PathBuf>,
 }
 
-/// Фабрика хранилищ: реализуется ядром, объявлена в контракте (как и [`ModuleDb`],
-/// без единой зависимости на redb/tauri/Win32).
+/// Store factory: implemented by the core, declared in the contract (like [`ModuleDb`],
+/// without a single dependency on redb, tauri or Win32).
 pub trait StoreFactory: Send + Sync {
-    /// Открыть (при необходимости — создать) хранилище модуля.
+    /// Open the module's store, creating it if necessary.
     fn open(&self, id: &ModuleId, spec: &StoreSpec) -> Result<Arc<dyn ModuleDb>, String>;
 
-    /// Что уже объявлено этим модулем.
+    /// What this module has already declared.
     fn list(&self, id: &ModuleId) -> Vec<StoreInfo>;
 }
 
-/// Режим запуска модуля: боевой (в ядре) или диагностический (в CLI doctor).
+/// Module run mode: production (in the core) or diagnostic (in the CLI doctor).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModuleRunMode {
-    /// Боевой запуск внутри приложения. Доступен AppHandle, запускаются фоновые потоки.
+    /// Production run inside the application. AppHandle is available, and background threads are started.
     Production,
-    /// Диагностический прогон (udtk doctor). Запрещены сетевые туннели, фоновые бесконечные потоки.
+    /// Diagnostic run (udtk doctor). Network tunnels and endless background threads are forbidden.
     Diagnostic,
 }
 
@@ -485,21 +485,21 @@ impl StoreFactory for InMemoryStoreFactory {
     }
 }
 
-/// Контекст, который ядро выдаёт модулю при инициализации.
+/// The context the core hands to a module on initialization.
 pub struct ModuleContext {
     id: ModuleId,
     db: Arc<dyn ModuleDb>,
-    /// Владелец модуля в ядре — нужен, если модулю понадобится что-то
-    /// специфичное (обработчик команд, тип состояния). Downcast на стороне ядра.
+    /// The module's owner in the core: needed if the module requires something
+    /// specific (a command handler, a state type). Downcast on the core side.
     host: Option<Arc<dyn Any + Send + Sync>>,
-    /// Выдаёт отдельные файловые хранилища. Ядро подставляет свою реализацию;
-    /// в юнит-тестах её может не быть — тогда [`ModuleContext::store`] вернёт ошибку.
+    /// Issues separate file stores. The core installs its own implementation;
+    /// in unit tests it may be absent, in which case [`ModuleContext::store`] returns an error.
     stores: Option<Arc<dyn StoreFactory>>,
     run_mode: ModuleRunMode,
-    /// Запущен ли модуль ядром. `false` — модуль "выключен" пользователем: ядро
-    /// по-прежнему держит managed-оболочку (чтобы Tauri-команды не паниковали),
-    /// но модуль обязан НЕ поднимать тяжёлый фон (TDLib, аудиозахват, sing-box,
-    /// fоновый poll). Ресурсы экономит сам модуль, от гейта на старте.
+    /// Whether the core started the module. `false` means the user has disabled the module: the core
+    /// still keeps the managed shell (so Tauri commands do not panic), but the module must NOT
+    /// start heavy background work (TDLib, audio capture, sing-box,
+    /// background poll). The module saves the resources itself, based on the gate at startup.
     enabled: bool,
 }
 
@@ -515,8 +515,8 @@ impl ModuleContext {
         }
     }
 
-    /// Создать диагностический контекст для сухого тестирования жизненного цикла (`udtk doctor -modules`).
-    /// Не создает файлов на диске, снабжен in-memory фабрикой хранилищ.
+    /// Create a diagnostic context for dry-run lifecycle testing (`udtk doctor -modules`).
+    /// Creates no files on disk; it is equipped with an in-memory store factory.
     pub fn new_diagnostic(id: impl Into<ModuleId>, db: Arc<dyn ModuleDb>) -> Self {
         Self {
             id: id.into(),
@@ -533,14 +533,14 @@ impl ModuleContext {
         self
     }
 
-    /// Подставить фабрику хранилищ (делает только ядро).
+    /// Install a store factory (only the core does this).
     pub fn with_store_factory(mut self, stores: Arc<dyn StoreFactory>) -> Self {
         self.stores = Some(stores);
         self
     }
 
-    /// Пометить модуль выключенным пользователем. Ядро всё равно управляет
-    /// оболочкой, но модуль не поднимает тяжёлый фон.
+    /// Mark the module as disabled by the user. The core still manages
+    /// the shell, but the module does not start heavy background work.
     pub fn with_enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
@@ -566,21 +566,21 @@ impl ModuleContext {
         self.run_mode == ModuleRunMode::Production
     }
 
-    /// Ссылка на хранилище модуля (срез ключей `mods/<slug>/...`).
+    /// Reference to the module's store (a key slice `mods/<slug>/...`).
     pub fn db(&self) -> Arc<dyn ModuleDb> {
         self.db.clone()
     }
 
-    /// Забрать хранилище целиком: модуль владеет им всю свою жизнь.
+    /// Take the whole store: the module owns it for its entire lifetime.
     pub fn into_db(self) -> Arc<dyn ModuleDb> {
         self.db
     }
 
-    /// Своё хранилище модуля: либо срез общей базы, либо отдельный файл — по
-    /// объявленному [`StoreKind`]. Расположение и надёжность выбирает ядро.
+    /// This module's own store: either a slice of the shared database or a separate file,
+    /// depending on the declared [`StoreKind`]. The core chooses the location and durability.
     ///
-    /// Для [`StoreKind::Shared`] возвращается тот же срез, что и [`Self::db`],
-    /// поэтому явно объявлять общее хранилище смысла нет — оно есть по умолчанию.
+    /// For [`StoreKind::Shared`] the same slice as [`Self::db`] is returned,
+    /// so declaring the shared store explicitly has no point: it is the default.
     pub fn store(&self, spec: StoreSpec) -> Result<Arc<dyn ModuleDb>, String> {
         spec.validate()?;
         match spec.kind {
@@ -595,7 +595,7 @@ impl ModuleContext {
         }
     }
 
-    /// Что уже объявлено этим модулем (для диагностики и очистки кэша).
+    /// What this module has already declared (for diagnostics and cache cleanup).
     pub fn stores(&self) -> Vec<StoreInfo> {
         match self.stores.as_ref() {
             Some(factory) => factory.list(&self.id),
@@ -603,17 +603,17 @@ impl ModuleContext {
         }
     }
 
-    /// Доступ к состоянию, которое положило ядро (например `AppHandle`).
+    /// Access to state the core put in place (for example `AppHandle`).
     pub fn host<T: Any + Send + Sync>(&self) -> Option<&T> {
         self.host.as_ref().and_then(|host| host.downcast_ref::<T>())
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Жизненный цикл модуля
+// Module lifecycle
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Статус выполнения диагностической проверки.
+/// Execution status of a diagnostic check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
     Pass,
@@ -621,7 +621,7 @@ pub enum CheckStatus {
     Fail,
 }
 
-/// Результат одной диагностической проверки модуля или подсистемы ядра.
+/// The result of one diagnostic check of a module or a core subsystem.
 #[derive(Debug, Clone)]
 pub struct CheckResult {
     pub name: String,
@@ -664,8 +664,8 @@ impl CheckResult {
     }
 }
 
-/// Контекст для сухих функциональных проверок (`udtk doctor -modules`).
-/// Изолирован от боевых баз данных на диске.
+/// Context for dry-run functional checks (`udtk doctor -modules`).
+/// Isolated from the production databases on disk.
 pub struct DiagnosticContext {
     pub db: Arc<dyn ModuleDb>,
     pub dry_run: bool,
@@ -680,31 +680,31 @@ impl DiagnosticContext {
     }
 }
 
-/// Модуль UniDTK. Ядро держит набор таких и вызывает их на старте/остановке.
+/// A UniDTK module. The core holds a set of these and calls them on startup and shutdown.
 pub trait Module: Send + Sync {
-    /// Стабильный идентификатор: совпадает с папкой в `modules/<id>/`.
+    /// Stable identifier: matches the folder `modules/<id>/`.
     fn id(&self) -> &'static str;
 
-    /// Декларативный манифест системных зависимостей модуля (бинарники, DLL, ассеты, задачи).
+    /// Declarative manifest of the module's system dependencies (binaries, DLLs, assets, tasks).
     fn dependencies(&self) -> &'static [manifest::ModuleDependency] {
         &[]
     }
 
-    /// Инициализация: подписки на события, открытие своих таблиц.
+    /// Initialization: event subscriptions, opening its own tables.
     fn init(&self, ctx: ModuleContext) -> Result<(), String>;
 
-    /// Остановка с бюджетом времени: снять фоновые потоки, закрыть процессы модуля.
+    /// Shutdown with a time budget: stop background threads, close the module's processes.
     fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> {
         Ok(())
     }
 
-    /// Выключение пользователем на ходу: приложение продолжает работать, поэтому
-    /// глобальные защёлки выхода здесь ставить нельзя.
+    /// Disabling by the user on the fly: the application keeps running, so
+    /// global exit latches must not be set here.
     fn suspend(&self) -> Result<(), String> {
         self.shutdown(std::time::Duration::from_millis(1500))
     }
 
-    /// Включение на ходу, в том числе модуля, выключенного с прошлого запуска.
+    /// Enabling on the fly, including a module that was disabled since the last launch.
     fn resume(&self, ctx: ModuleContext) -> Result<(), String> {
         self.init(ctx)
     }
@@ -749,8 +749,8 @@ mod tests {
 
     #[test]
     fn events_remember_last_state() {
-        // Свежий шинный кэш в тесте уже мог быть заполнен другим тестом того же
-        // процесса, поэтому проверяем именно последнее записанное значение.
+        // A fresh bus cache in this test may already have been populated by another test in the
+        // same process, so we check specifically the last value that was written.
         emit("vpn", serde_json::json!({ "connected": true }));
         assert_eq!(
             state("vpn").and_then(|v| v["connected"].as_bool()),
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn logger_is_optional_and_silent_before_init() {
-        // Ничего не должно паниковать, даже если ядро не подставило логгер.
+        // Nothing should panic, even if the core did not install a logger.
         log("no logger is fine");
     }
 

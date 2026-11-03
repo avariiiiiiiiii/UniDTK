@@ -5,10 +5,10 @@ rustflags = ["-C", "linker=rust-lld.exe"]
 
 
 # Release builds on this 15.7 GB machine: default cargo jobs (8) OOMs thin-LTO
-# (docs/cliudtk.md: measured commit exhaustion -> rustc "LLVM out of memory").
+# (docs/udtk/ch14-build-step-by-step.md: measured commit exhaustion -> rustc "LLVM out of memory").
 # 2 is the safe default; `udtk build -j N` overrides via CARGO_BUILD_JOBS.
 # RUST_MIN_STACK: the `windows` crate overflows the default 2 MB thread stack
-# without it (same doc, "факторы по памяти").
+# without it (same doc, "memory factors").
 [build]
 jobs = 2
 

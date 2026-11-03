@@ -1,28 +1,27 @@
-//! Нативный VPN-хелпер — часть модуля `vpn`, а не отдельная утилита.
+//! Native VPN helper: part of the `vpn` module, not a separate utility.
 //!
-//! Отдельный процесс нужен ровно за одним: создание TUN-адаптера требует прав
-//! администратора, а сама оболочка обязана оставаться unelevated (иначе окно
-//! нельзя переподчинить `WorkerW` — см. `toolchain/build.rs`). Поэтому это
-//! второй бинарник того же модуля, а не чужой инструмент: его источник лежит
-//! рядом с модулем (`modules/vpn/helper/`), а собирает его единый манифест
-//! `toolchain/Cargo.toml`.
+//! A separate process is needed for exactly one reason: creating the TUN adapter requires
+//! administrator rights, while the shell itself must stay unelevated (otherwise the window
+//! cannot be re-parented under `WorkerW` — see `toolchain/build.rs`). So this is a second
+//! binary of the same module, not a foreign tool: its source lives next to the module
+//! (`modules/vpn/helper/`), and it is built by the single manifest `toolchain/Cargo.toml`.
 //!
-//! Это ещё и замена прежней цепочки
+//! This also replaces the previous chain
 //! `wscript.exe → vpn_hidden_launch.vbs → powershell.exe → vpn_stop.ps1`,
-//! которая стартовала секунды (WMI/.NET) и не укладывалась в бюджет выключения
-//! Windows.
+//! which took several seconds to start (WMI/.NET) and did not fit within the Windows
+//! shutdown time budget.
 //!
-//! Запускается задачами планировщика `UniDTKSingbox` / `UniDTKVpnStop` с одним
-//! аргументом:
-//! * `start` — поднять `sing-box.exe` с `singbox_config.json` отдельным
-//!   процессом (без окна, переживает этот процесс) и запомнить его PID;
-//! * `stop`  — снять запомненный `sing-box` (сверяя образ процесса и PID, чтобы
-//!   не задеть чужое) и записать в `vpn_stop.done` тот же nonce, который
-//!   протокол ожидает на стороне приложения.
+//! It is launched by the `UniDTKSingbox` / `UniDTKVpnStop` scheduler tasks with a single
+//! argument:
+//! * `start` — launch `sing-box.exe` with `singbox_config.json` as a separate process
+//!   (no window, survives this process) and remember its PID;
+//! * `stop`  — kill the remembered `sing-box` (verifying the process image and PID so that
+//!   nothing else is affected) and write the same nonce to `vpn_stop.done` that the
+//!   application-side protocol expects.
 //!
-//! Раскладка: бинарники (`sing-box.exe`, он сам) — из каталога программы
-//! ([`unidtk_api::paths::install_dir`]), состояние (PID, конфиг, маркеры) — в
-//! каталоге данных ([`unidtk_api::paths::data_dir`]).
+//! Layout: binaries (`sing-box.exe`, itself) come from the program directory
+//! ([`unidtk_api::paths::install_dir`]); state (PID, config, markers) lives in the
+//! data directory ([`unidtk_api::paths::data_dir`]).
 #![windows_subsystem = "windows"]
 
 use std::io::Write;
@@ -33,12 +32,12 @@ use std::process::{Command, Stdio};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 
-/// Состояние VPN: конфиг sing-box, PID, маркеры остановки.
+/// VPN state: sing-box config, PID, stop markers.
 fn data_dir() -> PathBuf {
     unidtk_api::paths::data_dir()
 }
 
-/// Бинарник sing-box — рядом с программой, как и остальные её бинарники.
+/// The sing-box binary, located next to the program like its other binaries.
 fn singbox_exe() -> PathBuf {
     unidtk_api::paths::singbox_exe()
 }

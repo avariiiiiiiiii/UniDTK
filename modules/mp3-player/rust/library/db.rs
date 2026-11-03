@@ -8,11 +8,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-// Раскладка библиотеки внутри среза модуля. Префикс `mods/mp3_player/` к ключу
-// добавляет ядро ([`ModuleDb`]) — модуль видит только эти ключи:
+// Library layout inside the module's slice. The kernel ([`ModuleDb`]) adds the `mods/mp3_player/`
+// prefix to each key; the module sees only these keys:
 //   track/<id>                → bincode(Track)
 //   playlist/<id>             → bincode(Playlist)
-//   pt/<playlist_id>/<pos:08> → id трека (сырые utf-8 байты), порядок позиции
+//   pt/<playlist_id>/<pos:08> → track id (raw utf-8 bytes), ordered by position
 const TRACK_PREFIX: &str = "track/";
 const PLAYLIST_PREFIX: &str = "playlist/";
 const LINK_PREFIX: &str = "pt/";
@@ -198,9 +198,9 @@ impl Database {
     pub fn list_playlists(&self) -> Result<Vec<Playlist>, String> {
         let mut result = self.all::<Playlist>(PLAYLIST_PREFIX)?;
         for pl in result.iter_mut() {
-            // Счётчик в записи — исторический максимум позиции (позиции приходят
-            // из yt-dlp 1-based, поэтому «position + 1» завышал длину на единицу).
-            // Настоящая длина плейлиста — число связок, его и показываем.
+            // The counter in the record is a historical maximum position (positions come
+            // from yt-dlp as 1-based, so "position + 1" overstated the length by one).
+            // The real playlist length is the number of links, and that is what we show.
             let links = self.db.kv_list(&Self::link_prefix(&pl.id))?;
             pl.track_count = links.len() as i64;
 
@@ -325,9 +325,8 @@ impl Database {
         self.put(Self::playlist_key(id), &pl)
     }
 
-    /// Удалить плейлист вместе с его связками. Треки и файлы остаются в
-    /// библиотеке — при повторной синхронизации они переиспользуются без
-    /// повторного скачивания.
+    /// Delete a playlist together with its links. Tracks and files stay in the
+    /// library; on a repeated sync they are reused without being downloaded again.
     pub fn delete_playlist(&self, playlist_id: &str) -> Result<(), String> {
         let mut ops = vec![DbOp::Remove {
             key: Self::playlist_key(playlist_id),
@@ -461,9 +460,9 @@ impl Database {
         Ok(())
     }
 
-    /// Восстановление обложек по файлам `<id>.jpg` рядом с треком. Читающая
-    /// фаза сначала собирает кандидатов — writer-транзакция открывается только
-    /// если реально есть что чинить.
+    /// Restore cover art from the `<id>.jpg` files next to each track. The read
+    /// phase collects candidates first; a writer transaction is opened only
+    /// if there is actually something to fix.
     pub fn repair_missing_thumbnails(&self) -> Result<(), String> {
         let mut repairs = Vec::new();
         for track in self.all::<Track>(TRACK_PREFIX)? {
@@ -590,8 +589,8 @@ fn looks_like_url(value: &str) -> bool {
             .starts_with("https://")
 }
 
-/// Тестовая реализация контракта: та же семантика ключей, но в памяти и без
-/// redb — модульные тесты не должны зависеть от движка базы ядра.
+/// Test implementation of the contract: the same key semantics, but in memory and without
+/// redb. Module unit tests must not depend on the kernel's database engine.
 #[cfg(test)]
 pub fn memory_module_db() -> Arc<dyn ModuleDb> {
     Arc::new(MemoryDb::default())
@@ -793,7 +792,7 @@ mod tests {
             name: "Рок".into(),
             source_url: "https://music.youtube.com/playlist?list=pl_1".into(),
             last_sync: None,
-            // Исторический (неверный) счётчик: показывать должно число связок.
+            // Historical (wrong) counter: the number of links is what should be shown.
             track_count: 99,
             thumbnail_path: None,
         }];
@@ -851,7 +850,7 @@ mod tests {
                 .len(),
             0
         );
-        // Трек остаётся в библиотеке.
+        // The track stays in the library.
         assert!(db.get_track("t1").unwrap().is_some());
         assert_eq!(db.list_tracks(None).unwrap().len(), 1);
     }

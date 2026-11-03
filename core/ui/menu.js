@@ -2,10 +2,10 @@
  * UniDTK — customization panel (menu.js)
  *
  * A side panel on the right of the live desktop, inside the wallpaper window:
- *   1. «Стол» — the «Виджеты» and «Папки» packs and arranging the desk; the
+ *   1. "Desk" — the "Widgets" and "Folders" packs and arranging the desk; the
  *              settings of one item open as a sheet over the menu
- *   2. «Вид»  — theme, colours, everything else folded into «Тонкая настройка»
- * plus the VPN view, reached from «Стол» (the VPN widget may be hidden).
+ *   2. "Appearance" — theme, colours, everything else folded into "Fine-tune"
+ * plus the VPN view, reached from "Desk" (the VPN widget may be hidden).
  */
 
 import { invoke } from "@unidtk/bridge";
@@ -157,7 +157,7 @@ export function openMenu() {
   panel.querySelector(`#tab-${currentView}`)?.focus();
 }
 
-/** Open «Папки» with the Start list of one folder already unfolded. */
+/** Open "Folders" with the Start list of one folder already unfolded. */
 export function openFoldersFor(folderId) {
   startPickerFor = folderId;
   currentView = "folders";
@@ -183,7 +183,7 @@ export function closeMenu({ restoreFocus = true } = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// «Стол»
+// "Desk"
 // ═══════════════════════════════════════════════════════════════════════════
 
 function highlight(id) {
@@ -381,7 +381,7 @@ async function applyPositions() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// «Папки»
+// "Folders"
 // ═══════════════════════════════════════════════════════════════════════════
 
 const ICON_LABELS = {
@@ -390,7 +390,7 @@ const ICON_LABELS = {
 };
 
 let startMenuCache = null;
-// Which folder has its «Из Пуска» list open (one at a time).
+// Which folder has its "From Start" list open (one at a time).
 let startPickerFor = null;
 let creatingFolder = false;
 
@@ -699,7 +699,7 @@ async function bindStartPicker(picker, onPick) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// «Вид»
+// "Appearance"
 // ═══════════════════════════════════════════════════════════════════════════
 
 const SLOT_LABELS = {

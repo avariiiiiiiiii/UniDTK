@@ -238,8 +238,8 @@ fn with_endpoint<T>(_f: impl FnOnce(&()) -> Result<T, String>) -> Result<T, Stri
     Err("system volume is only supported on Windows".into())
 }
 
-/// Модуль глиф-бара: ядро создаёт и останавливает его через контракт
-/// `unidtk-api`, состояние живёт внутри модуля.
+/// Glyph-bar module: the kernel creates and stops it through the
+/// `unidtk-api` contract; its state lives inside the module.
 pub struct GlyphBarModule {
     state: std::sync::Mutex<Option<VolumeState>>,
 }
@@ -312,7 +312,7 @@ impl unidtk_api::Module for GlyphBarModule {
 
     fn init(&self, ctx: unidtk_api::ModuleContext) -> Result<(), String> {
         if ctx.is_diagnostic() {
-            // В режиме диагностики проверяем доступность WASAPI без запуска фонового потока
+            // Diagnostic mode: check that WASAPI is available without starting a background thread
             let _ = get_system_volume();
             return Ok(());
         }

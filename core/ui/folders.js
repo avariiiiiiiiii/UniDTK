@@ -4,7 +4,7 @@
  *
  * A folder is a kernel record (`get_folders` / `save_folder` / `delete_folder`);
  * its shortcuts point at the real program, file, folder or URL. Every change
- * that loses something offers «Отменить» in a toast instead of asking first.
+ * that loses something offers "Undo" in a toast instead of asking first.
  */
 
 import { invoke } from "@unidtk/bridge";
@@ -64,7 +64,7 @@ export async function updateFolder(folder, changes) {
 }
 
 /**
- * Delete at once; «Отменить» brings back the record and everything the desk
+ * Delete at once; "Undo" brings back the record and everything the desk
  * kept for it — position, hidden flag, placed instances.
  */
 export async function deleteFolder(folder, onRestored = null) {

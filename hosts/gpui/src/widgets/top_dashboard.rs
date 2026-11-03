@@ -307,7 +307,7 @@ impl Render for TopDashboardWidget {
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
                     .child(
-                        // Line 1: СБ (10) [ОКТ] +19°C ≈0 ММ
+                        // Line 1: Sat (10) [Oct] +19°C ≈0 mm
                         div()
                             .flex()
                             .items_center()
@@ -335,7 +335,7 @@ impl Render for TopDashboardWidget {
                             .child(div().text_color(red).child(format!("{} {}", self.temp_str, self.precip_amount_str))),
                     )
                     .child(
-                        // Line 2: +19°C 10 км/ч
+                        // Line 2: +19°C 10 km/h
                         div()
                             .flex()
                             .items_center()
@@ -362,7 +362,7 @@ impl Render for TopDashboardWidget {
                             .child(div().text_color(red).child(format!("⭕ {}", self.precip_chance_str))),
                     )
                     .child(
-                        // Line 4: ≈ Вашингтон ::: ::: Manassas [IP]
+                        // Line 4: ≈ Washington ::: ::: Manassas [IP]
                         div()
                             .flex()
                             .items_center()
@@ -420,7 +420,7 @@ impl Render for TopDashboardWidget {
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
                     .child(
-                        // Line 1: [ПАСМУРНО]
+                        // Line 1: [OVERCAST]
                         div()
                             .flex()
                             .items_center()
@@ -445,7 +445,7 @@ impl Render for TopDashboardWidget {
                             .child(div().text_color(red).child(self.sunset_str.clone())),
                     )
                     .child(
-                        // Line 3: 11ч 25м [======---]
+                        // Line 3: 11h 25m [======---]
                         div()
                             .flex()
                             .items_center()

@@ -1125,7 +1125,7 @@ function wireTelegramMessageRow(card, widgetId, row, chat) {
     });
   });
 
-  // Wire video note ("кружочки")
+  // Wire video note ("kruzhochki" in Russian)
   row.querySelectorAll(".tg-video-note-wrap").forEach((wrap) => {
     if (wrap.classList.contains("tg-media-pending")) return;
     const video = wrap.querySelector("video.tg-video-note-player");
@@ -6258,7 +6258,7 @@ function telegramAttachmentHtml(message, chatId) {
     `;
   }
 
-  // 3. Video Note (Round video message / "кружочек")
+  // 3. Video Note (round video message, "kruzhochek" in Russian)
   if (kind === "videoNote") {
     const durationBadge = durationText ? `<span class="tg-media-badge">${escapeHtml(durationText)}</span>` : "";
     if (path) {

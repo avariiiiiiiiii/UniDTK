@@ -1,24 +1,24 @@
-//! Пути UniDTK: где лежит **программа** и где лежат **данные пользователя**.
+//! UniDTK paths: where the **program** lives and where the **user data** lives.
 //!
-//! Разделение ровно по правилу Windows:
+//! The split follows the Windows convention exactly:
 //!
-//! * **программа** — `C:\Program Files\UniDTK`: исполняемые файлы и нативные
-//!   зависимости (`unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `sing-box.exe`,
-//!   DLL, модели AI DJ). Каталог доступен только на чтение — приложение не
-//!   имеет права писать рядом с собой **ничего**;
-//! * **данные** — `%LOCALAPPDATA%\UniDTK`: базы, журналы, кэш, сессия Telegram,
-//!   библиотека музыки. Всё изменяемое живёт только здесь.
+//! * **program**: `C:\Program Files\UniDTK`, holding the executables and native
+//!   dependencies (`unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `sing-box.exe`,
+//!   DLLs, AI DJ models). The directory is read-only: the application has no right
+//!   to write **anything** next to itself;
+//! * **data**: `%LOCALAPPDATA%\UniDTK`: databases, logs, cache, the Telegram session,
+//!   the music library. Everything mutable lives only here.
 //!
-//! Почему это контракт, а не знание ядра: чистые функции от окружения, поэтому
-//! и ядро, и любой модуль получают один и тот же ответ. Модулю не нужно знать
-//! раскладку, а переезд каталогов не задевает ни один модуль.
+//! Why this is a contract and not core knowledge: these are pure functions of the environment,
+//! so the core and every module get the same answer. A module does not need to know
+//! the layout, and moving the directories affects no module.
 
 use std::path::PathBuf;
 
-/// Каталог программы: рядом с `unidtk.exe`.
+/// The program directory: next to `unidtk.exe`.
 ///
-/// Отсюда только **читают** (DLL, sing-box, хелпер, модели). Под Program Files
-/// каталог read-only, поэтому любая запись сюда — ошибка проектирования.
+/// It is only **read** from here (DLLs, sing-box, the helper, models). Under Program Files
+/// the directory is read-only, so any write here is a design error.
 pub fn install_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -26,12 +26,11 @@ pub fn install_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Каталог данных пользователя: `%LOCALAPPDATA%\UniDTK`, а при недоступности
-/// известных папок Windows — текущий каталог.
+/// The user data directory: `%LOCALAPPDATA%\UniDTK`, or the current directory if the
+/// known Windows folders are unavailable.
 ///
-/// Разрешается через Windows known-folder API (`dirs`), а не через переменную
-/// `%LOCALAPPDATA%`: задачи планировщика запускают процессы, в которых эта
-/// переменная не гарантирована.
+/// Resolved via the Windows known-folder API (`dirs`), not via the `%LOCALAPPDATA%`
+/// variable: scheduler tasks launch processes in which this variable is not guaranteed.
 pub fn data_dir() -> PathBuf {
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     let dir = base.join("UniDTK");
@@ -39,64 +38,64 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
-/// Производные данные, которые можно удалить целиком:
-/// `%LOCALAPPDATA%\UniDTK\cache`. Сюда попадают хранилища модулей, объявленные
-/// как [`unidtk_api::StoreKind::OwnedCache`].
+/// Derived data that can be deleted as a whole:
+/// `%LOCALAPPDATA%\UniDTK\cache`. Module stores declared as
+/// [`unidtk_api::StoreKind::OwnedCache`] are placed here.
 pub fn cache_dir() -> PathBuf {
     data_dir().join("cache")
 }
 
-/// Журналы: `%LOCALAPPDATA%\UniDTK\logs`.
+/// Logs: `%LOCALAPPDATA%\UniDTK\logs`.
 pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")
 }
 
-/// Библиотека музыки по умолчанию: `%LOCALAPPDATA%\UniDTK\music`.
+/// The default music library: `%LOCALAPPDATA%\UniDTK\music`.
 ///
-/// Каталог можно переопределить в конфиге плеера (`library_dir`): это
-/// пользовательский контент, и держать его строго внутри данных приложения —
-/// решение владельца, а не требование Windows.
+/// The directory can be overridden in the player config (`library_dir`): this is user
+/// content, and keeping it strictly inside the application data is the owner's decision,
+/// not a Windows requirement.
 pub fn music_dir() -> PathBuf {
     data_dir().join("music")
 }
 
-/// Модели (ONNX AI DJ) — если приложение получило их не из установщика.
+/// Models (ONNX for AI DJ), in case the application did not receive them from the installer.
 pub fn models_dir() -> PathBuf {
     data_dir().join("models")
 }
 
-/// Бинарник sing-box: **только** рядом с программой.
+/// The sing-box binary: **only** next to the program.
 ///
-/// Фоллбэков больше нет: раньше третьим кандидатом стоял `sing-box.exe` из
-/// комплекта сторонней программы (`C:\Program Files\FlyFrogLLC\Happ\...`), то
-/// есть наша VPN-подсистема могла молча подняться на чужом бинарнике.
-/// `sing-box.exe` обязан приходить с установщиком вместе с приложением.
+/// There are no fallbacks any more: previously a third candidate was `sing-box.exe` from
+/// a third-party program's bundle (`C:\Program Files\FlyFrogLLC\Happ\...`), so our VPN
+/// subsystem could silently start on someone else's binary.
+/// `sing-box.exe` must arrive with the installer, together with the application.
 pub fn singbox_exe() -> PathBuf {
     install_dir().join("sing-box.exe")
 }
 
-/// ByeDPI (`ciadpi.exe`): локальный DPI-обход для модуля telegram. Только
-/// рядом с программой, без PATH-фоллбэка: приложение обязано шипать свой
-/// экземпляр.
+/// ByeDPI (`ciadpi.exe`): local DPI bypass for the telegram module. Only
+/// next to the program, with no PATH fallback: the application must ship its own
+/// copy.
 pub fn byedpi_exe() -> PathBuf {
     install_dir().join("ciadpi.exe")
 }
 
-/// Нативный VPN-хелпер: рядом с программой, как и остальные бинарники.
-/// Задачи планировщика запускают его оттуда же (повышенными).
+/// The native VPN helper: next to the program, like the other binaries.
+/// Scheduler tasks launch it from the same place (elevated).
 pub fn vpn_helper_exe() -> PathBuf {
     install_dir().join("vpn-helper.exe")
 }
 
-/// Пассивный просмотр пути каталога данных БЕЗ вызова create_dir_all и миграции.
-/// Используется в диагностике для соблюдения правила Zero Disk Pollution.
+/// Passive view of the data directory path WITHOUT calling create_dir_all or migration.
+/// Used by diagnostics to honor the Zero Disk Pollution rule.
 pub fn data_dir_view() -> PathBuf {
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("UniDTK")
 }
 
-/// Канонический поиск бинарника или DLL: проверяет install_dir, target/{release,debug}
-/// и папки исходных библиотек в checkout (opt/).
+/// The canonical lookup for a binary or DLL: checks install_dir, target/{release,debug}
+/// and the source-library folders in the checkout (opt/).
 pub fn resolve_binary(name: &str) -> Option<PathBuf> {
     let install = install_dir();
     let direct = install.join(name);
@@ -131,8 +130,8 @@ pub fn resolve_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Канонический поиск файла модели или ассета: проверяет install/models,
-/// data/models и opt/models.
+/// The canonical lookup for a model or asset file: checks install/models,
+/// data/models and opt/models.
 pub fn resolve_asset(relative_path: &str) -> Option<PathBuf> {
     let install = install_dir();
     let direct = install.join("models").join(relative_path);

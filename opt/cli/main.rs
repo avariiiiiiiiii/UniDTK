@@ -1,4 +1,4 @@
-//! `udtk` — agent/debug bridge to the running UniDTK app (architecture §5.3).
+//! `udtk` — agent/debug bridge to the running UniDTK app (r[ipc.socket-read-only]).
 //!
 //! Talks to the app's localhost IPC server (127.0.0.1:26540) and the WebView2
 //! CDP endpoint (always on in release; the port is published over the IPC
@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 use unidtk_api::ModuleDb;
 
@@ -20,7 +20,7 @@ mod splash_art;
 
 /// CREATE_NO_WINDOW: spawned console helpers (taskkill/sch tasks/reg/powershell)
 /// must never flash a black window, in line with the project's rule that
-/// background work is invisible (AGENTS.md §6).
+/// background work is invisible (r[install.native-tasks]).
 const NO_WINDOW: u32 = 0x0800_0000;
 
 #[path = "../../core/kernel/registry.rs"]
@@ -1425,11 +1425,11 @@ fn build_cmd(args: &[String]) -> Result<String, String> {
     } else if !release_dir.join("libmpv-2.dll").exists() {
         return Err(format!("{} is missing and target/release has no copy", dll_src.display()));
     }
-    // Раньше здесь бинарники дополнительно раскладывались в каталог данных и
-    // зеркалились в `opt/`. Копия теперь ровно одна: `target/release` в
-    // dev-прогоне, а в поставке — каталог установки, который наполняет
-    // установщик. Остаётся убрать устаревшие staged-ресурсы: удалённый модуль
-    // иначе отдаёт вторую карточку виджета.
+    // The binaries used to be copied into the data directory as well and
+    // mirrored into `opt/`. Now there is exactly one copy: `target/release` in a
+    // dev run, and the install directory, filled by the installer, in the
+    // product. What remains is to remove stale staged resources: otherwise a
+    // deleted module still serves a second widget card.
     prune_stale_resources(&root, &release_dir);
     let model_src = root.join("opt/models/discogs-maest-129e");
     if model_src.is_dir() {
@@ -1713,11 +1713,11 @@ fn parse_build_jobs(args: &[String]) -> (Option<usize>, Vec<String>, Result<(), 
 
 /// udtk run — launch the application that sits **next to this CLI**.
 ///
-/// Никакого поиска по репозиторию и никакого legacy-имени: приложение и CLI
-/// всегда лежат в одном каталоге — установленном (`C:\Program Files\UniDTK`) или
-/// собранном (`target\release` в dev-прогоне). Запускать «какой-нибудь»
-/// найденный неподалёку бинарник нельзя: именно так однажды поднялся старый
-/// `shell.exe` из уже удалённого `target`.
+/// No searching the repository and no legacy name: the application and the CLI
+/// always sit in one directory, the installed one (`C:\Program Files\UniDTK`) or
+/// the built one (`target\release` in a dev run). Launching "some" binary found
+/// nearby is not allowed: that is exactly how an old `shell.exe` once started
+/// from an already deleted `target`.
 fn run_cmd(args: &[String]) -> Result<String, String> {
     let install = install_dir();
     let exe = install.join("unidtk.exe");
@@ -1848,9 +1848,13 @@ fn doc_cmd(args: &[String]) -> Result<String, String> {
     } else {
         find_repo_root().ok_or("the book is neither installed nor in a checkout")?
     };
+    // One component per join: explorer.exe cannot parse a path that mixes `/`
+    // and `\`, and opens the Documents folder instead of the page.
     let output = dirs::data_local_dir()
         .ok_or("no local data directory")?
-        .join("UniDTK/cache/book");
+        .join("UniDTK")
+        .join("cache")
+        .join("book");
     let index = book::build(&source, &output)?;
     std::process::Command::new("explorer")
         .arg(&index)
@@ -1895,19 +1899,20 @@ fn find_repo_root() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Каталог, где лежат программа и её бинарники.
+/// The directory that holds the program and its binaries.
 ///
-/// Задачи запускают приложение и VPN-хелпер **оттуда, где они установлены**,
-/// поэтому подстановка идёт по каталогу самого CLI: в установленной копии это
-/// `C:\Program Files\UniDTK`, в dev-прогоне — `target\release`. Зашитых
-/// абсолютных путей в шаблонах задач больше нет.
+/// The tasks start the application and the VPN helper **from where they are
+/// installed**, so the substitution follows the CLI's own directory:
+/// `C:\Program Files\UniDTK` in the installed copy, `target\release` in a dev
+/// run. The task templates hold no hardcoded absolute paths.
 fn install_dir() -> std::path::PathBuf {
     unidtk_api::paths::install_dir()
 }
 
-/// `C:\Program Files\UniDTK` — куда NSIS-установщик кладёт программу в режиме
-/// perMachine. Явный путь нужен верификации `udtk build` в dev-прогоне, где
-/// сам CLI лежит в `target\release` (рядом с ним нет установленного приложения).
+/// `C:\Program Files\UniDTK`, where the NSIS installer puts the program in
+/// perMachine mode. `udtk build` needs this explicit path to verify the install
+/// in a dev run, where the CLI itself lies in `target\release` with no installed
+/// application next to it.
 fn program_files_install_dir() -> std::path::PathBuf {
     let root = std::env::var("PROGRAMFILES")
         .or_else(|_| std::env::var("ProgramW6432"))
@@ -1915,8 +1920,9 @@ fn program_files_install_dir() -> std::path::PathBuf {
     std::path::Path::new(&root).join("UniDTK")
 }
 
-/// Каталог шаблонов задач: ресурс рядом с программой, а в чекауте — каталог
-/// репозитория (чтобы правка шаблона действовала сразу, без пересборки).
+/// The task template directory: a resource next to the program, or in a
+/// checkout the repository's directory, so an edited template applies at once,
+/// without a rebuild.
 fn task_templates_dir() -> Option<std::path::PathBuf> {
     let installed = install_dir().join("scheduler-tasks");
     if installed.is_dir() {
@@ -2056,10 +2062,10 @@ fn tasks_cmd(args: &[String]) -> Result<String, String> {
             Ok(out)
         }
         "register" => {
-            // Задачи всегда запускают установленную копию (Program Files), даже
-            // если CLI вызван из `target\release`: путь разработки в планировщик
-            // не попадает. Ничего никуда не копируем — вторая копия того же
-            // бинарника рядом с данными расходилась бы по версиям.
+            // The tasks always start the installed copy (Program Files), even
+            // when the CLI runs from `target\release`: a development path never
+            // reaches the scheduler. Nothing is copied anywhere; a second copy of
+            // the same binary next to the data would drift to another version.
             let install = program_files_install_dir();
             if !install.join("vpn-helper.exe").is_file() {
                 return Err(format!(
@@ -2171,9 +2177,9 @@ fn ensure_dir_in_user_path(dir: &std::path::Path) -> Result<(), String> {
 
 fn path_cmd(args: &[String]) -> Result<String, String> {
     let sub = args.get(1).map(|s| s.as_str()).unwrap_or("status");
-    // В PATH — только установленная копия (Program Files), откуда бы ни был
-    // запущен CLI: dev-сборка из `targetelease` в PATH не попадает. Никаких
-    // копий `udtk.exe` в каталог данных: две копии расходятся по версиям.
+    // Only the installed copy (Program Files) goes on PATH, wherever the CLI
+    // was started from: a dev build from `targetelease` never does. No copies
+    // of `udtk.exe` in the data directory: two copies drift apart in version.
     let bin_dir = program_files_install_dir();
     match sub {
         "status" | "check" => {
@@ -3606,9 +3612,9 @@ mod tests {
 
     #[test]
     fn test_prepare_task_xml_substitutions() {
-        // В шаблонах задач нет ни одного абсолютного пути — только placeholder,
-        // который подставляет регистрация. Проверяем и подстановку, и то, что
-        // заглушек не остаётся.
+        // The task templates hold no absolute path, only a placeholder that
+        // registration substitutes. Check both the substitution and that no
+        // placeholder is left.
         let sample = r#"
         <Exec>
           <Command>@INSTALL_DIR@\unidtk.exe</Command>

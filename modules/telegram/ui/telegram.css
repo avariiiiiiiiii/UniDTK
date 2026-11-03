@@ -2203,7 +2203,7 @@ img.tg-media:not(.tg-video-wrap *) {
   letter-spacing: 0.3px;
 }
 
-/* Video Note (Round video message / "кружочек") - 2-tier geometry */
+/* Video Note (round video message, "kruzhochek" in Russian) - 2-tier geometry */
 .tg-video-note-wrap {
   position: relative;
   width: 170px;

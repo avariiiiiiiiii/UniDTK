@@ -15,14 +15,14 @@ const AUDIO_ARC_ATTACK = 0.58;
 const AUDIO_ARC_RELEASE = 0.2;
 const AUDIO_ARC_BREATHE = 0.025;
 const audioArcState = new WeakMap();
-// Три дуги по 100° с промежутками по 20° между ними (всего 3×100 + 3×20 = 360°).
+// Three arcs of 100° each, separated by 20° gaps (3×100 + 3×20 = 360°).
 const AUDIO_CIRCLE_ARCS = [
   { key: "bass", start: -80, end: 20 },
   { key: "mid", start: 40, end: 140 },
   { key: "treble", start: 160, end: 260 },
 ];
 
-// Рантайм-состояние дуг/аудио-заглушки (в старом renderer.js жило на верхнем уровне).
+// Runtime state for the arcs and the audio stub (it lived at the top level of the old renderer.js).
 let audioCircleRaf = null;
 let audioCircleTimer = null;
 let audioCircleLastFrame = 0;
@@ -32,7 +32,7 @@ let audioStubLastCheck = 0;
 let audioStubPhaseStart = performance.now();
 
 function setupMusicAudioArcs(card) {
-  // Дуги в плеере живут чуть снаружи ring-progress (r=48), отдельный концентрический слой.
+  // The arcs in the player sit just outside ring-progress (r=48), on a separate concentric layer.
   setAudioArcPaths(card, 50, 50, 51);
 }
 
@@ -151,8 +151,8 @@ function wakeAudioCircleLoop() {
   startAudioCircleLoop();
 }
 
-// Дуги мигают в такт: backend даёт flux+AGC, здесь — быстрый display envelope
-// + glow/толщина. Цель — читаемые «удары», а не вялое дыхание.
+// The arcs pulse in time with the music: the backend supplies flux+AGC, and here we apply a fast display envelope
+// plus glow/thickness. The goal is readable "beats", not a sluggish breathing effect.
 function applyAudioCircleBands(card, bands, active = true, deltaMs = AUDIO_CIRCLE_FRAME_MS, now = performance.now()) {
   const breathe = now / 1000;
   const peak = Math.max(bands.bass || 0, bands.mid || 0, bands.treble || 0);

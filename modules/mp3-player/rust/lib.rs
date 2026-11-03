@@ -38,9 +38,9 @@ pub fn ipc_call(
             Some(state_from(host).and_then(|state| json_of(commands::ai_dj_status(&state))))
         }
         "ai_dj_model_download" => {
-            // Команда write, ходит только через дверь интерфейса; на сокет
-            // её не ставим (это arm вызывается только упомянутыми путями).
-            // Состояние не нужно: загрузчик одиночный и сам находит модель.
+            // Write command: it is reached only through the interface door, so we do not
+            // register it on the socket (this arm is called only from the paths mentioned above).
+            // No state is needed: the loader is a single instance and finds the model itself.
             Some(commands::ai_dj_model_download())
         }
         "get_submodules" => {

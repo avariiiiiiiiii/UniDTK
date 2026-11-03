@@ -14,12 +14,12 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const SOCKS_PORT: u16 = 12908;
 const TUN_NAME: &str = "wallpaper-tun";
 
-/// Публикует текущее состояние туннеля в контракт.
+/// Publishes the current tunnel state to the contract.
 ///
-/// Раньше модуль звал `telegram::on_vpn_state_changed()`, и telegram звал
-/// `vpn::is_connected()` — замкнутый цикл между двумя модулями. Теперь vpn
-/// только объявляет состояние, а telegram подписан на событие: Cargo больше не
-/// даст им зависеть друг от друга.
+/// The module used to call `telegram::on_vpn_state_changed()`, and telegram called
+/// `vpn::is_connected()`, forming a cycle between two modules. Now vpn
+/// only declares its state, and telegram subscribes to the event: Cargo no longer
+/// lets them depend on each other.
 fn publish_vpn_state() {
     unidtk_api::emit("vpn", json!({ "connected": is_connected() }));
 }
@@ -33,7 +33,7 @@ fn publish_vpn_state() {
 const SINGBOX_TASK: &str = "UniDTKSingbox";
 const VPN_STOP_TASK: &str = "UniDTKVpnStop";
 
-/// Настройки подмодуля домашнего сервера (выключаемый split-tunnel в LAN).
+/// Home-server submodule settings (a switchable split tunnel on the LAN).
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct HomeServerConfig {
     #[serde(default)]
@@ -62,7 +62,7 @@ fn default_home_subnet() -> String {
     "192.168.31.0/24".to_string()
 }
 
-/// Каталог данных UniDTK (контракт, не локальная копия логики).
+/// UniDTK data directory (comes from the contract, not a local copy of the logic).
 fn data_dir() -> std::path::PathBuf {
     unidtk_api::paths::data_dir()
 }
@@ -2108,8 +2108,8 @@ pub fn auto_connect_on_startup(app: tauri::AppHandle) {
     });
 }
 
-/// Модуль VPN: ядро создаёт рантайм через контракт, а обёртки команд берут его
-/// клон из managed-state.
+/// VPN module: the core creates the runtime through the contract, and the command wrappers
+/// take a clone of it from managed state.
 pub struct VpnModule {
     runtime: VpnRuntime,
 }
@@ -2121,13 +2121,13 @@ impl VpnModule {
         }
     }
 
-    /// Клон рантайма для managed-state ядра.
+    /// Clone of the runtime for the core's managed state.
     pub fn runtime(&self) -> VpnRuntime {
         self.runtime.clone()
     }
 
-    /// Остановка с бюджетом: `wait` разрешён только с не-главного потока
-    /// (quit_app / WM_ENDSESSION), где ожидание хелпера допустимо.
+    /// Stop with a time budget: `wait` is allowed only from a non-main thread
+    /// (quit_app / WM_ENDSESSION), where waiting for the helper is acceptable.
     pub fn stop_with_budget(&self, wait: bool) -> bool {
         if wait {
             shutdown_and_wait(&self.runtime, std::time::Duration::from_secs(2))
@@ -2192,7 +2192,7 @@ impl unidtk_api::Module for VpnModule {
 
     fn init(&self, ctx: unidtk_api::ModuleContext) -> Result<(), String> {
         if ctx.is_diagnostic() {
-            // В режиме диагностики читаем только in-memory настройки без побочных эффектов
+            // In diagnostics mode, read only the in-memory settings, without side effects
             let _settings = load_settings_from_db(&*ctx.db());
             return Ok(());
         }

@@ -14,7 +14,7 @@ import {
   openPath,
 } from "@unidtk/bridge";
 
-/** «1 ярлык / 2 ярлыка / 5 ярлыков». */
+/** Russian plural rule for "shortcut": 1 = nominative singular, 2-4 = genitive singular, 5+ = genitive plural. */
 export function shortcutCount(n) {
   const mod10 = n % 10;
   const mod100 = n % 100;

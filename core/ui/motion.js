@@ -1,5 +1,5 @@
 /**
- * Shell Motion Core — Unified Animation System (architecture.md §7)
+ * Shell Motion Core — Unified Animation System (r[theme.tokens-only])
  *
  * Canonical project easings and duration tokens. Every widget and core UI
  * component animates using these tokens and helper functions.
@@ -55,7 +55,7 @@ export function getMotionScale() {
 }
 
 /**
- * Dynamic duration calculation via logarithmic physical formula (unicoremodmotion.md §2.1).
+ * Dynamic duration calculation via logarithmic physical formula (r[motion.no-hardcoded-ms]).
  * T(Δd) = [Tmin + (Tmax - Tmin) * ln(1 + Δd / d0) / ln(1 + dmax / d0)] * currentScale
  * Where Tmin = 240ms, Tmax = 440ms, d0 = 100px, dmax = 1600px.
  */

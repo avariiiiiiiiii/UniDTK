@@ -23,12 +23,12 @@ pub struct AppState {
     pub db: Database,
     pub player: PlayerManager,
     pub sync: SyncManager,
-    /// Захват спектра (визуализатор): подмодуль владеет им сам, ядро его больше
-    /// не запускает и не останавливает.
+    /// Spectrum capture (visualizer): the submodule owns it itself; the kernel
+    /// no longer starts or stops it.
     audio: Arc<Mutex<Option<crate::audio::AudioState>>>,
 }
 
-/// mpv IPC-пайп оболочки-обоев: имя принадлежит модулю, ядро его не знает.
+/// mpv IPC pipe of the wallpaper shell: the name belongs to the module; the kernel does not know it.
 const MPV_PIPE: &str = r"\\.\pipe\mpv-wallpaper";
 
 impl AppState {
@@ -36,16 +36,16 @@ impl AppState {
     /// the context the kernel hands over. The library lives in the module's own
     /// key slice of `unidtk.redb`; the raw engine never reaches this module.
     pub fn bootstrap(ctx: unidtk_api::ModuleContext) -> Result<Self, String> {
-        // События модуль публикует через контракт (`unidtk_api::emit`), поэтому
-        // собственный `AppHandle` ему больше не нужен вовсе.
+        // The module publishes events through the contract (`unidtk_api::emit`), so it
+        // no longer needs its own `AppHandle` at all.
         let config = ConfigStore::load().map_err(|e| e.to_string())?;
-        // AI DJ держит эмбеддинги в отдельном файле: своя очередь записи (redb —
-        // один писатель на файл), своя надёжность коммита и возможность снести
-        // файл целиком. Путь выбирает ядро — см. `core/kernel/module_store.rs`.
+        // AI DJ keeps its embeddings in a separate file: its own write queue (redb allows
+        // one writer per file), its own commit durability, and the ability to delete
+        // the whole file. The kernel chooses the path — see `core/kernel/module_store.rs`.
         let ai_dj_store = ctx.store(
             unidtk_api::StoreSpec::cache("ai_dj")
                 .legacy(&["unidtk_ai_dj.redb"])
-                // Прежняя схема AI DJ — две таблицы; контракт даёт плоские ключи.
+                // The previous AI DJ layout used two tables; the contract provides flat keys.
                 .legacy_tables(&[("embeddings", "emb:"), ("analyses", "ana:")]),
         )?;
         crate::ai::ai_dj::set_store(ai_dj_store);
@@ -54,8 +54,8 @@ impl AppState {
         if let Err(error) = db.repair_missing_thumbnails() {
             unidtk_api::log(format!("mp3-player: thumbnail repair failed: {error}"));
         }
-        // Наблюдаемость: одна строка с реальным объёмом библиотеки — по ней
-        // сессия сопровождения сверяет миграцию на живой базе.
+        // Observability: one log line with the real library size; the maintenance
+        // session uses it to verify the migration on the live database.
         let tracks = db.list_tracks(None).map(|tracks| tracks.len()).unwrap_or(0);
         let playlists = db
             .list_playlists()
@@ -66,7 +66,7 @@ impl AppState {
         ));
         let player =
             PlayerManager::with_pipe_name(config.clone(), db.clone(), MPV_PIPE.to_string());
-        // Кроссфейд — настройка подмодуля AI DJ: применяем сохранённое значение.
+        // Crossfade is an AI DJ submodule setting: apply the saved value.
         let crossfade = config.get().ai_dj_crossfade_seconds;
         if let Err(error) = player.set_crossfade_duration(crossfade) {
             unidtk_api::log(format!("mp3-player: crossfade apply failed: {error}"));
@@ -89,17 +89,17 @@ impl AppState {
         Ok(state)
     }
 
-    /// Фоновые задачи модуля (авто-синхронизация, авто-обновление): запускаются
-    /// из `Module::init`, ядро в бутстрап модуля не лезет.
+    /// Module background jobs (auto-sync, auto-update): started from `Module::init`;
+    /// the kernel does not touch the module's bootstrap.
     pub fn start_background_jobs(&self) {
         let sync = self.sync.clone();
         let config = self.config.clone();
         tauri::async_runtime::spawn(spawn_auto_playlist_sync(sync, config));
     }
 
-    /// Живое включение/выключение захвата спектра. Внешний лок держится на всей
-    /// операции check→start→store: иначе бутстрап и тумблер могли бы поднять два
-    /// захвата (два клиента WASAPI loopback).
+    /// Live enable/disable of spectrum capture. The outer lock is held for the whole
+    /// check→start→store operation; otherwise bootstrap and the toggle could both start
+    /// a capture (two WASAPI loopback clients).
     fn set_visualizer_enabled(&self, enabled: bool) -> Result<(), String> {
         let mut guard = self
             .audio
@@ -128,8 +128,8 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    /// Остановка без join'ов: латч анализа, флаг захвата спектра, пауза
-    /// воспроизведения best effort. Выход не ждёт тяжёлые потоки.
+    /// Shutdown without joins: the analysis latch, the spectrum-capture flag, and a
+    /// best-effort playback pause. Exit does not wait for heavy threads.
     pub fn begin_shutdown(&self) {
         begin_shutdown();
         if let Ok(guard) = self.audio.lock() {
@@ -141,9 +141,9 @@ impl AppState {
     }
 }
 
-/// Модуль плеера: `init` строит состояние и фоновые задачи, `shutdown` глушит
-/// анализ, захват спектра и воспроизведение. Оригинал состояния живёт здесь
-/// (жизненный цикл), копия — в managed-state ядра (обёртки команд).
+/// Player module: `init` builds the state and background jobs; `shutdown` stops
+/// analysis, spectrum capture, and playback. The original state lives here
+/// (lifecycle); a copy lives in the kernel's managed state (command wrappers).
 pub struct Mp3PlayerModule {
     state: Mutex<Option<AppState>>,
 }
@@ -260,7 +260,7 @@ pub fn save_config(
     Ok(state.config.get())
 }
 
-// --- Submodules (настройки для будущего меню) --------------------------------
+// --- Submodules (settings for a future menu) --------------------------------
 
 fn toggle_setting(
     key: &str,
@@ -279,10 +279,10 @@ fn toggle_setting(
     })
 }
 
-/// Реестр подмодулей с типизированными настройками и статусом — его рендерит
-/// меню настроек (мост). Форма стабильна: у настройки `key`, `title`, `kind`
+/// Registry of submodules with typed settings and status; the settings menu (the bridge)
+/// renders it. The shape is stable: each setting has `key`, `title`, `kind`
 /// (`toggle|number|select`), `value`, `default`, `applies`
-/// (`live|next_cycle|restart`) и, где нужно, `min`/`max`/`step`/`unit`/`options`.
+/// (`live|next_cycle|restart`) and, where needed, `min`/`max`/`step`/`unit`/`options`.
 pub fn get_submodules(state: &AppState) -> serde_json::Value {
     let config = state.config.get();
     let ai_dj = ai_dj_status(state);
@@ -384,9 +384,9 @@ pub fn get_submodules(state: &AppState) -> serde_json::Value {
     })
 }
 
-/// Точечное изменение настройки подмодуля. Возвращает обновлённое значение —
-/// уже нормализованное (`AppConfig::normalized` — единственный владелец
-/// диапазонов), чтобы меню не показывало то, чего нет в конфиге.
+/// Targeted change of one submodule setting. Returns the updated value,
+/// already normalized (`AppConfig::normalized` is the only owner of the
+/// ranges), so the menu never shows something that is not in the config.
 pub async fn set_submodule_setting(
     state: &AppState,
     module: String,
@@ -457,7 +457,7 @@ fn apply_submodule_setting(
             let snapshot = state
                 .config
                 .mutate(|config| config.auto_update_enabled = enabled)?;
-            // Включение проверяем сразу; маркер не даст частить чаще ~20 ч.
+            // Check immediately when enabled; the marker prevents running more often than every ~20 h.
             if enabled {
                 tauri::async_runtime::spawn(spawn_auto_update(state.config.clone()));
             }
@@ -510,8 +510,8 @@ pub async fn list_playlists(state: &AppState) -> Result<Vec<Playlist>, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Локальное переименование плейлиста: имя хранится только в библиотеке и
-/// переживает синхронизацию (sync не перезатирает не-URL имя именем-URL).
+/// Local playlist rename: the name is stored only in the library and survives
+/// sync (sync does not overwrite a non-URL name with a URL name).
 pub async fn rename_playlist(
     state: &AppState,
     playlist_id: String,
@@ -529,7 +529,7 @@ pub async fn rename_playlist(
     .map_err(|e| e.to_string())?
 }
 
-/// Удаление плейлиста: связки и запись, файлы остаются на диске.
+/// Delete a playlist: its links and record; the files stay on disk.
 pub async fn delete_playlist(state: &AppState, playlist_id: String) -> Result<(), String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || db.delete_playlist(&playlist_id))
@@ -714,13 +714,13 @@ pub struct AiDjStatus {
     pub mode: String,
     pub is_analyzing: bool,
     pub current_analyzing_track: Option<String>,
-    /// Модель AI DJ найдена и валидна (поставка или докачка) — предикат лоадера.
+    /// The AI DJ model is found and valid (shipped or downloaded) — the loader's predicate.
     pub model_present: bool,
-    /// докачка модели идёт прямо сейчас (фаза `"running"`).
+    /// A model download is running right now (phase `"running"`).
     pub model_downloading: bool,
-    /// Скачанные байты текущей цепочки: готовые файлы + текущий `.part`.
+    /// Bytes downloaded so far in the current chain: finished files + the current `.part`.
     pub model_download_bytes_done: u64,
-    /// Полный объём цепочки, когда сервер дал размеры.
+    /// Total size of the chain, when the server reported sizes.
     pub model_download_bytes_total: Option<u64>,
 }
 
@@ -753,7 +753,7 @@ pub fn ai_dj_status(state: &AppState) -> AiDjStatus {
         if let Ok(guard) = ai_dj {
             match guard.as_ref() {
                 Some(dj) => dj.track_count(),
-                // Движок не поднят — считаем по хранилищу, не открывая файл вручную.
+                // Engine not started — count from the store, without opening the file manually.
                 None => crate::ai::ai_dj::analyzed_count(),
             }
         } else {
@@ -797,13 +797,13 @@ pub fn ai_dj_status(state: &AppState) -> AiDjStatus {
     }
 }
 
-/// Докачка AI DJ модели (`discogs-maest-129e`) в каталог данных — по явному
-/// действию пользователя в виджете.
+/// Download the AI DJ model (`discogs-maest-129e`) into the data directory — triggered by an
+/// explicit user action in the widget.
 ///
-/// Ответ немедленный: `{"result": "started" | "running" | "already_present"}`
-/// плюс срез состояния докачки; сам ход идёт в фоне и публикует прогресс
-/// событием `ai-dj-model`. Ошибка фазы (`phase:"error"`) в этот ответ не
-/// возвращается — она живёт в событии, статусе и в `Snapshot.error`.
+/// The reply is immediate: `{"result": "started" | "running" | "already_present"}`
+/// plus a snapshot of the download state. The download itself runs in the background and
+/// publishes progress as the `ai-dj-model` event. An error phase (`phase:"error"`) is not
+/// returned in this reply; it lives in the event, the status, and `Snapshot.error`.
 pub fn ai_dj_model_download() -> Result<serde_json::Value, String> {
     crate::ai::model_fetch::start_download()
 }
@@ -887,8 +887,8 @@ pub fn is_suspended() -> bool {
     SUSPENDED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Латч выхода: останавливает цикл анализа, не дожидаясь его (никаких join'ов —
-/// выход должен укладываться в бюджет завершения Windows).
+/// Exit latch: stops the analysis loop without waiting for it (no joins at all —
+/// exit must fit within the Windows shutdown time budget).
 pub fn begin_shutdown() {
     IS_SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
 }
@@ -998,9 +998,9 @@ pub async fn analyze_tracks(state: &AppState) -> Result<usize, String> {
         return Ok(0);
     }
 
-    // Модель обязательна для анализа; при её отсутствии — читаемая ошибка
-    // вместо подземного отказа ONNX. Докачку здесь не затеваем: она только по
-    // явному действию пользователя.
+    // The model is required for analysis; if it is missing, return a readable error
+    // instead of an obscure ONNX failure. We do not start a download here: it happens
+    // only on an explicit user action.
     if !crate::ai::model_fetch::is_model_present() {
         return Err(
             "AI DJ: модель анализа не установлена — скачайте её кнопкой «Скачать модель» в виджете"
@@ -1052,9 +1052,9 @@ pub async fn reanalyze_tracks(state: &AppState) -> Result<usize, String> {
         return Ok(0);
     }
 
-    // Как и при первом анализе: модель должна быть на месте, автодокачки
-    // здесь нет — запрос повторного анализа без модели отвечает понятной
-    // ошибкой, а не запускает 331 МБ в фоне.
+    // As with the first analysis: the model must be in place; there is no auto-download
+    // here. A repeated-analysis request without the model gets a clear error,
+    // rather than starting a 331 MB download in the background.
     if !crate::ai::model_fetch::is_model_present() {
         return Err(
             "AI DJ: модель анализа не установлена — скачайте её кнопкой «Скачать модель» в виджете"
@@ -1120,8 +1120,8 @@ pub async fn ai_dj_graph(
     let db = state.db.clone();
     let player = state.player.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        // list_tracks — полное bincode-чтение библиотеки: держим его внутри
-        // spawn_blocking, чтобы не блокировать async-поток.
+        // list_tracks is a full bincode read of the library: keep it inside
+        // spawn_blocking so it does not block the async thread.
         let tracks = db.list_tracks(None).unwrap_or_default();
         let ai_dj_lock = player.ai_dj.lock().map_err(|e| e.to_string())?;
         if let Some(dj) = ai_dj_lock.as_ref() {
@@ -1130,8 +1130,8 @@ pub async fn ai_dj_graph(
         drop(ai_dj_lock);
 
         let ai_dj_store = crate::ai::ai_dj::ai_dj_store()?;
-        // Кэш проверяем до загрузки эмбеддингов: попап открывается часто,
-        // а анализ меняется редко.
+        // Check the cache before loading embeddings: the popup opens often,
+        // but the analysis changes rarely.
         if let Some(graph) = crate::ai::ai_dj::AiDj::cached_graph(&ai_dj_store, &tracks) {
             return Ok(graph);
         }

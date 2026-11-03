@@ -124,15 +124,15 @@ pub fn reset_input_focus() {
     INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Класс foreground-окна на момент нажатия Escape.
+/// Class of the foreground window at the moment Escape is pressed.
 #[derive(Clone, Copy)]
 enum ForegroundClass {
-    /// Наше окно: клавиша доходит до DOM нативно, копия задвоила бы событие.
+    /// Our own window: the key reaches the DOM natively; a copy would double the event.
     Shell,
-    /// Рабочий стол: наше окно-обои — ребёнок WorkerW, foreground ему не
-    /// достаётся, клавиатуру отдаёт только хук. Это штатный контекст оболочки.
+    /// Desktop: our wallpaper window is a child of WorkerW, so it does not
+    /// receive the foreground; only the hook delivers keyboard input. This is the normal shell context.
     Desktop,
-    /// Чужое приложение: юзер ушёл из оболочки.
+    /// Another application: the user has left the shell.
     Foreign,
 }
 
@@ -161,8 +161,8 @@ fn foreground_class() -> ForegroundClass {
 /// The release uses the original validated target, never a newly focused HWND.
 fn forward_escape_to_shell(vk: u32, msg: u32, scan_code: isize) {
     let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-    // Оригинальный failsafe: Esc всегда снимает перехват текстового ввода,
-    // иначе после закрытия поля хук продолжит глотать печать под чужим окном.
+    // Original failsafe: Esc always releases the text-input capture,
+    // otherwise after the field closes the hook would keep swallowing typing into a foreign window.
     reset_input_focus();
 
     let target = if is_down {

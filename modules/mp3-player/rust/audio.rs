@@ -30,8 +30,8 @@ pub struct AudioState {
 }
 
 impl AudioState {
-    /// Только выставить флаг — без join'ов. Используется на пути завершения
-    /// процесса: выход не должен ждать поток захвата.
+    /// Only sets the flag, with no joins. Used on the process-shutdown path:
+    /// exit must not wait for the capture thread.
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }

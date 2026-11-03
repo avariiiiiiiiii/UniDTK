@@ -1,6 +1,6 @@
 //! Generated art for the `udtk` splash screen. **Do not edit by hand.**
 //!
-//! Regenerate with `make_splash.py` (docs/unidtkascii.md §5):
+//! Regenerate with `make_splash.py` (docs/dev/ascii-art.md, "Recorded Variants"):
 //!
 //!     make_splash.py --repo <UniDTK repo root>
 //!
@@ -169,7 +169,7 @@ pub const EMBLEM_SMALL_SHADE: [u8; 364] = [
     128, 128, 128, 128, 128, 128, 128, 144, 168, 176, 176, 176, 176, 176, 176, 176, 176, 176, 176, 176, 168, 144, 128, 128, 128, 128, 128, 128,
     128, 128, 128, 128, 128, 128, 128, 120, 128, 152, 160, 168, 176, 176, 176, 176, 176, 176, 160, 144, 128, 128, 128, 128, 128, 128, 128, 128,
 ];
-/// Block-letter wordmark (`docs/unidtkascii.md` §4.1).
+/// Block-letter wordmark (`docs/dev/ascii-art.md`, "The Pipeline").
 /// "UniDTK": U (uppercase), ni (lowercase), DTK (uppercase).
 pub const WORDMARK: [&str; 6] = [
     "██╗   ██╗        ██╗ ██████╗ ████████╗██╗  ██╗",

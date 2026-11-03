@@ -1,5 +1,5 @@
 /**
- * UniDTK — Unified Surface Manager (unicoremodmotion.md §2, §3)
+ * UniDTK — Unified Surface Manager (r[motion.clip-morph], docs/reference/surfaces.md)
  *
  * Enforces the 2-object model:
  *   1. Desktop Widgets (Widget) — permanent desktop cards
@@ -357,7 +357,7 @@ class SurfaceManager {
     if (this._initialized || typeof window === "undefined") return;
     this._initialized = true;
 
-    // Capture-phase Escape listener: strictly closes the topmost surface (unicoremodmotion.md §2.4)
+    // Capture-phase Escape listener: strictly closes the topmost surface (r[motion.lifo-stack])
     window.addEventListener(
       "keydown",
       (e) => {
@@ -609,7 +609,7 @@ class SurfaceManager {
     const rightInset = Math.max(0, Math.round(surfaceRect.right - (originRect.left + originRect.width)));
     const bottomInset = opts.axis === "x" ? 0 : Math.max(0, Math.round(surfaceRect.bottom - (originRect.top + originRect.height)));
 
-    // Dynamic duration calculation via logarithmic physical formula (unicoremodmotion.md §2.1)
+    // Dynamic duration calculation via logarithmic physical formula (r[motion.no-hardcoded-ms])
     // Respects explicit opts.duration token or millisecond override if specified
     const duration = opts.duration != null
       ? getDuration(opts.duration)

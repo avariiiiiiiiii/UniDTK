@@ -554,20 +554,20 @@ static VPN_EVENTS_SUBSCRIBED: AtomicBool = AtomicBool::new(false);
 /// The user switched the module off; unlike `SHUTTING_DOWN` this one comes back.
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
 
-/// Состояние VPN из контракта.
+/// VPN state from the contract.
 ///
-/// Раньше здесь стоял прямой вызов `vpn::is_connected()`, из-за чего telegram и
-/// vpn зависели друг от друга. Теперь vpn публикует событие `vpn`, а telegram
-/// читает последнее известное значение — зависимости нет ни в одну сторону.
+/// This used to be a direct call to `vpn::is_connected()`, which made telegram and
+/// vpn depend on each other. Now vpn publishes a `vpn` event, and telegram
+/// reads the last known value — there is no dependency in either direction.
 fn vpn_connected_from_contract() -> bool {
     unidtk_api::state("vpn")
         .and_then(|payload| payload.get("connected").and_then(|v| v.as_bool()))
         .unwrap_or(false)
 }
 
-/// Подписаться на изменения VPN. Вызывает ядро один раз при старте.
+/// Subscribe to VPN changes. The core calls this once at startup.
 ///
-/// Заменяет прежний обратный вызов `vpn -> telegram::on_vpn_state_changed()`.
+/// Replaces the former callback `vpn -> telegram::on_vpn_state_changed()`.
 pub fn subscribe_vpn_events() {
     if VPN_EVENTS_SUBSCRIBED.swap(true, Ordering::SeqCst) {
         return;
@@ -6058,8 +6058,8 @@ fn bundled_tdjson_path() -> Option<std::path::PathBuf> {
     candidates.into_iter().find(|path| path.exists())
 }
 
-/// Модуль Telegram: рантайм создаётся в `init` (там же прокидывается AppHandle
-/// и подписка на VPN), в managed-state ядра лежит клон для обёрток команд.
+/// Telegram module: the runtime is created in `init` (the AppHandle and the VPN
+/// subscription are also passed in there); the core's managed state holds a clone for the command wrappers.
 pub struct TelegramModule {
     runtime: std::sync::Mutex<Option<TelegramRuntime>>,
 }
@@ -6211,7 +6211,7 @@ impl unidtk_api::Module for TelegramModule {
 
     fn init(&self, ctx: unidtk_api::ModuleContext) -> Result<(), String> {
         if ctx.is_diagnostic() {
-            // В режиме диагностики проверяем конфиг из базы без запуска C++ TDLib
+            // In diagnostics mode, check the config from the database without starting the C++ TDLib
             let _cfg = load_config_from_db(&*ctx.db());
             return Ok(());
         }

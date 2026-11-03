@@ -17,7 +17,7 @@
   --font-base: 'Geist', sans-serif;
   --font-accent: 'Ndot', monospace;
   --font-mono: 'Consolas', monospace;
-  /* Canon Easings (architecture.md §7, unicoremodmotion.md §2) */
+  /* Canon Easings (r[theme.tokens-only], r[motion.no-hardcoded-ms]) */
   --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-expo: cubic-bezier(0.30, 0.95, 0.35, 1.00);
@@ -192,7 +192,7 @@ html {
   background: transparent;
 }
 
-/* На вторичных wallpaper-окнах — только фоновая картинка, никаких UI элементов */
+/* On secondary wallpaper windows only the background image is shown, with no UI elements */
 body.no-widgets .topbar-actions,
 body.no-widgets .widgets-canvas,
 body.no-widgets .debug-message {
@@ -1134,7 +1134,7 @@ body.edit-mode .resize-handle:hover::after {
   display: none;
 }
 
-/* --- Unified Surfaces & Portals (unicoremodmotion.md §2, §3) --- */
+/* --- Unified Surfaces & Portals (r[motion.clip-morph], docs/reference/surfaces.md) --- */
 #shell-portals {
   position: fixed;
   inset: 0;

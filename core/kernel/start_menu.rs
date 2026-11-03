@@ -2,7 +2,7 @@
 //! for a target, and what a pasted/picked/dropped path or link points at.
 //!
 //! COM (`IShellLinkW`, `IShellItemImageFactory`) runs on a dedicated worker
-//! thread with its own apartment, never on the Tauri UI thread (architecture §3).
+//! thread with its own apartment, never on the Tauri UI thread (r[kernel.no-blocking-main-thread]).
 //! A shortcut stores the real program, file, folder or URL — `.lnk` files are
 //! only read, never copied.
 

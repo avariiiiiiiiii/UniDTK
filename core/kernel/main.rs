@@ -76,8 +76,8 @@ static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
 fn append_log_file(message: &str) {
     let slot = LOG_FILE.get_or_init(|| {
-        // Журнал живёт в каталоге данных, а не рядом с программой: под Program
-        // Files запись рядом с exe невозможна, и весь старт-логинг молча терялся.
+        // The log lives in the data directory, not next to the program: under Program
+        // Files, writing next to the exe is impossible, and all startup logging was silently lost.
         let dir = unidtk_api::paths::logs_dir();
         let opened = if std::fs::create_dir_all(&dir).is_ok() {
             OpenOptions::new()
@@ -127,9 +127,9 @@ pub(crate) fn app_shutdown(app: &tauri::AppHandle, wait_for_vpn: bool) {
         return;
     }
     log_line("shutdown: begin");
-    // mp3-player: глобальный латч закрывается безусловно (на случай, если
-    // состояние модуля не успело появиться), затем — штатная остановка через
-    // контракт: анализ, захват спектра и пауза, без join'ов.
+    // mp3-player: the global latch is closed unconditionally (in case the module
+    // state has not appeared yet), then a normal stop via the contract: analysis,
+    // spectrum capture and pause, without joins.
     music::commands::begin_shutdown();
     if let Some(module) = app.try_state::<commands::Mp3PlayerModule>() {
         let _ = unidtk_api::Module::shutdown(&*module, Duration::from_millis(1500));
@@ -170,9 +170,9 @@ pub(crate) fn is_shutting_down() -> bool {
     SHUTDOWN_DONE.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Контекст модуля: собственный срез базы + AppHandle как host-состояние.
-/// Если redb не открылась, модуль получает пустую заглушку — модули, которым
-/// база не нужна, обязаны подниматься и в деградированном режиме.
+/// Module context: its own database slice + AppHandle as host state.
+/// If redb failed to open, the module receives an empty stub; modules that do not
+/// need the database must still start in degraded mode.
 /// Build mp3-player on its own thread: the library load is slow, and the module
 /// must be off the startup path.
 fn start_music_module(handle: tauri::AppHandle) {
@@ -187,8 +187,8 @@ fn start_music_module(handle: tauri::AppHandle) {
         match unidtk_api::Module::init(&module, ctx) {
             Ok(()) => {
                 if is_shutting_down() {
-                    // Вышли, пока модуль поднимался: останавливаем то,
-                    // что уже успело запуститься, и не управляем им.
+                    // Shutdown started while the module was starting: stop whatever
+                    // has already launched, and do not manage it.
                     let _ = unidtk_api::Module::shutdown(&module, Duration::from_millis(1500));
                     log_line("setup: music core finished after shutdown; stopped");
                     return;
@@ -219,8 +219,8 @@ fn module_context(app: &tauri::AppHandle, id: &str, enabled: bool) -> unidtk_api
         .with_enabled(enabled)
 }
 
-/// Модули, которые пользователь выключил (из redb `disabled_modules`). Default `[]`.
-/// Если redb не открылась — считаем все включёнными (бывшее поведение, без паники).
+/// Modules the user has disabled (from redb `disabled_modules`). Default `[]`.
+/// If redb failed to open, all modules are treated as enabled (the previous behavior, no panic).
 fn disabled_module_set(app: &tauri::AppHandle) -> std::collections::HashSet<String> {
     match app.try_state::<Arc<UniDtkDatabase>>() {
         Some(state) => state.inner().get_disabled_modules().unwrap_or_default().into_iter().collect(),
@@ -228,8 +228,8 @@ fn disabled_module_set(app: &tauri::AppHandle) -> std::collections::HashSet<Stri
     }
 }
 
-/// Фабрика файловых хранилищ: одна на процесс, потому что redb лочит файл
-/// эксклюзивно и на каждый путь должен быть ровно один открытый хендл.
+/// File-store factory: one per process, because redb locks the file
+/// exclusively and each path must have exactly one open handle.
 fn store_factory() -> Arc<dyn unidtk_api::StoreFactory> {
     static FACTORY: std::sync::OnceLock<Arc<dyn unidtk_api::StoreFactory>> =
         std::sync::OnceLock::new();
@@ -243,7 +243,7 @@ fn shared_db(app: &tauri::AppHandle) -> Option<Arc<UniDtkDatabase>> {
         .map(|state| state.inner().clone())
 }
 
-/// Срез-заглушка для старта без redb: читать нечего, писать нельзя.
+/// Stub database slice for startup without redb: there is nothing to read, and writing is not allowed.
 struct NoopModuleDb;
 
 impl unidtk_api::ModuleDb for NoopModuleDb {
@@ -513,7 +513,7 @@ fn explorer_sort_set(
     state.set_explorer_sort(&column, ascending)
 }
 
-/// Layout seeded into redb on first start; "Сброс позиций" restores the
+/// Layout seeded into redb on first start; the "Reset positions" action restores the
 /// geometry from it. The frontend asks for it instead of keeping its own copy.
 const DEFAULT_WIDGET_CONFIG: &str = r#"{
   "order": [],
@@ -1413,7 +1413,7 @@ fn ai_dj_status(
     music::commands::ai_dj_status(&state)
 }
 
-/// Докачка AI DJ модели: немедленный ответ, ход идёт в нити лоадера.
+/// Resumable download of the AI DJ model: responds immediately, the work runs on the loader thread.
 #[tauri::command(async)]
 fn ai_dj_model_download() -> Result<serde_json::Value, String> {
     music::commands::ai_dj_model_download()
@@ -1832,7 +1832,7 @@ mod frontend_contract_tests {
     /// Guards the failure mode where a command is renamed or deleted in the kernel while
     /// the frontend keeps calling it — that surfaces at runtime as an empty widget, not
     /// at build time. It is deliberately a *test*: `generate_handler!` is a macro, so
-    /// `build.rs` cannot read its contents structurally (see the H2 record in `docs/cliudtk.md`).
+    /// `build.rs` cannot read its contents structurally (see `docs/history/rfcs/udtk-migration.md`, H2).
     #[test]
     fn frontend_invoke_names_are_registered() {
         let registered = registered_commands();
@@ -2454,9 +2454,9 @@ fn main() {
                 })
                 .build(app)?;
 
-            // Модули поднимаются через контракт `unidtk-api`: ядро даёт каждому
-            // свой срез базы и AppHandle, а дальше только управляет состоянием.
-            // Захват спектра (визуализатор) стартует внутри mp3-player.
+            // Modules start through the `unidtk-api` contract: the core gives each one
+            // its own database slice and AppHandle, and after that only manages state.
+            // Spectrum capture (the visualizer) starts inside mp3-player.
             let glyph_bar_module = glyph_bar::GlyphBarModule::new();
             unidtk_api::Module::init(&glyph_bar_module, module_context(app.handle(), "glyph-bar", !disabled_mods.contains("glyph-bar")))?;
             app.manage(glyph_bar_module);
@@ -2497,7 +2497,7 @@ fn main() {
             app.manage(micrographics_module);
             log_line("setup: micrographics weather feed ready");
 
-            // Localhost IPC server for CLI/agent debugging (architecture §5.3):
+            // Localhost IPC server for CLI/agent debugging (r[ipc.socket-read-only]):
             // read-only module snapshots + core log/config commands.
             {
                 let db_for_ipc = app.try_state::<Arc<UniDtkDatabase>>().map(|s| s.inner().clone());
