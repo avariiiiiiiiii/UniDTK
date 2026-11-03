@@ -182,7 +182,7 @@ The timestamp is local time with milliseconds. Frontend lines get a `[frontend] 
 
 ## Step 7: Where the database lives
 
-`LogStore::default_path()` returns `%LOCALAPPDATA%\UniDTK\unidtk_logs.redb`. The architecture keeps logs in their own file, separate from the user data file `unidtk.redb` ([docs/architecture.md](../architecture.md)). The store is opened with `LogStore::open`, which creates the folder and the file if they are missing. The tables are created on the first write, so an empty store has no tables.
+`LogStore::default_path()` returns `%LOCALAPPDATA%\UniDTK\unidtk_logs.redb`. The architecture keeps logs in their own file, separate from the user data file `unidtk.redb` ([docs/architecture.md](../reference/README.md)). The store is opened with `LogStore::open`, which creates the folder and the file if they are missing. The tables are created on the first write, so an empty store has no tables.
 
 ---
 

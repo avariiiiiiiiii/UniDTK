@@ -16,14 +16,14 @@ The original design note was written on 2026-09-01. This version was re-checked 
 
 | File | Role |
 | :--- | :--- |
-| [modules/telegram/rust/telegram.rs](../modules/telegram/rust/telegram.rs) | The module: TDLib loader, receiver, requests, updates, proxy, forum and community logic (6,257 lines). |
-| [modules/telegram/ui/widget.js](../modules/telegram/ui/widget.js) | The widget: chat list, topic column, thread view (7,086 lines). |
-| [modules/telegram/ui/telegram.css](../modules/telegram/ui/telegram.css) | Layout, including the topic grid (3,713 lines). |
-| [core/api/src/paths.rs](../core/api/src/paths.rs) | Locations of the data directory, the TDLib folder, and the ByeDPI binary. |
+| [modules/telegram/rust/telegram.rs](../../modules/telegram/rust/telegram.rs) | The module: TDLib loader, receiver, requests, updates, proxy, forum and community logic (6,257 lines). |
+| [modules/telegram/ui/widget.js](../../modules/telegram/ui/widget.js) | The widget: chat list, topic column, thread view (7,086 lines). |
+| [modules/telegram/ui/telegram.css](../../modules/telegram/ui/telegram.css) | Layout, including the topic grid (3,713 lines). |
+| [core/api/src/paths.rs](../../core/api/src/paths.rs) | Locations of the data directory, the TDLib folder, and the ByeDPI binary. |
 
-Native binaries sit in the repository's `opt/` folder. [toolchain/build.rs](../toolchain/build.rs) copies them next to the built executable: the `copy_native_binaries` function scans `opt/tdlib-native/win32-x64`, `opt/libmpv`, `opt/singbox`, and `opt/byedpi` for `*.dll` and `*.exe` files. The TDLib folder contains `tdjson.dll` (27,526,656 bytes), `libssl-3-x64.dll`, `libcrypto-3-x64.dll`, and `z.dll`.
+Native binaries sit in the repository's `opt/` folder. [toolchain/build.rs](../../toolchain/build.rs) copies them next to the built executable: the `copy_native_binaries` function scans `opt/tdlib-native/win32-x64`, `opt/libmpv`, `opt/singbox`, and `opt/byedpi` for `*.dll` and `*.exe` files. The TDLib folder contains `tdjson.dll` (27,526,656 bytes), `libssl-3-x64.dll`, `libcrypto-3-x64.dll`, and `z.dll`.
 
-The old note lists `xray.exe` in `opt/`. That file is not in the repository now. Its role is taken by `sing-box.exe` (see [the VPN chapter](modules/vpn.md)). The old note also mentions `scripts/update-deps.ps1`. There is no `scripts/` folder in the repository, so that updater does not exist.
+The old note lists `xray.exe` in `opt/`. That file is not in the repository now. Its role is taken by `sing-box.exe` (see [the VPN chapter](vpn.md)). The old note also mentions `scripts/update-deps.ps1`. There is no `scripts/` folder in the repository, so that updater does not exist.
 
 ---
 

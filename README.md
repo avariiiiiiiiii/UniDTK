@@ -45,76 +45,47 @@
 ```
 
 
-# UniDTK: the book
+# UniDTK
 
-UniDTK turns the Windows desktop into a live surface: a window attached behind the
-icons, widgets on it, and a small kernel underneath. This file is the book. Every
-chapter below is a document in this repository, and each one explains the mechanism,
-step by step: what runs, on which thread, what it writes, and how it fails.
+UniDTK turns the Windows desktop into a live surface: a window attached behind the icons, widgets on it, and a small kernel underneath.
 
-Open it rendered, from anywhere, the way `rustup doc` opens the Rust documentation:
+This file is the shelf of the project's documentation, as the Rust documentation page is a shelf of books. Each book has one job. Open them rendered, from anywhere, the way `rustup doc` opens the Rust documentation:
 
 ```text
 udtk doc
 ```
 
-That command renders this file and its chapters to HTML in
-`%LOCALAPPDATA%\UniDTK\cache\book` and opens the page in your default browser.
+That command renders the pages listed in [docs/SUMMARY.md](docs/SUMMARY.md) to HTML in `%LOCALAPPDATA%\UniDTK\cache\book`, with a sidebar, previous and next links, and a print page, and opens it in your browser.
 
-## Start here
+## The books
 
-1. [Project map and current state](docs/00_master.md): what exists, what is active,
-   where to read next.
-2. [Architecture](docs/architecture.md): the rules of the kernel, the module contract,
-   storage, and the desktop window. This is the norm the other chapters explain.
-3. [Rules for agents](AGENTS.md): the working protocol for this repository.
+- **[The UniDTK Book](docs/book/ch00-introduction.md).** Start here. It teaches how UniDTK works, in order: the desktop window, the kernel, modules, storage, the page, themes, and failure, with one project chapter that builds a module from nothing.
+- **[The Reference](docs/reference/README.md).** The rules of the system, one contract per chapter. Read a chapter when you change that contract.
+- **[The `udtk` Book](docs/udtk/README.md).** The command-line bridge: how a command travels, the two doors, CDP, `doctor`, and `build`.
+- **[The Modules](docs/modules/README.md).** One page per module.
+- **[Working on UniDTK](docs/dev/README.md).** Internals, the writing standard, and the boards.
+- **[The History](docs/history/README.md).** The session log and the plans as they were approved.
 
-## The kernel and its tools
-
-4. [The `udtk` command line](docs/cliudtk.md): the IPC socket, the two doors into the
-   kernel, and CDP control of the WebView.
-5. [Core and module fixes](docs/coremodfixes.md): how past failures in the core were
-   traced and closed.
-6. [Agent end-to-end testing and IPC](docs/agent-e2e-and-ipc-plan.md).
-7. [Registry and shell interception](docs/registry-shell-interception-fix.md).
-8. [Moving storage to redb](docs/redb-migration.md).
-9. [Logging](docs/tasks/logging.md).
-
-## The interface
-
-10. [Motion](docs/unicoremodmotion.md): curves, durations, and how a surface morphs.
-11. [Interface diagrams](docs/unidtkascii.md).
-12. [The native host: moving to GPUI](docs/gpui_transition.md).
-
-## Modules
-
-13. [VPN](docs/modules/vpn.md): sing-box, the TUN adapter, and the elevated helper.
-14. [Telegram: topics and communities](docs/telegram-topics-and-communities.md).
-15. [The player: libmpv](docs/tasks/libmpv.md).
-16. [AI DJ research](docs/ai-dj-research.md).
-
-## Plans and records
-
-17. [Customization menu audit](docs/tasks/menu-audit.md) and
-    [redesign](docs/tasks/menu-redesign.md).
-18. [Kanban](docs/kanban.md) and [architecture kanban](docs/architecture-kanban.md).
-19. [Session log](docs/sessions.md): every engineering session, newest first.
+For agents: [the current status](docs/status.md) is the entry point, and [AGENTS.md](AGENTS.md) is the working protocol.
 
 ## Build and run
 
-The one release command stops the app, builds the three binaries and the installer,
-installs into `C:\Program Files\UniDTK`, checks the install by SHA-256, restarts the
-app, and gates on live IPC:
+The one release command stops the app, builds the three binaries and the installer, installs into `C:\Program Files\UniDTK`, checks the install by SHA-256, restarts the app, and gates on live IPC:
 
 ```text
 udtk build
 ```
 
-Run the tests with one job, because two link-time-optimized builds at once run this
-machine out of memory:
+Run the tests with one job, because two link-time-optimized builds at once run this machine out of memory:
 
 ```text
 cargo test --release --workspace -j 1
+```
+
+Check the documentation from a checkout:
+
+```text
+udtk doc --check
 ```
 
 ## License

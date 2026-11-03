@@ -1,4 +1,4 @@
-# ASCII Graphics Research and Concept for UniDTK (`docs/unidtkascii.md`)
+# The ASCII Emblem and the Splash
 
 > **Purpose of this document:** Records the requirements, concepts, experiments, technical constraints, and drafts for the ASCII/Unicode identity and the graphic logo of the `UniDTK` project.
 
@@ -33,7 +33,7 @@ The main visual idea of the `UniDTK` logo:
    * Diagrams of the life cycle and of the 10-step development cycle in `AGENTS.md`.
 3. **The `udtk` CLI tool (`opt/cli`):**
    * A splash screen when run **with no arguments** (`udtk`), **shipped**: the emblem on the left, the block lettering `UNIDTK` on the right, and below it a map of the commands in plain text, all in color (see `6`). `udtk help` / `-h` / `--help` deliberately stay plain, uncolored text, so their output remains usable in scripts.
-   * A header for the system diagnostics `udtk doctor` and the `udtk status` summary, **not shipped**.
+   * A header for the system diagnostics `udtk doctor` and a status summary, **not shipped**.
 
 > [!IMPORTANT]
 > **Architecture rule:** `UniDTK` is written in plain Rust/Tauri/JS and **must not depend on Python or third-party graphics libraries under any circumstances**. All final ASCII graphics are stored only as static UTF-8 text in the code and the docs. The Python scripts in section 4 are a development tool outside the repository. The product never runs them.

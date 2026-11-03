@@ -10,7 +10,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 # UniDTK — Engineering Session Log
 
-> **Navigation:** [← UniDTK Master MOC](00_master.md) | [Normative architecture](architecture.md) | [GPUI Roadmap](gpui_transition.md) | [CLI Bridge](cliudtk.md)
+> **Navigation:** [← UniDTK Master MOC](status.md) | [Normative architecture](reference/README.md) | [GPUI Roadmap](reference/gpui-host.md) | [CLI Bridge](udtk/README.md)
 >
 > **Purpose:** Complete chronological log of engineering sessions, debugging post-mortem investigations, system changes and verification measurements at runtime. New sessions are added per Step 10 of the engineering protocol in `AGENTS.md`, with the date, Git Commit SHA, proven root cause and file links stated explicitly.
 
@@ -32,14 +32,14 @@ format: "Chronological MOC / GitHub Markdown"
 | **123** | 2026-10-25 | `e232185` | Sea finish on all surfaces (gloss scope, glass rail, menu statuses/text on tokens); Classic without regression | [`core/ui/styles.css`](../core/ui/styles.css), [`core/ui/menu.css`](../core/ui/menu.css) |
 | **122** | 2026-10-25 | `363df14` | Sea micrographics (data-theme hook), menu container fix, aqua surfaces; half-screen incident (WorkerW binding failure) | [`core/ui/theme.js`](../core/ui/theme.js), [`modules/micrographics/ui/micrographics.css`](../modules/micrographics/ui/micrographics.css), [`core/ui/menu.css`](../core/ui/menu.css) |
 | **121** | 2026-10-25 | `da99e43` | Sea Glass light: saturated aqua + gloss, sweep of dark hardcodes to tokens, all surfaces verified | [`core/ui/theme.js`](../core/ui/theme.js), [`core/ui/styles.css`](../core/ui/styles.css), [`core/ui/menu.css`](../core/ui/menu.css), [`modules/telegram/ui/telegram.css`](../modules/telegram/ui/telegram.css), [`modules/mp3-player/ui/mp3-player.css`](../modules/mp3-player/ui/mp3-player.css) |
-| **120** | 2026-10-24 | `de58ec9` | Style v3: fonts and geometry — preset tokens; second builtin Sea Glass v4; pre-paint; size reset; size migration without moving positions | [`core/ui/theme.js`](../core/ui/theme.js), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/ui/menu.js`](../core/ui/menu.js), [`core/ui/index.html`](../core/ui/index.html), [`docs/architecture.md`](architecture.md) |
+| **120** | 2026-10-24 | `de58ec9` | Style v3: fonts and geometry — preset tokens; second builtin Sea Glass v4; pre-paint; size reset; size migration without moving positions | [`core/ui/theme.js`](../core/ui/theme.js), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/ui/menu.js`](../core/ui/menu.js), [`core/ui/index.html`](../core/ui/index.html), [`docs/architecture.md`](reference/README.md) |
 | **119** | 2026-10-24 | — | Layout: restored the 20.10 reference — 67px square folders around the clock, clock rings 513,-3, glyph 1170,30, mp3 517,275, Telegram 1090,30, micrographics x8 (redb data, no build) | [`core/ui/widgets-api.js`](../core/ui/widgets-api.js) (door `saveWidgetConfig`), [`core/ui/styles.css`](../core/ui/styles.css) (150px container), state in `unidtk.redb` |
 | **118** | 2026-10-24 | `3d2dac4` | Revert of Sea Glass v3 (Nunito→Ndot 55, `\|\|` bug in applyTheme), return of the single Nothing Classic preset; pixel-by-pixel analysis of the 20.10 reference proved that "different" = style, not geometry | [`core/ui/theme.js`](../core/ui/theme.js), [`core/ui/styles.css`](../core/ui/styles.css), `assets/fonts/*`, `modules/*/ui/*.css` |
-| **117** | 2026-10-24 | `9c68f7b` | Theme/layout: restored the desktop reference (beige sea-glass v1 in redb → Nothing Classic via the menu), DPR 1.5 rescaling of widget configs, Reapply Sea Glass (schema v3, Nunito), `udtk build` release — **rolled back by session 118** | [`core/ui/theme.js`](../core/ui/theme.js), [`docs/00_master.md`](../docs/00_master.md), state in `unidtk.redb` |
+| **117** | 2026-10-24 | `9c68f7b` | Theme/layout: restored the desktop reference (beige sea-glass v1 in redb → Nothing Classic via the menu), DPR 1.5 rescaling of widget configs, Reapply Sea Glass (schema v3, Nunito), `udtk build` release — **rolled back by session 118** | [`core/ui/theme.js`](../core/ui/theme.js), [`docs/00_master.md`](status.md), state in `unidtk.redb` |
 | **116** | 2026-10-22 | `b08fbae`, `c830982`, `0af4d30` | Micrographics: place name via a chain of geocoders; release acceleration 2.5× (NSIS zlib, models → AppData, jobs=3); AI DJ model resume download | [`modules/micrographics/rust/micrographics.rs`](../modules/micrographics/rust/micrographics.rs), [`modules/mp3-player/rust/ai/model_fetch.rs`](../modules/mp3-player/rust/ai/model_fetch.rs), [`toolchain/tauri.conf.json`](../toolchain/tauri.conf.json), [`opt/cli/main.rs`](../opt/cli/main.rs) |
 | **115** | 2026-10-22 | `5ab1e7a` | Telegram pins in groups: 15 s budget instead of 2.5 s, honest errors instead of masking, cooldown on the frontend, chip restyle of the panel | [`modules/telegram/rust/telegram.rs`](../modules/telegram/rust/telegram.rs), [`modules/telegram/ui/widget.js`](../modules/telegram/ui/widget.js), [`modules/telegram/ui/telegram.css`](../modules/telegram/ui/telegram.css) |
 | **114** | 2026-10-20 | `f0c1a1b`, `8d28ec4` | Design tokens v2: full reskinning — token engine, sweep of 1189 hardcodes, split of `styles.css` by module, canvas cache | [`core/ui/theme.js`](../core/ui/theme.js), [`core/ui/styles.css`](../core/ui/styles.css), [`opt/cli/main.rs`](../opt/cli/main.rs), `modules/*/ui/*.css` |
-| **113** | 2026-10-10 | — | Documentation reorganization: Master MOC `00_master.md`, journal moved to `sessions.md`, rules in `AGENTS.md` | [`docs/00_master.md`](00_master.md), [`docs/sessions.md`](sessions.md), [`docs/architecture.md`](architecture.md), [`AGENTS.md`](../AGENTS.md) |
+| **113** | 2026-10-10 | — | Documentation reorganization: Master MOC `00_master.md`, journal moved to `sessions.md`, rules in `AGENTS.md` | [`docs/00_master.md`](status.md), [`docs/sessions.md`](sessions.md), [`docs/architecture.md`](reference/README.md), [`AGENTS.md`](../AGENTS.md) |
 | **112** | 2026-10-10 | `3a12bf0` | GPUI Gate 1: Modularity, Nothing OS Ndot 55, Glyph Bar, dynamic Hit-Testing | [`hosts/gpui/src/widgets/glyph_bar.rs`](../hosts/gpui/src/widgets/glyph_bar.rs), [`wallpaper.rs`](../hosts/gpui/src/wallpaper.rs) |
 | **111** | 2026-10-09 | `2a56eec` | GPUI Gate 0: Transparent WorkerW/Progman window, 0% CPU, 59.7 MB RAM | [`hosts/gpui/src/main.rs`](../hosts/gpui/src/main.rs), [`wallpaper.rs`](../hosts/gpui/src/wallpaper.rs) |
 | **110** | 2026-10-09 | `024cf13` | Elimination of native title tooltips, information preserved in aria-label | [`core/ui/index.html`](../core/ui/index.html), [`modules/telegram/ui/widget.js`](../modules/telegram/ui/widget.js) |
@@ -4543,9 +4543,9 @@ A repeated doctor --simulate: ALL CHECKS PASSED, IPC 1ms, 0 unhandled JS excepti
    - *Step 10 and Section 4, item 9:* the two-level documentation record was established (an entry in `sessions.md` per the 5-paragraph standard, a status update in `00_master.md`, and an update of `architecture.md` only when contracts change).
 
 ### 113.4 Changed and created files
-- [`docs/00_master.md`](../docs/00_master.md) — Master document for agents, MOC dashboard and L1 documentation router.
-- [`docs/sessions.md`](../docs/sessions.md) — Onboard log of engineering sessions with an express index.
-- [`docs/architecture.md`](../docs/architecture.md) — Normative architecture specification (cleaned of sessions, navigation block added).
+- [`docs/00_master.md`](status.md) — Master document for agents, MOC dashboard and L1 documentation router.
+- [`docs/sessions.md`](sessions.md) — Onboard log of engineering sessions with an express index.
+- [`docs/architecture.md`](reference/README.md) — Normative architecture specification (cleaned of sessions, navigation block added).
 - [`README.md`](../README.md) — Added a badge-redirect to the master document for AI agents.
 - [`AGENTS.md`](../AGENTS.md) — Updated Steps 1, 10 and Section 4, item 9 (documentation rules).
 
@@ -4593,7 +4593,7 @@ A repeated doctor --simulate: ALL CHECKS PASSED, IPC 1ms, 0 unhandled JS excepti
 - [`modules/explorer/ui/explorer.css`](../modules/explorer/ui/explorer.css) — sweep.
 - [`toolchain/build.rs`](../toolchain/build.rs) — FNV-1a hash sync of dist, healing of stale targets.
 - [`opt/cli/main.rs`](../opt/cli/main.rs) — installer retry (os 32) + restart fallback.
-- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](00_master.md) — this entry and the dashboard.
+- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](status.md) — this entry and the dashboard.
 
 ### 114.5 Verification
 - **Stage 1 in production (E2E, commit `f0c1a1b`):** build 11m22s, installation SHA-verified, IPC ping 2–4 ms, frontend `ERROR` = 0. Palette through the real UI (CDP clicks): live path `input`→rAF-flush (--status-ok #00e0ff, rgb derivation), commit `change`→normalize→localStorage v2, full redb cycle (cache clearing + restart → theme restored from the database), preset via UI click → replace semantics. Screenshots: menu, palette, desktop.
@@ -4645,7 +4645,7 @@ Backend: the pin request budget was raised to 15 s (`CHAT_PINNED_REQUEST_TIMEOUT
 - [`modules/telegram/rust/telegram.rs`](../modules/telegram/rust/telegram.rs) — 15 s budget, honest errors, 404 by code, `Timeout`/`Disconnected`, log throttling (commit `5ab1e7a`).
 - [`modules/telegram/ui/widget.js`](../modules/telegram/ui/widget.js) — `pinnedCooldown` (30 s), cleanup on account switch, bypass via force (committed by a parallel session as part of `f0c1a1b`/`8d28ec4`).
 - [`modules/telegram/ui/telegram.css`](../modules/telegram/ui/telegram.css) — chip restyle of `.tg-pinned-bar` (after the styles split; originally introduced in `core/ui/styles.css`).
-- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](00_master.md) — session record.
+- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](status.md) — session record.
 
 ### 115.5 Verification in the runtime
 The release was built and installed with the canonical `udtk build` (installer 417.7 MB, SHA-verified, the application restarted and passed the IPC gate); the marker of the new code branch was confirmed in the installed binary. Live run 2026-10-22: group `-1004434712824` — **pin found in 95 ms** (before the fix: timeout and masking), comment chat `-1001292881623` — 177 ms, honest "no", channel `-1002147877257` — 4 ms (404), private chat `316023597` — 3 ms. UI check via CDP: the chat "Gena Barboskin" was opened by a click, `.tg-pinned-bar` was built ("Pinned message — Lyokha sent it"). The `udtk shot` screenshot (Pictures/Screenshots/unidtk_2026-10-22_17-54-15.png) was reviewed: the chip panel with a red pin is visible, the rounded corners match the other elements. `udtk doctor -ping` — OK; `udtk logs --level ERROR` — empty; Working Set unidtk — 65 MB. Build incident: three attempts of `udtk build` on 20.10 failed because of a race with a parallel session (cargo file lock) — succeeded on the fourth, on a free field; see 114.6.
@@ -4666,7 +4666,7 @@ The user: "the widget layout and sizes are broken" — the desktop differed from
 - Release: the single canonical command `udtk build` from the checkout (the stubs `target\release\udtk.exe`/`vpn-helper.exe` were in place; a foreign build had previously freed `target/` — cargo rebuilt everything from scratch).
 
 ### 117.4 Changed files
-- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](00_master.md) — this entry and the dashboard.
+- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](status.md) — this entry and the dashboard.
 - No code of the theme was changed in the repo during this session: the preset restoration is data in redb/localStorage, the rescale is coordinate data in redb (via the door `save_widget_config`), the Reapply `9c68f7b` returned exactly the commit `e2d767a` (git mechanics, not new edits).
 
 ### 117.5 Verification and metrics
@@ -4685,7 +4685,7 @@ A data-only fix through the standard UI door (`widgets-api.js` `getWidgetConfig`
 
 ### 119.4 Changed files
 - Data of `unidtk.redb` (the positions of ten widgets) — no code changed.
-- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](00_master.md) — this entry and the dashboard.
+- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](status.md) — this entry and the dashboard.
 
 ### 119.5 Verification and metrics
 DOM after reload: clock 541,25 207×187 rings, glyph 1198,58 7×97 (10 segments, 2 lit), micrographics 38,25, mp3 545,303 (invisible at idle — as in the reference), telegram 1118,58 64×593, folders 67×67 (games 397,28; notes 467,27; launcher 467,97; tools 767,40; network 760,99). Screenshot `Temp\opencode\fixed_layout.png`: square icons around the clock with a ring, the weather strip, the telegram rail, the LEDs of the glyph on the right — the structure of the 22.10 17:54 frame. `udtk doctor -ping` was not run (the binary did not change).
@@ -4742,7 +4742,7 @@ A new hook `data-theme` (set by `applyTheme`, also covers loading): CSS branchin
 ## 131. Session 2026-10-29 — full rework of the customization menu (UX, arrangement on the desktop, folders without AppData, Shell cleanup)
 
 ### 131.1 Context and symptoms
-Implementation of the agreed plan for the rework of the customization menu ([`tasks/menu-redesign.md`](tasks/menu-redesign.md)) based on the results of a deep audit of 70 problems ([`tasks/menu-audit.md`](tasks/menu-audit.md)). The old menu was a full-screen opaque modal that hid the desktop; configuring the geometry required manually typing X/Y numbers into inputs without visual feedback; managing shortcuts in folders required manually typing paths into the closed `%LOCALAPPDATA%` directory; the desktop still had visual leftovers — the buttons `#editMode`, `#resetWallpaper`, `#quitApp`; the kernel and modules still contained legacy migration code from the `Shell` directory.
+Implementation of the agreed plan for the rework of the customization menu ([`tasks/menu-redesign.md`](history/rfcs/menu-redesign.md)) based on the results of a deep audit of 70 problems ([`tasks/menu-audit.md`](dev/menu-audit.md)). The old menu was a full-screen opaque modal that hid the desktop; configuring the geometry required manually typing X/Y numbers into inputs without visual feedback; managing shortcuts in folders required manually typing paths into the closed `%LOCALAPPDATA%` directory; the desktop still had visual leftovers — the buttons `#editMode`, `#resetWallpaper`, `#quitApp`; the kernel and modules still contained legacy migration code from the `Shell` directory.
 
 ### 131.2 Root causes
 1. **Modal architecture of the menu:** the full-screen container isolated the user from the desktop, making live preview of themes, accents and positions impossible.
@@ -4779,8 +4779,8 @@ Implementation of the agreed plan for the rework of the customization menu ([`ta
 - [`modules/explorer/rust/clipboard.rs`](../modules/explorer/rust/clipboard.rs) — reading text links and Unicode from the clipboard.
 - [`opt/cli/main.rs`](../opt/cli/main.rs) — switching `udtk stop` to `invoke('quit_app')`, cleanup of outdated `Shell` mentions.
 - [`core/api/src/paths.rs`](../core/api/src/paths.rs), [`core/kernel/unidtk_db.rs`](../core/kernel/unidtk_db.rs), [`core/kernel/log_store.rs`](../core/kernel/log_store.rs), [`core/kernel/module_store.rs`](../core/kernel/module_store.rs) — cleanup of the legacy `Shell` migration code.
-- [`docs/tasks/menu-redesign.md`](tasks/menu-redesign.md) — recording the execution of the plan.
-- [`docs/architecture.md`](architecture.md) — updating the contracts of the menu and the position binding.
+- [`docs/tasks/menu-redesign.md`](history/rfcs/menu-redesign.md) — recording the execution of the plan.
+- [`docs/architecture.md`](reference/README.md) — updating the contracts of the menu and the position binding.
 
 ### 131.5 Verification and metrics
 - `udtk doctor`: ALL CHECKS PASSED (backend compilation, all DLLs, 3 scheduler tasks, module emulation, IPC ping).
@@ -4800,7 +4800,7 @@ Implementation of the agreed plan for the rework of the customization menu ([`ta
 ## 130. Session 2026-10-28 — customization menu bugs (first pass over the audit)
 
 ### 130.1 Context and symptoms
-Menu audit ([`tasks/menu-audit.md`](tasks/menu-audit.md), 70 problems). The user: "fix the bugs for now, we will discuss the UX later". The first pass — the section "Data loss and broken behavior" plus the shortcuts in the old `Shell` directory.
+Menu audit ([`tasks/menu-audit.md`](dev/menu-audit.md), 70 problems). The user: "fix the bugs for now, we will discuss the UX later". The first pass — the section "Data loss and broken behavior" plus the shortcuts in the old `Shell` directory.
 
 ### 130.2 Root causes
 1. **The animation profile was being reset.** The profile handler was attached to `.theme-motion-pill` — this is an appearance class, worn by the pills of font, material, layout and "Shuffle". They have an empty `dataset.profile` → `motionProfile = undefined` → "Balanced". Reproduced live before the fix.
@@ -4827,7 +4827,7 @@ Menu audit ([`tasks/menu-audit.md`](tasks/menu-audit.md), 70 problems). The user
 - [`modules/mp3-player/ui/widget.js`](../modules/mp3-player/ui/widget.js) — export of `stopMusicCardLoops`.
 - [`core/kernel/main.rs`](../core/kernel/main.rs) — `DEFAULT_WIDGET_CONFIG`, `get_default_widget_config`, migration of shortcut targets on startup.
 - [`core/kernel/unidtk_db.rs`](../core/kernel/unidtk_db.rs) — `rebase_legacy_shortcut_targets` + test.
-- [`docs/tasks/menu-audit.md`](tasks/menu-audit.md) — the fixed items are marked.
+- [`docs/tasks/menu-audit.md`](dev/menu-audit.md) — the fixed items are marked.
 
 ### 130.5 Verification and metrics
 - `cargo test --release -p unidtk --bin unidtk`: **50/50** (new: the transfer of shortcut targets, the layout default; the contract test `frontend_invoke_names_are_registered` covers the new command). The transfer test was written before the implementation, but the red run was not captured — the compilation was waiting for someone else's build.
@@ -4973,7 +4973,7 @@ The user, while he was away:
 - [`modules/glyph-bar/ui/widget.js`](../modules/glyph-bar/ui/widget.js), [`modules/glyph-bar/ui/glyph-bar.css`](../modules/glyph-bar/ui/glyph-bar.css) — the knob `.gb-knob`, transitions, dragging with snapping.
 - [`core/ui/styles.css`](../core/ui/styles.css), [`core/ui/theme.js`](../core/ui/theme.js), [`core/tests/theme.js`](../core/tests/theme.js) — panels with tint and grain, `--surface-wash`, the jelly radius scale, the panel color in `rollColors`.
 - [`core/ui/menu.js`](../core/ui/menu.js) — `escapeHtml` from the kernel; [`modules/vpn/ui/vpn-panel.js`](../modules/vpn/ui/vpn-panel.js) — the morph radius from CSS.
-- `core/ui/shell-core.js` — removed; [`docs/architecture.md`](architecture.md) — the reference removed.
+- `core/ui/shell-core.js` — removed; [`docs/architecture.md`](reference/README.md) — the reference removed.
 
 ### 127.5 Verification and metrics
 - Two `udtk build` runs: build, install and SHA-256 OK. Normal start: `udtk stop` + an elevated `schtasks /run /tn UniDTK`. `doctor -ping` — 1 ms, ALL CHECKS PASSED, `logs --level ERROR` empty.
@@ -5141,7 +5141,7 @@ Separately: the menu, Explorer and the expanded Telegram are grayish and murky. 
 - [`modules/mp3-player/ui/icon.svg`](../modules/mp3-player/ui/icon.svg), [`modules/vpn/ui/icon.svg`](../modules/vpn/ui/icon.svg) — the missing menu icons.
 - [`assets/textures/grain.png`](../assets/textures/grain.png) — the grain tile.
 - [`core/tests/theme.js`](../core/tests/theme.js) — a new scheme test; [`modules/micrographics/tests/composition.js`](../modules/micrographics/tests/composition.js) — `runPillDiagnostics`.
-- [`docs/architecture.md`](architecture.md) — the theme v4 contract.
+- [`docs/architecture.md`](reference/README.md) — the theme v4 contract.
 
 ### 125.5 Verification and metrics
 - **Tests** (TDD, via `udtk gui js` in the live WebView). Each was first run red for the expected reason, then green:
@@ -5237,7 +5237,7 @@ Scheme v3 (`SCHEMA_VERSION 3`, backward compatibility through replace normalizat
 - [`core/ui/theme.js`](../core/ui/theme.js) — scheme v3, Sea Glass, validation, TOKEN_DEFS, migration/reset/live-apply of sizes.
 - [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js) — the default sizes of new widgets from the preset; [`core/ui/menu.js`](../core/ui/menu.js) — the reset button + font pills; [`core/ui/index.html`](../core/ui/index.html) — pre-paint.
 - Mono hardcodes → `var(--font-mono)`: [`core/ui/menu.css`](../core/ui/menu.css), [`core/ui/styles.css`](../core/ui/styles.css), [`modules/explorer/ui/explorer.css`](../modules/explorer/ui/explorer.css), [`modules/telegram/ui/telegram.css`](../modules/telegram/ui/telegram.css), [`modules/micrographics/ui/micrographics.css`](../modules/micrographics/ui/micrographics.css), [`modules/mp3-player/ui/widget.js`](../modules/mp3-player/ui/widget.js).
-- [`docs/architecture.md`](architecture.md) — theme: 2 builtins, v3, contract.
+- [`docs/architecture.md`](reference/README.md) — theme: 2 builtins, v3, contract.
 - Code commit: `de58ec9` (11 files; the previously hanging architecture.md edit from the working copy also went into it).
 
 ### 120.5 Verification and metrics
@@ -5259,7 +5259,7 @@ The user, after the release of session 117 (Sea Glass v3 in production): "damn i
 
 ### 118.4 Changed files
 - Revert commit `3d2dac4`: `assets/fonts/Ndot 55/*` (restored), `assets/fonts/Nunito/*` (deleted), [`core/ui/theme.js`](../core/ui/theme.js), `core/ui/theme-boot.js` (deleted), [`core/ui/styles.css`](../core/ui/styles.css), [`core/ui/index.html`](../core/ui/index.html), [`core/ui/menu.css`](../core/ui/menu.css), [`core/ui/menu.js`](../core/ui/menu.js), CSS of six modules (`clock`, `explorer`, `glyph-bar`, `micrographics`, `mp3-player`, `telegram`).
-- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](00_master.md) — this entry and the dashboard.
+- [`docs/sessions.md`](sessions.md), [`docs/00_master.md`](status.md) — this entry and the dashboard.
 - The redb data was not changed (the theme is already `nothing-dark`, the coordinate config already converges with the reference).
 
 ### 118.5 Verification and metrics

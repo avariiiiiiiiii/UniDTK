@@ -16,13 +16,13 @@ Facts in Part 2 are taken from the code. Facts in Part 1 that come from the rese
 
 | File | Role |
 | :--- | :--- |
-| [modules/mp3-player/rust/ai/ai_dj.rs](../modules/mp3-player/rust/ai/ai_dj.rs) | Analysis, embeddings, the similarity graph, next-track scoring, the model search, ONNX inference (1,624 lines). |
-| [modules/mp3-player/rust/ai/model_fetch.rs](../modules/mp3-player/rust/ai/model_fetch.rs) | Downloading the model with retries, resume, and SHA-256 records (1,639 lines). |
-| [modules/mp3-player/rust/commands.rs](../modules/mp3-player/rust/commands.rs) | The analysis loop (`run_analysis_loop`) and the AI DJ commands. |
-| [modules/mp3-player/rust/playback/player.rs](../modules/mp3-player/rust/playback/player.rs) | Enabling the AI DJ, the modes, and the end-of-track advance. |
-| [modules/mp3-player/ui/widget.js](../modules/mp3-player/ui/widget.js) | The `AI DJ` mode button. |
-| [modules/mp3-player/rust/Cargo.toml](../modules/mp3-player/rust/Cargo.toml) | The libraries the code uses: `ort`, `symphonia`, `rustfft`, `ureq`, `sha2`. |
-| [opt/models/discogs-maest-129e/](../opt/models/discogs-maest-129e/) | A local export of the model, with the Python script that produced it. |
+| [modules/mp3-player/rust/ai/ai_dj.rs](../../modules/mp3-player/rust/ai/ai_dj.rs) | Analysis, embeddings, the similarity graph, next-track scoring, the model search, ONNX inference (1,624 lines). |
+| [modules/mp3-player/rust/ai/model_fetch.rs](../../modules/mp3-player/rust/ai/model_fetch.rs) | Downloading the model with retries, resume, and SHA-256 records (1,639 lines). |
+| [modules/mp3-player/rust/commands.rs](../../modules/mp3-player/rust/commands.rs) | The analysis loop (`run_analysis_loop`) and the AI DJ commands. |
+| [modules/mp3-player/rust/playback/player.rs](../../modules/mp3-player/rust/playback/player.rs) | Enabling the AI DJ, the modes, and the end-of-track advance. |
+| [modules/mp3-player/ui/widget.js](../../modules/mp3-player/ui/widget.js) | The `AI DJ` mode button. |
+| [modules/mp3-player/rust/Cargo.toml](../../modules/mp3-player/rust/Cargo.toml) | The libraries the code uses: `ort`, `symphonia`, `rustfft`, `ureq`, `sha2`. |
+| [opt/models/discogs-maest-129e/](../../opt/models/discogs-maest-129e) | A local export of the model, with the Python script that produced it. |
 
 ---
 
@@ -103,7 +103,7 @@ If the model is missing, the download runs in `model_fetch.rs`. The download use
 
 Each file is written to a `.part` file first. A download that stops is resumed from the last byte with an HTTP range request, and the server's `Content-Range` header is checked. When a file is complete, its SHA-256 and size are written to `download_manifest.json` in the model folder, with the URL and a timestamp.
 
-Each file gets up to five attempts (`MAX_ATTEMPTS`). Attempt 1 goes direct over HTTPS. Attempt 2 goes through the SOCKS proxy at `127.0.0.1:12908`, which is the VPN's port (see [the VPN chapter](modules/vpn.md)). Later attempts try direct and then SOCKS. The code waits between attempts: 1, 2, 4, and then 8 seconds (the formula caps the wait at 16 seconds, which is never reached with five attempts).
+Each file gets up to five attempts (`MAX_ATTEMPTS`). Attempt 1 goes direct over HTTPS. Attempt 2 goes through the SOCKS proxy at `127.0.0.1:12908`, which is the VPN's port (see [the VPN chapter](vpn.md)). Later attempts try direct and then SOCKS. The code waits between attempts: 1, 2, 4, and then 8 seconds (the formula caps the wait at 16 seconds, which is never reached with five attempts).
 
 The source is `https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e/resolve/main/`, followed by the file name. The environment variable `AI_DJ_MODEL_URL` replaces this base, with no rebuild needed.
 
@@ -189,7 +189,7 @@ Enabling the AI DJ (`enable_ai_dj`) loads the module's `AiDj` object from the st
 | Random | `ai_dj_play_random`, a random track from the library. |
 | Sequential | `jump_relative(1)`, the next track in the queue. |
 
-The end of a track is found by the end-of-track monitor described in [the libmpv chapter](tasks/libmpv.md) (Step 7). The `AI DJ` button in the music widget ([modules/mp3-player/ui/widget.js](../modules/mp3-player/ui/widget.js)) selects the mode.
+The end of a track is found by the end-of-track monitor described in [the libmpv chapter](mp3-player.md) (Step 7). The `AI DJ` button in the music widget ([modules/mp3-player/ui/widget.js](../../modules/mp3-player/ui/widget.js)) selects the mode.
 
 A crossfade duration is stored in the player state and clamped to 0 to 10 seconds (`set_crossfade_duration`). No playback code reads it. The research's crossfade at a beat-matched point is not implemented.
 

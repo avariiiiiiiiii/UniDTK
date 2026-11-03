@@ -9,7 +9,7 @@ status: done (implemented in session 131)
 # Customization menu redesign — plan
 
 > **Status:** done (session 131, 2026-10-29). All stages are implemented, the release is built and installed to `C:\Program Files\UniDTK`, and it is verified in the live runtime through the CLI.
-> **Basis:** [menu audit](menu-audit.md) (70 problems). Bugs were fixed in session 130; the full UX redesign, positions, folders and the cleanup of the legacy Shell were completed in session 131.
+> **Basis:** [menu audit](../../dev/menu-audit.md) (70 problems). Bugs were fixed in session 130; the full UX redesign, positions, folders and the cleanup of the legacy Shell were completed in session 131.
 
 ## 1. User decisions
 

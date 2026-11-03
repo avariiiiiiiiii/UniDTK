@@ -10,6 +10,8 @@ const REFERENCE_LINE_LIMIT: usize = 350;
 const CODE_DIRS: [&str; 6] = ["core", "modules", "hosts", "opt/cli", "toolchain", ".cargo"];
 const CODE_EXTENSIONS: [&str; 7] = ["rs", "js", "css", "html", "toml", "nsh", "json"];
 const SKIPPED_DIRS: [&str; 4] = ["target", "dist", "gen", "node_modules"];
+/// The checker itself: its tests spell out the very mistakes it looks for.
+const SELF: &str = "opt/cli/book.rs";
 
 pub struct Entry {
     pub title: String,
@@ -467,6 +469,9 @@ fn check_code(root: &Path, rules: &[String], problems: &mut Vec<String>) {
     for file in files {
         let Ok(text) = std::fs::read_to_string(&file) else { continue };
         let name = file.strip_prefix(root).unwrap_or(&file).to_string_lossy().replace('\\', "/");
+        if name == SELF {
+            continue;
+        }
         for (at, line) in text.lines().enumerate() {
             let at = at + 1;
             if line.contains('§') && (line.contains(".md") || line.contains("architecture")) {

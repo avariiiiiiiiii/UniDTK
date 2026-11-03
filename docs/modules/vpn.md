@@ -363,7 +363,7 @@ fn publish_vpn_state() {
 }
 ```
 
-The Telegram module subscribes to `vpn` at startup and reads the last value with `unidtk_api::state("vpn")`. This keeps the two modules independent of each other: Cargo does not allow a dependency from one module to the other. The same mechanism is described in [docs/architecture.md](../architecture.md).
+The Telegram module subscribes to `vpn` at startup and reads the last value with `unidtk_api::state("vpn")`. This keeps the two modules independent of each other: Cargo does not allow a dependency from one module to the other. The same mechanism is described in [docs/architecture.md](../reference/README.md).
 
 ---
 
