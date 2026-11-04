@@ -20,7 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
-| **134** | 2026-11-04 | `3a78d95` | Pinned AI DJ ONNX model source on Hugging Face, .part publish on completion, X-Linked-ETag validation | [`modules/mp3-player/rust/ai/model_fetch.rs`](../modules/mp3-player/rust/ai/model_fetch.rs), [`docs/modules/mp3-player-ai-dj.md`](modules/mp3-player-ai-dj.md) |
+| **134** | 2026-11-04 | `72a7924` | Pinned AI DJ ONNX model source on Hugging Face, .part publish on completion, X-Linked-ETag validation | [`modules/mp3-player/rust/ai/model_fetch.rs`](../modules/mp3-player/rust/ai/model_fetch.rs), [`docs/modules/mp3-player-ai-dj.md`](modules/mp3-player-ai-dj.md) |
 | **133** | 2026-11-03 | `a5caf2b` | Documentation as a Rust-style bookshelf, rule ids, `udtk doc --check`; log levels, volume clamp, explorer preview fixes | `docs/`, `opt/cli/book.rs`, `core/kernel/logging.rs` |
 | **132** | 2026-11-02 | `c265cf2` | Per-theme colors, nesting contract, packs, runtime module switching, 15 GitHub issues, English book | `core/ui/theme.js`, `core/ui/nesting.js`, `core/ui/menu.js`, `core/api/src/lib.rs` |
 | **131** | 2026-10-29 | `3e2ca7e` | Menu redesign: ~420px side panel, desktop layout (16px grid, corners), folders without AppData (Start, dialog, clipboard, BGRA), cancel via toasts, Shell cleanup | [`core/ui/menu.js`](../core/ui/menu.js), [`core/ui/menu.css`](../core/ui/menu.css), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/kernel/start_menu.rs`](../core/kernel/start_menu.rs), [`core/ui/folders.js`](../core/ui/folders.js), [`core/ui/folder-body.js`](../core/ui/folder-body.js), [`core/ui/toast.js`](../core/ui/toast.js) |
