@@ -20,7 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
-| **135** | 2026-11-04 | `HEAD` | Vertical arrange island at the sidebar edge, flip to left/right, upward form expansion, settling guard | [`core/ui/styles.css`](../core/ui/styles.css), [`core/ui/index.html`](../core/ui/index.html), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/ui/menu.js`](../core/ui/menu.js), [`docs/reference/desk.md`](reference/desk.md) |
+| **135** | 2026-11-04 | `995e5b6` | Vertical arrange island at the sidebar edge, flip to left/right, upward form expansion, settling guard | [`core/ui/styles.css`](../core/ui/styles.css), [`core/ui/index.html`](../core/ui/index.html), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/ui/menu.js`](../core/ui/menu.js), [`docs/reference/desk.md`](reference/desk.md) |
 | **134** | 2026-11-04 | `72a7924` | Pinned AI DJ ONNX model source on Hugging Face, .part publish on completion, X-Linked-ETag validation | [`modules/mp3-player/rust/ai/model_fetch.rs`](../modules/mp3-player/rust/ai/model_fetch.rs), [`docs/modules/mp3-player-ai-dj.md`](modules/mp3-player-ai-dj.md) |
 | **133** | 2026-11-03 | `a5caf2b` | Documentation as a Rust-style bookshelf, rule ids, `udtk doc --check`; log levels, volume clamp, explorer preview fixes | `docs/`, `opt/cli/book.rs`, `core/kernel/logging.rs` |
 | **132** | 2026-11-02 | `c265cf2` | Per-theme colors, nesting contract, packs, runtime module switching, 15 GitHub issues, English book | `core/ui/theme.js`, `core/ui/nesting.js`, `core/ui/menu.js`, `core/api/src/lib.rs` |
