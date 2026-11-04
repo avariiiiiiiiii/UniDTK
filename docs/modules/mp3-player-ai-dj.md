@@ -10,7 +10,7 @@ Facts in Part 2 are taken from the code. Facts in Part 1 that come from the rese
 - How the model is found on disk, and how it is downloaded and verified.
 - How the next track is chosen from the similarity graph and from tempo and key.
 - Which parts of the research were built, which were changed, and which were not built.
-- Why the default model download does not work at the moment, and what to do about it.
+- Which source the model is downloaded from, and why its address names a commit.
 
 ## Files involved
 
@@ -101,13 +101,20 @@ If the model is missing, the download runs in `model_fetch.rs`. The download use
 1. The graph, `model.onnx`, about 122 KB. It is fetched first. If it arrives, the source is known to answer.
 2. The weights, `model.onnx.data`, about 347 MB.
 
-Each file is written to a `.part` file first. A download that stops is resumed from the last byte with an HTTP range request, and the server's `Content-Range` header is checked. When a file is complete, its SHA-256 and size are written to `download_manifest.json` in the model folder, with the URL and a timestamp.
+Each file is written to a `.part` file first. A download that stops is resumed from the last byte with an HTTP range request, and the server's `Content-Range` header is checked. When all the bytes have arrived, the `.part` file is renamed to the final name in one step, so the loader never sees a half-written model. Then the file's SHA-256 and size are written to `download_manifest.json` in the model folder, with the URL and a timestamp.
 
 Each file gets up to five attempts (`MAX_ATTEMPTS`). Attempt 1 goes direct over HTTPS. Attempt 2 goes through the SOCKS proxy at `127.0.0.1:12908`, which is the VPN's port (see [the VPN chapter](vpn.md)). Later attempts try direct and then SOCKS. The code waits between attempts: 1, 2, 4, and then 8 seconds (the formula caps the wait at 16 seconds, which is never reached with five attempts).
 
-The source is `https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e/resolve/main/`, followed by the file name. The environment variable `AI_DJ_MODEL_URL` replaces this base, with no rebuild needed.
+The default source is the ONNX export published on Hugging Face as [avari1250/discogs-maest-30s-pw-129e-onnx](https://huggingface.co/avari1250/discogs-maest-30s-pw-129e-onnx): `https://huggingface.co/avari1250/discogs-maest-30s-pw-129e-onnx/resolve/03be6480f36b33045a04dc042891679b9599ddc7/`, followed by the file name. The upstream repository, `mtg-upf/discogs-maest-30s-pw-129e`, ships PyTorch weights only, so the export made in `opt/models/` is published separately. It carries the licence of the original model, CC BY-NC-SA 4.0, which allows non-commercial use only. The environment variable `AI_DJ_MODEL_URL` replaces the base, with no rebuild needed.
 
-**The default source does not work.** The code's own comment, in `model_fetch.rs`, says that this repository does not contain `model.onnx` or `model.onnx.data`, in its root or in its file list. The export was made locally, so the default URL returns 404, and the user gets an error until a working source is set with `AI_DJ_MODEL_URL` or the files are placed by hand. The comment records this as checked at runtime. It was not checked again for this rewrite, because that needs network access.
+**Why the address names a commit.** The downloader checks the size that the server reports. It checks a hash only when the server sends one in `X-Linked-ETag`. Hugging Face puts the real SHA-256 of the file there, but only in its first answer, before the redirect to the CDN. The CDN answer carries an `ETag` of its own, which is a storage hash and not the SHA-256 of the file. The code ignores that `ETag`, because taking it for the SHA-256 rejected every correct download. With the size as the only check, the bytes behind the address must never change, and a commit never does. A `main` address would let them change. To publish a new export, upload it, then replace the revision in `DEFAULT_SOURCE_BASE` and in this chapter. The published files are:
+
+| File | Size in bytes | SHA-256 |
+| :--- | ---: | :--- |
+| `model.onnx` | 122,191 | `2d3e03e0d3471ac672b9419aac033cccb4c8fa9d386f29bf2c8d462dd4eed6f7` |
+| `model.onnx.data` | 347,471,872 | `3d8b448fc2823ca1504187b629138da53a20b54f2f6b245bc3e9d77f400d631b` |
+
+`download_manifest.json` records the SHA-256 of what was received, so a finished download can be compared with this table.
 
 ### Step 3: Decoding the first 30 seconds
 
@@ -214,7 +221,7 @@ The research ended with eight next steps, as a checklist. Here is the status of 
 
 ## Known issues
 
-- **The default model source returns 404.** Set `AI_DJ_MODEL_URL`, or place `model.onnx` and `model.onnx.data` in `%LOCALAPPDATA%\UniDTK\models\discogs-maest-129e\`, or in the development folder `opt/models/`.
+- **The download checks the size, not the hash.** The CDN of Hugging Face does not send the SHA-256 after the redirect, so a finished download is verified by its size only. This is why the default address names a commit. Compare `download_manifest.json` with the table in Step 2 to verify a download by hand. A download also needs a route to Hugging Face: direct HTTPS first, then the VPN's SOCKS port. Without either, set `AI_DJ_MODEL_URL` to a reachable mirror, or place `model.onnx` and `model.onnx.data` in `%LOCALAPPDATA%\UniDTK\models\discogs-maest-129e\`.
 - **The weights size is written two ways.** `model_fetch.rs` says 347 MB, and `ai_dj.rs` says about 331 MB. The file is 347,471,872 bytes, which is 347 MB in decimal units or 331 MiB in binary units.
 - **The embedding size differs from the research.** The research said 416; the code uses 400.
 - **The energy curve is unused.** It is part of the signature but does nothing.
@@ -228,5 +235,5 @@ The research ended with eight next steps, as a checklist. Here is the status of 
 - Embeddings come from a 16 kHz mel spectrogram of the first 30 seconds, passed through an ONNX model with 400 outputs.
 - Tempo and key are measured from the same samples, and used as bonuses in the score.
 - The next track is the best-scored neighbour of the current one, with the search widened when history excludes too much.
-- The model download has a default source that fails, and it can be replaced with an environment variable or by placing the files by hand.
+- The model download has a default source on Hugging Face, pinned to a commit, and it can be replaced with an environment variable or by placing the files by hand.
 - The research's Dijkstra path, energy curve, and beat-matched crossfade are not built.

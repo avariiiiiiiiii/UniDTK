@@ -20,8 +20,10 @@
 //! Integrity guarantees: the exact size comes from the server response (`Content-Length` /
 //! `Content-Range`); SHA-256 is computed incrementally while downloading and recomputed on resume
 //! (from the `.part` prefix); the result is written to the sidecar manifest `download_manifest.json`
-//! next to the model. Hash constants are not hardcoded in advance: the source may change the file,
-//! and a wrong constant would bake a download failure into the binary.
+//! next to the model. A hash stated by the server is compared only when it is the real content hash
+//! (`X-Linked-ETag`): the plain `ETag` of the Xet CDN is a storage hash. Hash constants are not
+//! hardcoded in advance: the source may change the file, and a wrong constant would bake a download
+//! failure into the binary. The default source names a commit, so its bytes never change.
 
 use std::{
     fs,
@@ -173,20 +175,39 @@ fn backoff_delay(attempt: u32) -> Duration {
         .min(BACKOFF_MAX)
 }
 
-/// Default source base: the declared UPF repository on Hugging Face.
+/// Default source base: the ONNX export published on Hugging Face, pinned to a commit.
 ///
-/// Verified at runtime: the repo `mtg-upf/discogs-maest-30s-pw-129e` has no
-/// `model.onnx(.data)` files, neither at the root nor among the API siblings. The ONNX export
-/// was made locally (in the checkout it lies in `opt/models`). This URL honestly returns 404,
-/// and the loader shows the user a clear error until the source appears. The address can be
-/// overridden without rebuilding: `AI_DJ_MODEL_URL=<base-up-to-the-files>/`.
-const DEFAULT_SOURCE_BASE: &str = "https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e/resolve/main";
+/// The upstream repository `mtg-upf/discogs-maest-30s-pw-129e` ships PyTorch weights only and has
+/// never had `model.onnx(.data)`. The export made in `opt/models` is therefore published as
+/// `avari1250/discogs-maest-30s-pw-129e-onnx` (CC BY-NC-SA 4.0, like the original model). The
+/// address names a commit instead of `main`: the downloader trusts the size the server reports,
+/// and a commit never changes. To publish a new export, upload it, then replace the revision here
+/// and in `docs/modules/mp3-player-ai-dj.md`. The address can be overridden without rebuilding:
+/// `AI_DJ_MODEL_URL=<base-up-to-the-files>/`.
+const DEFAULT_SOURCE_BASE: &str = "https://huggingface.co/avari1250/discogs-maest-30s-pw-129e-onnx/resolve/03be6480f36b33045a04dc042891679b9599ddc7";
 
-/// Overridable source: the base from which the file names are built.
+/// Test seam: a local server replaces the source, without touching the process environment.
+#[cfg(test)]
+static TEST_SOURCE_BASE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Source of one file: the override from `AI_DJ_MODEL_URL`, or the default pinned base.
 fn source_url(file_name: &str) -> String {
-    let base = match std::env::var("AI_DJ_MODEL_URL") {
-        Ok(url) if !url.trim().is_empty() => url.trim().trim_end_matches('/').to_string(),
-        _ => DEFAULT_SOURCE_BASE.to_string(),
+    #[cfg(test)]
+    {
+        let guard = TEST_SOURCE_BASE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(base) = guard.as_deref() {
+            return source_url_with(Some(base), file_name);
+        }
+    }
+    source_url_with(std::env::var("AI_DJ_MODEL_URL").ok().as_deref(), file_name)
+}
+
+/// The URL of one file for a given override (the value of `AI_DJ_MODEL_URL`, if any).
+/// Pure, so tests do not need to touch the environment.
+fn source_url_with(override_base: Option<&str>, file_name: &str) -> String {
+    let base = match override_base.map(str::trim) {
+        Some(url) if !url.is_empty() => url.trim_end_matches('/'),
+        _ => DEFAULT_SOURCE_BASE,
     };
     format!("{base}/{file_name}")
 }
@@ -618,7 +639,13 @@ fn fetch_file(
                 part_path,
                 attempt,
             ) {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    // The bytes are complete and verified: only now does the file get its final
+                    // name. Without this step the loader would look for `model.onnx` while the
+                    // data sat in `model.onnx.part`, and the next run would resume past the end.
+                    publish_part(part_path, final_path)?;
+                    return Ok(result);
+                }
                 Err(fail) => match fail {
                     AttemptFail::Fatal(message) => {
                         let text = format!("источник недоступен: {message}");
@@ -861,8 +888,7 @@ fn classify_request_error(error: ureq::Error) -> AttemptFail {
 
 /// Reads the full size and (if provided) the hash from the response headers.
 /// Result: on 206 the full size comes in Content-Range; on 200 it comes in
-/// Content-Length. An `ETag` containing a 64-hex hash is taken as the expected SHA-256
-/// (the Hugging Face CDN returns the content's sha256; a weak `W/…` tag is ignored).
+/// Content-Length. The expected SHA-256 comes only from `X-Linked-ETag` (see [`response_hash`]).
 fn read_total(response: &ureq::Response) -> (Option<u64>, Option<String>) {
     let total = match response.status() {
         206 => response.header("content-range").and_then(parse_content_range),
@@ -873,17 +899,19 @@ fn read_total(response: &ureq::Response) -> (Option<u64>, Option<String>) {
     (total, response_hash(response))
 }
 
+/// The content's SHA-256 as the server states it, if it does.
+///
+/// Only `X-Linked-ETag` counts: Hugging Face puts the real SHA-256 of the file there, on the first
+/// answer of `/resolve/`. The plain `ETag` is a storage detail: the Xet CDN behind the redirect
+/// answers with its own 64-hex file hash, which is not the SHA-256 of the bytes and would reject
+/// every correct download (measured on the published export, 2026-11-03). A weak tag (`W/"…"`)
+/// is never a content hash.
 fn response_hash(response: &ureq::Response) -> Option<String> {
-    ["x-linked-etag", "etag"]
-        .iter()
-        .find_map(|header| {
-            let value = response.header(header)?.trim();
-            let value = value.trim_matches('"');
-            if value.starts_with("W/") {
-                return None; // a weak etag is not a content hash
-            }
-            is_sha256_hex(value).then(|| value.to_string())
-        })
+    let value = response.header("x-linked-etag")?.trim().trim_matches('"');
+    if value.starts_with("W/") {
+        return None;
+    }
+    is_sha256_hex(value).then(|| value.to_string())
 }
 
 fn is_sha256_hex(candidate: &str) -> bool {
@@ -911,6 +939,18 @@ fn truncate_part(part_path: &Path) -> Result<(), String> {
     fs::File::create(part_path)
         .map_err(|e| format!("{}: {e}", part_path.display()))?;
     Ok(())
+}
+
+/// Publishes a finished `.part` under its final name. The rename replaces an existing file and is
+/// atomic within one volume, so the loader never sees a half-written model.
+fn publish_part(part_path: &Path, final_path: &Path) -> Result<(), String> {
+    fs::rename(part_path, final_path).map_err(|e| {
+        format!(
+            "не удалось опубликовать {} как {}: {e}",
+            part_path.display(),
+            final_path.display()
+        )
+    })
 }
 
 /// Streaming write of `.part` with an end-to-end hash: on resume the existing prefix is hashed
@@ -1064,12 +1104,18 @@ mod tests {
         let _ = guard;
         *TEST_BASE_DIR.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *TEST_PRESENCE.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *TEST_SOURCE_BASE.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let mut rt = lock_runtime();
         *rt = Runtime::new();
     }
 
     fn set_presence(present: bool) {
         *TEST_PRESENCE.lock().unwrap_or_else(|p| p.into_inner()) = Some(present);
+    }
+
+    /// Points the downloader at a local test server instead of the real source.
+    fn set_source(base: &str) {
+        *TEST_SOURCE_BASE.lock().unwrap_or_else(|p| p.into_inner()) = Some(base.to_string());
     }
 
     fn write_file(path: &Path, bytes: &[u8]) {
@@ -1118,38 +1164,50 @@ mod tests {
         );
     }
 
+    // The two address tests use the pure helper: they never touch the process environment,
+    // so they cannot race with other tests and do not depend on the developer's own
+    // AI_DJ_MODEL_URL.
+
     #[test]
-    fn default_source_names_the_declared_upf_repo() {
-        // Check the default even if the user's environment sets
-        // AI_DJ_MODEL_URL: unset it for the duration of the check and restore it afterwards.
-        let saved = std::env::var("AI_DJ_MODEL_URL").ok();
-        std::env::remove_var("AI_DJ_MODEL_URL");
-        let url = source_url("model.onnx");
-        let data_url = source_url(&weights_file());
-        if let Some(saved) = saved {
-            std::env::set_var("AI_DJ_MODEL_URL", saved);
-        }
+    fn default_source_is_the_published_export_pinned_to_a_commit() {
         assert_eq!(
-            url,
-            "https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e/resolve/main/model.onnx"
+            source_url_with(None, "model.onnx"),
+            "https://huggingface.co/avari1250/discogs-maest-30s-pw-129e-onnx/resolve/03be6480f36b33045a04dc042891679b9599ddc7/model.onnx"
         );
         assert_eq!(
-            data_url,
-            "https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e/resolve/main/model.onnx.data"
+            source_url_with(None, &weights_file()),
+            "https://huggingface.co/avari1250/discogs-maest-30s-pw-129e-onnx/resolve/03be6480f36b33045a04dc042891679b9599ddc7/model.onnx.data"
+        );
+        // The last segment of the base must be a full commit id: `main` would let the bytes
+        // change under a downloader that trusts the size the server reports.
+        let revision = DEFAULT_SOURCE_BASE.rsplit('/').next().expect("revision segment");
+        assert_eq!(revision.len(), 40, "revision segment: {revision}");
+        assert!(
+            revision.bytes().all(|b| b.is_ascii_hexdigit()),
+            "revision segment is not hex: {revision}"
         );
     }
 
     #[test]
-    fn source_url_follows_the_env_override() {
-        let saved = std::env::var("AI_DJ_MODEL_URL").ok();
-        std::env::set_var("AI_DJ_MODEL_URL", "https://mirror.example/base/");
-        let url = source_url(&graph_file());
-        if let Some(saved) = saved {
-            std::env::set_var("AI_DJ_MODEL_URL", saved);
-        } else {
-            std::env::remove_var("AI_DJ_MODEL_URL");
-        }
-        assert_eq!(url, "https://mirror.example/base/model.onnx");
+    fn source_url_with_follows_the_override() {
+        assert_eq!(
+            source_url_with(Some("https://mirror.example/base/"), &graph_file()),
+            "https://mirror.example/base/model.onnx"
+        );
+        // Padding and trailing slashes are dropped.
+        assert_eq!(
+            source_url_with(Some("  https://mirror.example/base//  "), &weights_file()),
+            "https://mirror.example/base/model.onnx.data"
+        );
+        // An empty or blank override means "not set".
+        assert_eq!(
+            source_url_with(Some(""), &graph_file()),
+            source_url_with(None, &graph_file())
+        );
+        assert_eq!(
+            source_url_with(Some("   "), &graph_file()),
+            source_url_with(None, &graph_file())
+        );
     }
 
     // ── rename, atomicity and resume offset ─────────────────────────────────
@@ -1213,19 +1271,28 @@ mod tests {
     }
 
     #[test]
-    fn strong_hex_etag_is_accepted_weak_is_not() {
+    fn only_the_linked_etag_is_a_content_hash() {
         let sha = "a".repeat(64);
-        let strong = response_with(206, "Partial Content", &[("etag", &format!("\"{sha}\""))]);
+        let strong = response_with(
+            206,
+            "Partial Content",
+            &[("x-linked-etag", &format!("\"{sha}\""))],
+        );
         assert_eq!(response_hash(&strong).as_deref(), Some(sha.as_str()));
 
-        let weak = response_with(200, "OK", &[("etag", &format!("W/\"{sha}\""))]);
+        let weak = response_with(200, "OK", &[("x-linked-etag", &format!("W/\"{sha}\""))]);
         assert_eq!(response_hash(&weak), None);
 
-        let plain = response_with(200, "OK", &[("etag", "\"not-a-hash\"")]);
+        let plain = response_with(200, "OK", &[("x-linked-etag", "\"not-a-hash\"")]);
         assert_eq!(response_hash(&plain), None);
 
-        // x-linked-etag comes first in the list of sources: when both are present,
-        // it is taken as is, without aggregation.
+        // The plain ETag is a storage detail. The Xet CDN of Hugging Face answers with its own
+        // 64-hex file hash there, which is not the SHA-256 of the bytes, so it must not be
+        // taken for one (measured on the published export, 2026-11-03).
+        let cdn = response_with(206, "Partial Content", &[("etag", &format!("\"{sha}\""))]);
+        assert_eq!(response_hash(&cdn), None);
+
+        // When both are present, the linked one wins.
         let linked =
             response_with(200, "OK", &[("x-linked-etag", &format!("\"{sha}\"")), ("etag", "zz")]);
         assert_eq!(response_hash(&linked).as_deref(), Some(sha.as_str()));
@@ -1630,5 +1697,202 @@ mod tests {
         let (total, sha) = read_total(&response);
         assert_eq!(total, Some(347471872));
         assert_eq!(sha, None);
+    }
+
+    // ── a download against a local HTTP server ───────────────────────────────
+    //
+    // The success path of the downloader had no test: the only address it knew answered 404,
+    // so a finished `.part` that was never published and a CDN hash that was never checked
+    // against real headers went unnoticed.
+
+    /// Serves `connections` requests on a loopback port. `respond` receives the request head
+    /// and returns the complete raw response. Returns the base URL of the server.
+    fn serve(connections: usize, respond: impl Fn(&str) -> Vec<u8> + Send + 'static) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let port = listener.local_addr().expect("local address").port();
+        std::thread::spawn(move || {
+            for _ in 0..connections {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let _ = stream.write_all(&respond(&String::from_utf8_lossy(&head)));
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// A raw HTTP/1.1 response with a correct `Content-Length`.
+    fn http_response(status_line: &str, headers: &[(&str, String)], body: &[u8]) -> Vec<u8> {
+        let mut raw = format!(
+            "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        for (name, value) in headers {
+            raw.push_str(&format!("{name}: {value}\r\n"));
+        }
+        raw.push_str("\r\n");
+        let mut bytes = raw.into_bytes();
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    fn sha_hex(bytes: &[u8]) -> String {
+        format!("{:x}", sha2::Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn finished_download_is_published_under_the_final_name() {
+        let (dir, guard) = fake_model_dir("publish");
+        let body = vec![7u8; 3000];
+        let base = serve(1, {
+            let body = body.clone();
+            move |_| http_response("200 OK", &[], &body)
+        });
+        set_source(&base);
+        let final_path = dir.join("model.onnx");
+        let part_path = part_path_of(&final_path);
+
+        let outcome = fetch_file(0, "graph", 0, &part_path, &final_path);
+
+        assert_eq!(outcome, Ok((3000, sha_hex(&body))));
+        assert_eq!(fs::read(&final_path).expect("published file"), body);
+        assert!(!part_path.exists(), "the .part must be renamed away");
+        clear_model_dir(&guard);
+    }
+
+    #[test]
+    fn cdn_etag_is_not_mistaken_for_the_content_hash() {
+        // The Xet CDN answers with its own 64-hex file hash in ETag. It is not the SHA-256 of
+        // the bytes, and a correct download must not be rejected because of it.
+        let (dir, guard) = fake_model_dir("cdn-etag");
+        let body = vec![9u8; 2048];
+        let xet_hash = "ab".repeat(32);
+        let base = serve(1, {
+            let body = body.clone();
+            move |_| http_response("200 OK", &[("ETag", format!("\"{xet_hash}\""))], &body)
+        });
+        set_source(&base);
+        let final_path = dir.join("model.onnx");
+        let part_path = part_path_of(&final_path);
+
+        let outcome = fetch_file(0, "graph", 0, &part_path, &final_path);
+
+        assert_eq!(outcome, Ok((2048, sha_hex(&body))));
+        assert!(final_path.is_file());
+        clear_model_dir(&guard);
+    }
+
+    #[test]
+    fn linked_etag_is_still_verified() {
+        let (dir, guard) = fake_model_dir("linked-etag");
+        let body = vec![1u8; 1024];
+        let good = sha_hex(&body);
+        let wrong = "cd".repeat(32);
+        let final_path = dir.join("model.onnx");
+        let part_path = part_path_of(&final_path);
+
+        // A matching X-Linked-ETag is accepted.
+        let base = serve(1, {
+            let body = body.clone();
+            move |_| http_response("200 OK", &[("X-Linked-ETag", format!("\"{good}\""))], &body)
+        });
+        set_source(&base);
+        assert!(fetch_file(0, "graph", 0, &part_path, &final_path).is_ok());
+        assert!(final_path.is_file());
+        fs::remove_file(&final_path).expect("remove the published file");
+
+        // A mismatching one means the source is broken: the file is not published.
+        let base = serve(1, {
+            let body = body.clone();
+            move |_| http_response("200 OK", &[("X-Linked-ETag", format!("\"{wrong}\""))], &body)
+        });
+        set_source(&base);
+        let message = fetch_file(0, "graph", 0, &part_path, &final_path)
+            .expect_err("a hash mismatch must fail");
+        assert!(message.contains("SHA-256"), "{message}");
+        assert!(
+            !final_path.exists(),
+            "a file that failed verification must not be published"
+        );
+        clear_model_dir(&guard);
+    }
+
+    #[test]
+    fn interrupted_download_resumes_with_a_range_request() {
+        let (dir, guard) = fake_model_dir("resume");
+        let body: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        let final_path = dir.join("model.onnx");
+        let part_path = part_path_of(&final_path);
+        // An earlier run was interrupted after 1200 bytes.
+        write_file(&part_path, &body[..1200]);
+        let base = serve(1, {
+            let body = body.clone();
+            move |head| {
+                assert!(
+                    head.to_ascii_lowercase().contains("range: bytes=1200-"),
+                    "no resume Range header in: {head}"
+                );
+                http_response(
+                    "206 Partial Content",
+                    &[(
+                        "Content-Range",
+                        format!("bytes 1200-{}/{}", body.len() - 1, body.len()),
+                    )],
+                    &body[1200..],
+                )
+            }
+        });
+        set_source(&base);
+
+        let outcome = fetch_file(0, "graph", 0, &part_path, &final_path);
+
+        assert_eq!(outcome, Ok((3000, sha_hex(&body))));
+        assert_eq!(fs::read(&final_path).expect("published file"), body);
+        assert!(!part_path.exists());
+        clear_model_dir(&guard);
+    }
+
+    #[test]
+    fn whole_chain_downloads_both_files_and_the_loader_accepts_them() {
+        let (_dir, guard) = fake_model_dir("chain");
+        let graph = vec![1u8; 4096];
+        // Next to a small graph the loader wants more than 10 MiB of weights.
+        let weights = vec![2u8; 10 * 1024 * 1024 + 1];
+        let base = serve(2, {
+            let (graph, weights) = (graph.clone(), weights.clone());
+            move |head| {
+                if head.starts_with("GET /model.onnx.data ") {
+                    http_response("200 OK", &[], &weights)
+                } else {
+                    http_response("200 OK", &[], &graph)
+                }
+            }
+        });
+        set_source(&base);
+
+        run_chain(0).expect("the chain succeeds against a healthy source");
+
+        let dir = model_dir();
+        assert_eq!(fs::read(dir.join("model.onnx")).expect("graph"), graph);
+        assert_eq!(
+            fs::metadata(dir.join("model.onnx.data")).expect("weights").len(),
+            weights.len() as u64
+        );
+        assert!(!part_path_of(&dir.join("model.onnx")).exists());
+        assert!(!part_path_of(&dir.join("model.onnx.data")).exists());
+        assert!(ai_dj::is_valid_onnx_model(&dir.join(graph_file())));
+        let manifest = read_manifest(&dir).expect("manifest");
+        assert_eq!(manifest.files["model.onnx"].sha256, sha_hex(&graph));
+        assert_eq!(manifest.files["model.onnx.data"].sha256, sha_hex(&weights));
+        assert!(manifest.files["model.onnx.data"].url.ends_with("/model.onnx.data"));
+        clear_model_dir(&guard);
     }
 }

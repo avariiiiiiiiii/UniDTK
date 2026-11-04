@@ -20,7 +20,7 @@ This is the first file an agent reads. It says what is true today and where to r
 | **Module: Clock** | 🟢 Ready (GPUI) | GPUI, Nothing Ndot 55 typography, on-demand timer (1 Hz) | [GPUI host](reference/gpui-host.md) |
 | **Module: Glyph Bar** | 🟢 Ready (GPUI) | GPUI, 10 LED segments, WASAPI master volume | [GPUI host](reference/gpui-host.md) |
 | **Build / Release** | 🟢 `udtk build` ~11.5 min | cargo thin-LTO `jobs=3`, NSIS `zlib`, installer **126 MB** (models → AppData) | [build](udtk/ch14-build-step-by-step.md), session 116 |
-| **Module: MP3 Player** | 🔵 GPUI queue | libmpv FFI raw-dylib, WASAPI loopback, AI DJ, arcs; model weights in `%LOCALAPPDATA%\UniDTK\models` (downloaded, session 116) | [mp3-player](modules/mp3-player.md) |
+| **Module: MP3 Player** | 🔵 GPUI queue | libmpv FFI raw-dylib, WASAPI loopback, AI DJ, arcs; model weights in `%LOCALAPPDATA%\UniDTK\models` (downloaded, session 116; default source: the published ONNX export on Hugging Face, pinned to a commit, session 134) | [mp3-player](modules/mp3-player.md) |
 | **Module: Micrographics** | 🔵 GPUI queue | WinRT geolocation, adaptive precipitation/weather grid; place name via BDC→Nominatim chain (session 116, `b08fbae`) | [micrographics](modules/micrographics.md) |
 | **Module: Telegram** | 🔵 GPUI queue | TDLib C FFI, ByeDPI socks5, reactions, forum threads; pinned messages in groups — 15 s budget + cooldown (session 115, `5ab1e7a`) | [telegram](modules/telegram.md) |
 | **Module: VPN** | 🔵 GPUI queue | Sing-box TUN, native `vpn-helper.exe` (GUI subsystem) | [vpn](modules/vpn.md) |

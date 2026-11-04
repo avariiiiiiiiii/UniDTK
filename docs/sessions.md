@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
+| **134** | 2026-11-04 | `3a78d95` | Pinned AI DJ ONNX model source on Hugging Face, .part publish on completion, X-Linked-ETag validation | [`modules/mp3-player/rust/ai/model_fetch.rs`](../modules/mp3-player/rust/ai/model_fetch.rs), [`docs/modules/mp3-player-ai-dj.md`](modules/mp3-player-ai-dj.md) |
 | **133** | 2026-11-03 | `a5caf2b` | Documentation as a Rust-style bookshelf, rule ids, `udtk doc --check`; log levels, volume clamp, explorer preview fixes | `docs/`, `opt/cli/book.rs`, `core/kernel/logging.rs` |
 | **132** | 2026-11-02 | `c265cf2` | Per-theme colors, nesting contract, packs, runtime module switching, 15 GitHub issues, English book | `core/ui/theme.js`, `core/ui/nesting.js`, `core/ui/menu.js`, `core/api/src/lib.rs` |
 | **131** | 2026-10-29 | `3e2ca7e` | Menu redesign: ~420px side panel, desktop layout (16px grid, corners), folders without AppData (Start, dialog, clipboard, BGRA), cancel via toasts, Shell cleanup | [`core/ui/menu.js`](../core/ui/menu.js), [`core/ui/menu.css`](../core/ui/menu.css), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/kernel/start_menu.rs`](../core/kernel/start_menu.rs), [`core/ui/folders.js`](../core/ui/folders.js), [`core/ui/folder-body.js`](../core/ui/folder-body.js), [`core/ui/toast.js`](../core/ui/toast.js) |
@@ -5317,3 +5318,31 @@ A bookshelf: `README.md` is the shelf, `docs/SUMMARY.md` orders the book. `book/
 - `udtk build` was started and stopped by the host for low memory (3.7 of 15.7 GB free); the release with these changes is **not installed**. The JS fixes (explorer, `boot-log.js`) are therefore not verified live.
 - Live, on the installed build from session 132: `udtk doctor -ping` 3–4 ms; Working Set of `unidtk.exe` and its six WebView2 processes 488 MB; idle CPU 1.3–5 % of one core for the GPU process, one 15 s window at 21 %, not reproduced in a following minute with no long tasks and about 10 DOM mutations per second. Screenshots with `udtk shot`.
 - Open: the explorer sidebar mixes Russian and English labels; folder icons are low-contrast on the light glass; `udtk gui wait:` is capped at 10 s; micrographics stores coordinates on disk while a comment says they stay in memory; `gothic` clock face is not in the switcher.
+
+## 134. Session 2026-11-04 — Pinned AI DJ ONNX model source on Hugging Face and downloader bug fixes
+
+### 134.1 Context and symptoms
+The AI DJ model download always failed with 404 because `DEFAULT_SOURCE_BASE` pointed to `mtg-upf/discogs-maest-30s-pw-129e/resolve/main`, an upstream repository containing only PyTorch weights and no ONNX export. The local export in `opt/models/discogs-maest-129e` (122 KB graph + 331 MB external weights) was never uploaded to an accessible repository.
+
+### 134.2 Root causes
+- The declared default repository `mtg-upf/discogs-maest-30s-pw-129e` never hosted `model.onnx` or `model.onnx.data`, producing an immediate HTTP 404 on `fetch_file`.
+- `fetch_file` left completed downloads in temporary `.part` files without calling `fs::rename`, causing the post-download graph validation `ai_dj::is_valid_onnx_model` to fail every time.
+- `response_hash` checked the plain `ETag` header as a content hash; on Hugging Face's CloudFront/Xet CDN, `ETag` is a storage hash distinct from the file's SHA-256, falsely rejecting valid downloads.
+
+### 134.3 Architectural decision
+The local export was published to a public repository: `https://huggingface.co/avari1250/discogs-maest-30s-pw-129e-onnx`, pinned to commit `03be6480f36b33045a04dc042891679b9599ddc7`. `DEFAULT_SOURCE_BASE` in `model_fetch.rs` was updated to this pinned revision; `AI_DJ_MODEL_URL` env override is preserved. Added atomic `publish_part` on successful download. Restricted server hash verification strictly to `X-Linked-ETag`. Added pure `source_url_with` helper so unit tests do not mutate process-wide environment variables. Rules kept: r[docs.english-low-level], r[docs.one-place], r[install.one-build-command], r[storage.no-raw-db].
+
+### 134.4 Changed files
+- [`modules/mp3-player/rust/ai/model_fetch.rs`](../modules/mp3-player/rust/ai/model_fetch.rs) — Pinned `DEFAULT_SOURCE_BASE`, `publish_part`, `X-Linked-ETag` filtering, `source_url_with`, and 5 loopback server tests.
+- [`docs/modules/mp3-player-ai-dj.md`](modules/mp3-player-ai-dj.md) — Updated default URL, commit pinning rationale, and removed 404 known issue.
+- [`docs/book/appendix-b-ports-paths-tasks.md`](book/appendix-b-ports-paths-tasks.md) — Updated `AI_DJ_MODEL_URL` default in reference table.
+- [`docs/status.md`](status.md) — Updated MP3 player status line.
+- [`docs/sessions.md`](sessions.md) — Session 134 entry and express index row.
+
+### 134.5 Verification and metrics
+- Unit tests: `cargo test --release -p unidtk-mod-mp3-player -j 1`: 59/59 passed, 0 failed.
+- Build & install: `udtk build -j 1` completed cleanly (`build to install to start to verify OK`, empty error log).
+- Diagnostics: `udtk doctor -ping` 2 ms; `udtk doctor -quick` all checks passed; `udtk doctor -all` all checks passed.
+- Runtime logs: `udtk logs --level ERROR` returned empty `[]`.
+- Visual: `udtk shot` saved `unidtk_2026-11-04_13-21-35.png` (1.8 MB), verified visual integrity via image inspection tool.
+- End-to-end download: tested live via SOCKS bridge on 127.0.0.1:12908, `model.onnx` downloaded (122,191 B), renamed to final location in `%LOCALAPPDATA%\UniDTK\models\discogs-maest-129e\model.onnx`, and recorded in `download_manifest.json` with matching SHA-256 (`2d3e03...`).

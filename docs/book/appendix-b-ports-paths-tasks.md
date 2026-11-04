@@ -93,7 +93,7 @@ The application (`unidtk.exe`) reads the following variables. A variable set in 
 | `TDJSON_PATH` | `modules/telegram/rust/telegram.rs` | The `tdjson_path` in the Telegram configuration | The location of `tdjson.dll`. It overrides the configuration. |
 | `UNIDTK_TD_LOG_LEVEL` | `modules/telegram/rust/telegram.rs` | `2` | The TDLib log verbosity, from 1 to 5 |
 | `AI_DJ_MODEL_PATH` | `modules/mp3-player/rust/ai/ai_dj.rs` | The model is searched for in the usual folders | The path to the ONNX model. It is used only when the file is a valid model. |
-| `AI_DJ_MODEL_URL` | `modules/mp3-player/rust/ai/model_fetch.rs` | `https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e/resolve/main` | The base address of the model download |
+| `AI_DJ_MODEL_URL` | `modules/mp3-player/rust/ai/model_fetch.rs` | `https://huggingface.co/avari1250/discogs-maest-30s-pw-129e-onnx/resolve/03be6480f36b33045a04dc042891679b9599ddc7` | The base address of the model download (the published ONNX export, pinned to a commit) |
 | `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` | `core/kernel/main.rs`, `merge_browser_args()` | Empty | Extra arguments for WebView2. A `--remote-debugging-port` in it is removed, because the application sets its own port. |
 | `PATH` | `core/kernel/path_env.rs` | The process `PATH` | Extended with the installed folder when the entry is registered |
 | `APPDATA` | `modules/mp3-player/rust/library/config.rs` | `USERPROFILE\AppData\Roaming` | Used only to find the old `qbc-music` configuration for migration |
