@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
+| **135** | 2026-11-04 | `HEAD` | Vertical arrange island at the sidebar edge, flip to left/right, upward form expansion, settling guard | [`core/ui/styles.css`](../core/ui/styles.css), [`core/ui/index.html`](../core/ui/index.html), [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js), [`core/ui/menu.js`](../core/ui/menu.js), [`docs/reference/desk.md`](reference/desk.md) |
 | **134** | 2026-11-04 | `72a7924` | Pinned AI DJ ONNX model source on Hugging Face, .part publish on completion, X-Linked-ETag validation | [`modules/mp3-player/rust/ai/model_fetch.rs`](../modules/mp3-player/rust/ai/model_fetch.rs), [`docs/modules/mp3-player-ai-dj.md`](modules/mp3-player-ai-dj.md) |
 | **133** | 2026-11-03 | `a5caf2b` | Documentation as a Rust-style bookshelf, rule ids, `udtk doc --check`; log levels, volume clamp, explorer preview fixes | `docs/`, `opt/cli/book.rs`, `core/kernel/logging.rs` |
 | **132** | 2026-11-02 | `c265cf2` | Per-theme colors, nesting contract, packs, runtime module switching, 15 GitHub issues, English book | `core/ui/theme.js`, `core/ui/nesting.js`, `core/ui/menu.js`, `core/api/src/lib.rs` |
@@ -5346,3 +5347,40 @@ The local export was published to a public repository: `https://huggingface.co/a
 - Runtime logs: `udtk logs --level ERROR` returned empty `[]`.
 - Visual: `udtk shot` saved `unidtk_2026-11-04_13-21-35.png` (1.8 MB), verified visual integrity via image inspection tool.
 - End-to-end download: tested live via SOCKS bridge on 127.0.0.1:12908, `model.onnx` downloaded (122,191 B), renamed to final location in `%LOCALAPPDATA%\UniDTK\models\discogs-maest-129e\model.onnx`, and recorded in `download_manifest.json` with matching SHA-256 (`2d3e03...`).
+
+## 135. Session 2026-11-04 — Vertical arrange island at the sidebar edge, left/right flip, form growth upward
+
+### 135.1 Context and symptoms
+The desk arrangement bar (`#arrangeBar`) previously hovered as a horizontal floating pill along the bottom center of the screen (`bottom: 24px; left: 50%; transform: translateX(-50%)`). The user requested moving the floating arrange island over to the right side where the sidebar lives, and orienting it vertically. Additionally, an edge-flip toggle was requested to prevent covering right-docked elements (e.g. Telegram and Glyph Bar).
+
+### 135.2 Root causes
+- The horizontal toolbar style was tied to bottom-center coordinates with horizontal flex layout, occupying horizontal desk space.
+- In a vertical layout, naive `translateY(-50%)` vertical centering causes the "+ Folder" form expansion (+120 px) to push both top and bottom buttons outward by 60 px, shifting buttons out from under the pointer.
+- When placed on the right edge, the island directly overlaps docked right-side vertical rails (Telegram rail and Glyph Bar volume). Exiting arrange mode without a pointer-events settling deadband could forward the trailing click of a double-click on "Done" into the underlying live widgets (e.g., unintended volume changes on Glyph Bar).
+- Entering arrange mode closes `#menuContainer`, but `#openMenu` remained clickable and keyboard-focusable, allowing the menu to re-open directly beneath the arrange island.
+
+### 135.3 Architectural decision
+Converted `#arrangeBar` into a vertical column positioned at `right: 12px; bottom: calc(50% - 133px)` (width 188 px, padding 14 px, gap 8 px) with slide-in entrance animations (`arrange-island-in` and `arrange-island-in-left` via `--dur-motion` and `--ease-expo-out`). Anchoring by the bottom edge ensures the "+ Folder" form expands upward while all action buttons remain firmly positioned beneath the cursor. The `.widget-add` wrapper was changed to static positioning so `.widget-add-popover` calculates coordinates relative to the island, opening inward toward the desk canvas (`right: calc(100% + 12px)` when docked right, `left: calc(100% + 12px)` when docked left). Added a "← На левый край" / "На правый край →" toggle button persisting to `config.arrangeSide`. Protected `#openMenu` while in arrange mode via CSS and JS guards. Added `body.arrange-settling` pointer deadband for `getDuration("motion")` upon exit to protect underlying widgets from trailing clicks. Rules kept: r[desk.positions], r[motion.no-hardcoded-ms], r[motion.canonical-tokens], r[motion.reduced-motion], r[docs.english-low-level], r[docs.one-place].
+
+### 135.4 Changed files
+- [`core/ui/styles.css`](../core/ui/styles.css) — Vertical arrange island geometry, left/right data-side layout, popover horizontal flip, drag fade (`body:has(.dragging) .arrange-bar`), and `arrange-settling` click suppression.
+- [`core/ui/index.html`](../core/ui/index.html) — Multi-line hint and `[data-arrange="side"]` edge-toggle button markup.
+- [`core/ui/unidtk-core.js`](../core/ui/unidtk-core.js) — `applyArrangeSide` handler, edge switching logic, and `arrange-settling` timeout guard.
+- [`core/ui/menu.js`](../core/ui/menu.js) — `openMenu` guard during `editMode` and re-entrance check.
+- [`docs/reference/desk.md`](reference/desk.md) — Documented `config.arrangeSide` in r[desk.positions].
+- [`docs/sessions.md`](sessions.md) — Session 135 log entry and express index row.
+
+### 135.5 Verification and metrics
+- Build and deployment: `udtk build` executed cleanly with 0 compilation errors, installed into `C:\Program Files\UniDTK`, and restarted the live shell.
+- Health diagnostics: `udtk doctor -ping` recorded 2 ms round-trip time, all health checks passed.
+- Runtime logs: `udtk logs --level ERROR` returned `[]` with no JavaScript exceptions or backend errors.
+- Visual layout audits (`udtk shot`):
+  - Desktop baseline: `unidtk_2026-11-04_20-55-12.png`
+  - Side menu open: `unidtk_2026-11-04_20-58-00.png`
+  - Vertical island on right edge: `unidtk_2026-11-04_21-01-28.png`
+  - Island flipped to left edge: `unidtk_2026-11-04_21-05-37.png`
+  - Add widget popover opened toward canvas: `unidtk_2026-11-04_21-08-28.png`
+  - Add folder form expanded upward: `unidtk_2026-11-04_21-11-50.png`
+  - Return to menu after "Done": `unidtk_2026-11-04_21-13-52.png`
+  - Final desktop after menu closed: `unidtk_2026-11-04_21-16-07.png`
+- Documentation check: `udtk doc --check` passed cleanly (`book: ok`).

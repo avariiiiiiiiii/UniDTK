@@ -2174,15 +2174,28 @@ function enterArrangeMode(onExit = null) {
     collapseSingleWidget(c);
   });
   if (arrangeBar) {
+    applyArrangeSide();
     arrangeBar.hidden = false;
     arrangeBar.querySelector('[data-arrange="done"]')?.focus();
   }
+}
+
+// The island sits at the right edge, in the slot of the side menu; "left" is the
+// user's choice for when it covers a widget there. It is a preference, not part
+// of the layout snapshot, so "Cancel" keeps it and the next save stores it.
+function applyArrangeSide() {
+  const left = config.arrangeSide === "left";
+  arrangeBar.dataset.side = left ? "left" : "right";
+  const btn = arrangeBar.querySelector('[data-arrange="side"]');
+  btn.textContent = left ? "На правый край →" : "← На левый край";
 }
 
 async function leaveArrangeMode(commit) {
   if (!editMode) return;
   editMode = false;
   document.body.classList.remove("edit-mode");
+  document.body.classList.add("arrange-settling");
+  setTimeout(() => document.body.classList.remove("arrange-settling"), getDuration("motion"));
   closeWidgetAddPopover();
   if (arrangeBar) {
     arrangeBar.hidden = true;
@@ -2222,6 +2235,10 @@ async function leaveArrangeMode(commit) {
 arrangeBar?.addEventListener("click", (e) => {
   const action = e.target.closest("[data-arrange]")?.dataset.arrange;
   if (action === "done" || action === "cancel") leaveArrangeMode(action === "done");
+  if (action === "side") {
+    config.arrangeSide = config.arrangeSide === "left" ? "right" : "left";
+    applyArrangeSide();
+  }
   if (action === "folder") {
     const form = arrangeBar.querySelector(".arrange-folder");
     form.hidden = !form.hidden;

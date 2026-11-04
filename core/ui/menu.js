@@ -144,6 +144,8 @@ export function isMenuOpen() {
 
 export function openMenu() {
   if (!panel) return;
+  // The island of arrange mode takes the menu's slot; the menu returns on exit.
+  if (document.body.classList.contains("edit-mode")) return;
   if (isMenuOpen()) {
     closeMenu();
     return;
@@ -333,7 +335,7 @@ async function renderDesk() {
 
   pane.querySelector("#btnArrange").addEventListener("click", () => {
     closeMenu({ restoreFocus: false });
-    enterArrangeMode(() => openMenu());
+    enterArrangeMode(() => { if (!isMenuOpen()) openMenu(); });
   });
 
   const resetBtn = pane.querySelector("#btnResetPositions");

@@ -6,7 +6,7 @@ The desk is the window behind the icons, with widgets on it. This chapter states
 
 r[desk.positions]
 
-A widget's position is `config.positions[id]`: `x` and `y`, plus a corner anchor `anchor ∈ {tl, tr, bl, br}` with its offset `ax`/`ay`. `placeOnCanvas` in `core/ui/unidtk-core.js` reads it; without an `anchor` the corner is `tl`. Arrange mode snaps to a 16 px grid and to corners, and writes the corner on "Done"; "Undo" or Esc restores everything it touched.
+A widget's position is `config.positions[id]`: `x` and `y`, plus a corner anchor `anchor ∈ {tl, tr, bl, br}` with its offset `ax`/`ay`. `placeOnCanvas` in `core/ui/unidtk-core.js` reads it; without an `anchor` the corner is `tl`. Arrange mode snaps to a 16 px grid and to corners, and writes the corner on "Done"; "Undo" or Esc restores everything it touched. The arrange island stands at the right edge, in the slot of the side menu; `config.arrangeSide` (`"left"` or `"right"`) is the user's choice of edge, a preference that "Undo" does not revert.
 
 r[desk.relayout-not-reset]
 
