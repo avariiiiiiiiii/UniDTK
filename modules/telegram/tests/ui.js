@@ -45,8 +45,11 @@ export async function runTelegramUiTests() {
     check('prepared real history tail, no mock', !!scroller && !body.querySelector('.tg-opening-shell') && scroller.querySelectorAll('.tg-message').length === TELEGRAM_PREPARED_TAIL_MESSAGES);
     check('prepared first paint at bottom', scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 2);
     check('prepared activation deferred', typeof card._tgActivatePrepared === 'function' && !scroller._replyWired);
+    // The thumb would jump when the head arrives; it stays hidden until then.
+    check('scrollbar hidden while the head is pending', scroller.classList.contains('tg-history-filling') && getComputedStyle(scroller).scrollbarColor.includes('rgba(0, 0, 0, 0)'));
     const tailLast = [...scroller.querySelectorAll('.tg-message')].at(-1);
     check('head fill completes history', fillTelegramHistoryHead(card, id) && scroller.querySelectorAll('.tg-message').length === 80);
+    check('scrollbar returns after the head fill', !scroller.classList.contains('tg-history-filling'));
     check('head fill keeps tail nodes and bottom', tailLast.isConnected && scroller.contains(tailLast) && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 2);
     check('head fill leaves nothing to rebuild', card._tgSectionCache.thread === buildMessagesInnerHtml(chats[0], messages));
     wireTelegramMessagesSection(card, id, body, chats[0], { showAuth: true });
@@ -94,6 +97,36 @@ export async function runTelegramUiTests() {
     card.style.width = '280px';
     await new Promise(resolve => setTimeout(resolve, getDuration('motion') + 60));
     check('narrow thread usable', body.querySelector('.tg-thread').getBoundingClientRect().width > layout.getBoundingClientRect().width * 0.5);
+    // Unread badges: the chip of a muted chat is dark, the other is light.
+    const luminance = (css) => { const m = css.match(/[\d.]+/g).map(Number); return 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]; };
+    const badgeBackground = (markup) => { const host = document.createElement('div'); host.innerHTML = markup; body.appendChild(host); const value = getComputedStyle(host.querySelector('em, .tg-row-unread')).backgroundColor; host.remove(); return value; };
+    const rowLive = badgeBackground('<span class="tg-row-unread">3</span>'), rowMuted = badgeBackground('<span class="tg-row-unread muted">3</span>');
+    const railLive = badgeBackground('<span class="tg-avatar"><em>3</em></span>'), railMuted = badgeBackground('<span class="tg-avatar"><em class="muted">3</em></span>');
+    check('muted row badge is darker than a live one', luminance(rowMuted) < luminance(rowLive));
+    check('muted rail badge is darker than a live one', luminance(railMuted) < luminance(railLive));
+    const railHost = document.createElement('div');
+    railHost.className = 'tg-rail';
+    railHost.innerHTML = '<button type="button" data-chat-id="mutedchat"></button>';
+    body.appendChild(railHost);
+    patchTelegramChatRowDom(card, { id: 'mutedchat', unread: 3, muted: true });
+    check('a new rail badge of a muted chat is muted', railHost.querySelector('em')?.classList.contains('muted'));
+    railHost.remove();
+    // The avatar flight carries the avatar only: a copied badge would sit
+    // beside the real one at the destination and vanish at the end.
+    const flightFrom = document.createElement('div');
+    flightFrom.innerHTML = '<span class="tg-avatar">A<em>3</em><i></i></span>';
+    const flightTo = document.createElement('div');
+    flightTo.className = 'tg-chat-row';
+    flightTo.innerHTML = '<span class="tg-row-avatar">A</span><span class="tg-row-unread">3</span>';
+    body.append(flightFrom, flightTo);
+    const flightRect = { left: 10, top: 10, width: 30, height: 30 };
+    flyTelegramAvatars(card, new Map([['a', { el: flightFrom.firstElementChild, rect: flightRect }]]), new Map([['a', { el: flightTo.firstElementChild, rect: flightRect }]]), true, 300);
+    const flightLayer = document.querySelector('.tg-avatar-flight');
+    check('flight ghost carries no badge', !!flightLayer && flightLayer.querySelectorAll('em, i').length === 0);
+    check('destination badge waits for the flight', getComputedStyle(flightTo.querySelector('.tg-row-unread')).visibility === 'hidden');
+    card._tgAvatarFlight?.finish();
+    check('destination badge returns after the flight', getComputedStyle(flightTo.querySelector('.tg-row-unread')).visibility === 'visible');
+    flightFrom.remove(); flightTo.remove();
     check('narrow back visible', body.querySelector('.tg-topics-back-btn').getBoundingClientRect().width > 50);
     const panel = body.querySelector('.tg-panel');
     const strip = body.querySelector('.tg-connection-state');

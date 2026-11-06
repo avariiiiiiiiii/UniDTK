@@ -825,9 +825,8 @@ function patchTelegramChatRowDom(card, chat) {
       if (!badge) {
         badge = document.createElement("em");
         railBtn.appendChild(badge);
-      } else {
-        badge.classList.toggle("muted", !!chat.muted);
       }
+      badge.classList.toggle("muted", !!chat.muted);
       badge.textContent = chat.unread > 99 ? "99+" : String(chat.unread);
       mutedDot?.remove();
     } else if (badge) {
@@ -2462,11 +2461,18 @@ function telegramPreparedTailStart(chat, messages, keepIds = []) {
  * false) when the history changed since the tail was built: then the cache
  * still holds the tail markup and the next update rebuilds the list in full.
  */
+// The head request lives on the scroller; while one is pending the scrollbar
+// is hidden, because its thumb would jump when the head arrives.
+function setTelegramHeadFill(scroller, fill) {
+  scroller._tgHeadFill = fill;
+  scroller.classList.toggle("tg-history-filling", !!fill);
+}
+
 function fillTelegramHistoryHead(card, widgetId) {
   const scroller = card?.querySelector(".tg-messages");
   const fill = scroller?._tgHeadFill;
   if (!fill) return false;
-  scroller._tgHeadFill = null;
+  setTelegramHeadFill(scroller, null);
   const chats = telegramVisibleChats();
   // The request lives on the scroller it was made for: another chat gets a new
   // scroller, and a rebuild of this one drops the request.
@@ -2753,7 +2759,7 @@ function telegramSetActiveChat(card, widgetId, chatId, originEl = null) {
           restoreScroll: false, showAuth, contentOnly: false,
         });
         wireTelegramAvatarErrors(incoming.querySelector('.tg-thread-head'));
-        if (scroller && switchFrom > 0) scroller._tgHeadFill = { chatId, from: switchFrom, html: preparedMessageHtml };
+        if (scroller && switchFrom > 0) setTelegramHeadFill(scroller, { chatId, from: switchFrom, html: preparedMessageHtml });
       }
       if (card._tgSectionCache) card._tgSectionCache.thread = preparedMessageHtml;
       fillTelegramHistoryHead(card, widgetId);
@@ -3797,7 +3803,7 @@ function updateTelegramWidget(card, widgetId) {
     const previousScroll = captureTelegramScroll(messageScroller);
     const prevChatId = messageScroller.dataset.chatId || null;
     const prevThreadId = messageScroller.dataset.threadId || null;
-    messageScroller._tgHeadFill = null;
+    setTelegramHeadFill(messageScroller, null);
     messageScroller.innerHTML = effectiveThreadHtml;
     cache.thread = effectiveThreadHtml;
     wireTelegramMessagesSection(card, widgetId, body, active, {
@@ -4907,7 +4913,7 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
   syncTelegramTopicsVisibility(body, showForumTopics);
   if (preparedFrom > 0) {
     const scroller = body.querySelector(".tg-messages");
-    if (scroller) scroller._tgHeadFill = { chatId: active.id, from: preparedFrom, html: messagesInnerHtml };
+    if (scroller) setTelegramHeadFill(scroller, { chatId: active.id, from: preparedFrom, html: messagesInnerHtml });
   }
   // Preparation owns the exact final DOM. Activation below only installs
   // handlers/effects after the surface is visible, without replacing its nodes.
@@ -6986,6 +6992,13 @@ function flyTelegramAvatars(card, from, to, open, duration) {
   surfaceManager.getPortal().appendChild(layer);
   const hidden = [];
   const hide = el => { if (el?.isConnected) { el.style.visibility = 'hidden'; hidden.push(el); } };
+  // The ghost carries the avatar only. Badges stay where they belong and fade
+  // in when the flight ends, so none is drawn twice or scaled with the avatar.
+  const badges = [];
+  const hideBadges = el => {
+    const found = [el?.closest?.('.tg-chat-row')?.querySelector('.tg-row-unread'), el?.querySelector?.('em')];
+    for (const badge of found) if (badge) { hide(badge); badges.push(badge); }
+  };
   let pending = 2;
   const flight = {
     target: null,
@@ -6993,6 +7006,7 @@ function flyTelegramAvatars(card, from, to, open, duration) {
       timeline.cleanup();
       layer.remove();
       for (const el of hidden) el.style.visibility = '';
+      for (const badge of badges) badge.animate?.({ opacity: [0, 1] }, { duration: getDuration('hover'), easing: 'ease-out' });
       if (card._tgAvatarFlight === flight) card._tgAvatarFlight = null;
     },
     settle() { if (--pending === 0) flight.finish(); },
@@ -7003,6 +7017,7 @@ function flyTelegramAvatars(card, from, to, open, duration) {
   for (const [id, a] of pairs) {
     const b = to.get(id);
     const ghost = a.el.cloneNode(true);
+    ghost.querySelectorAll('em, i').forEach(node => node.remove());
     ghost.style.cssText = `position:fixed;left:${a.rect.left}px;top:${a.rect.top}px;width:${a.rect.width}px;height:${a.rect.height}px;margin:0;transform-origin:0 0;`;
     layer.appendChild(ghost);
     const scale = b.rect.width / a.rect.width;
@@ -7012,6 +7027,8 @@ function flyTelegramAvatars(card, from, to, open, duration) {
     ]);
     hide(a.el);
     hide(b.el);
+    hideBadges(a.el);
+    hideBadges(b.el);
   }
   card._tgAvatarFlight = flight;
   timeline.play();

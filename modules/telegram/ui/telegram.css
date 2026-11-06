@@ -858,6 +858,11 @@
   flex: 0 0 auto;
 }
 
+/* Hidden while the prepared tail waits for its head: the thumb would jump. */
+.tg-messages.tg-history-filling {
+  scrollbar-color: transparent transparent;
+}
+
 .tg-messages {
   overflow-anchor: none;
   flex: 1 1 0;
@@ -872,6 +877,7 @@
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: rgba(var(--fg-rgb), 0.34) transparent;
+  transition: scrollbar-color var(--dur-hover) ease;
 }
 
 .tg-chat-list::-webkit-scrollbar,
@@ -3701,8 +3707,19 @@ textarea.tg-input {
   box-shadow: inset 0 1px 2px rgba(var(--fg-rgb), 0.1);
 }
 
-/* Unread badge: Classic white chip; on a light jelly row it inverts to ink. */
-:root[data-material="jelly"] .tg-row-unread { background: rgb(var(--fg-rgb)); color: rgb(var(--jelly-hi-rgb)); }
+/* Unread badge: a chat with sound gets the light chip, a muted one the ink
+   chip. These rules outrank the Classic `.muted` styling, so they restate it. */
+:root[data-material="jelly"] :is(.tg-row-unread, .tg-avatar em) {
+  background: rgb(var(--jelly-hi-rgb));
+  color: rgb(var(--fg-rgb));
+  border: 0;
+  box-shadow: 0 0 0 1px rgba(var(--fg-rgb), 0.18), 0 1px 2px rgba(var(--fg-rgb), 0.2);
+}
+:root[data-material="jelly"] :is(.tg-row-unread, .tg-avatar em).muted {
+  background: rgb(var(--fg-rgb));
+  color: rgb(var(--jelly-hi-rgb));
+  box-shadow: none;
+}
 
 /* Avatar flights between rail and list (widget.js flyTelegramAvatars). */
 /* Id-qualified: #shell-portals > * turns pointer events back on for portal children. */
