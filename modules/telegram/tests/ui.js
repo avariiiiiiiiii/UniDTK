@@ -93,7 +93,7 @@ export async function runTelegramUiTests() {
     updateTelegramWidget(card, id);
     card.style.width = '280px';
     await new Promise(resolve => setTimeout(resolve, getDuration('motion') + 60));
-    check('narrow thread usable', body.querySelector('.tg-thread').getBoundingClientRect().width > 145);
+    check('narrow thread usable', body.querySelector('.tg-thread').getBoundingClientRect().width > layout.getBoundingClientRect().width * 0.5);
     check('narrow back visible', body.querySelector('.tg-topics-back-btn').getBoundingClientRect().width > 50);
     const panel = body.querySelector('.tg-panel');
     const strip = body.querySelector('.tg-connection-state');

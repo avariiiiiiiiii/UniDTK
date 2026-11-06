@@ -1,8 +1,11 @@
 $ErrorActionPreference = 'Stop'
 $tgRepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
 $tgCli = Join-Path $tgRepoRoot 'target/release/udtk.exe'
+# Windows PowerShell 5.1 mangles quotes, spaces and commas in native arguments, so the
+# expression travels as base64 (no such characters) and the page decodes and evaluates it.
 function Invoke-TgFixtureJs([string]$expression) {
-    $result = & $tgCli gui "js:$expression"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expression))
+    $result = & $tgCli gui "js:(0,eval)(new TextDecoder().decode(Uint8Array.from(atob('$encoded'),c=>c.charCodeAt(0))))"
     if ($LASTEXITCODE -ne 0 -or ($result -join "`n") -match '\[1\] js\s+(error|FAIL)') {
         throw ($result -join "`n")
     }
@@ -24,8 +27,8 @@ $tgSource += "`nreturn await runTelegramUiTests();"
 $tgCss = [IO.File]::ReadAllText((Join-Path $tgRepoRoot 'core/ui/styles.css'))
 Invoke-TgFixtureJs "window.__tgFixtureSource='';window.__tgFixtureCss='';true" | Out-Null
 foreach ($item in @(@{ key = '__tgFixtureSource'; content = $tgSource }, @{ key = '__tgFixtureCss'; content = $tgCss })) {
-    for ($offset = 0; $offset -lt $item.content.Length; $offset += 8000) {
-        $chunk = $item.content.Substring($offset, [Math]::Min(8000, $item.content.Length - $offset)) | ConvertTo-Json -Compress
+    for ($offset = 0; $offset -lt $item.content.Length; $offset += 4000) {
+        $chunk = $item.content.Substring($offset, [Math]::Min(4000, $item.content.Length - $offset)) | ConvertTo-Json -Compress
         Invoke-TgFixtureJs "window.$($item.key)+=$chunk;true" | Out-Null
     }
 }
