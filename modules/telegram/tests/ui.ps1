@@ -10,10 +10,13 @@ function Invoke-TgFixtureJs([string]$expression) {
 }
 $tgSource = [IO.File]::ReadAllText((Join-Path $tgRepoRoot 'modules/telegram/ui/widget.js'))
 $tgSource = $tgSource.Replace("import { invoke, convertFileSrc, listen, openPath } from '@unidtk/bridge';", "const fixtureCalls = []; const fixtureReplies = new Map(); const invoke = async (command, args) => { fixtureCalls.push({ command, args }); if (fixtureReplies.has(command)) return await fixtureReplies.get(command); return command === 'telegram_messages' ? [] : {}; }; const convertFileSrc = p => p, listen = async () => (() => {}), openPath = async () => {}; ")
-$tgSource = $tgSource.Replace("import { saveConfig, showDebugMessage, logFrontend, repairMojibake, editMode, widgetsCanvas, config, defaultWidgetPosition, cachedTelegramCard } from '../../unidtk-core.js';", 'const { saveConfig, showDebugMessage, logFrontend, repairMojibake, editMode, widgetsCanvas, config, defaultWidgetPosition, cachedTelegramCard } = { ...deps.core, saveConfig: async () => {} };')
-$tgSource = $tgSource.Replace("import { surfaceManager } from '../../surface-manager.js';", 'const { surfaceManager } = deps.surface;')
+$tgSource = $tgSource.Replace("import { saveConfig, showDebugMessage, logFrontend, repairMojibake, editMode, widgetsCanvas, config, defaultWidgetPosition, cachedTelegramCard, escapeHtml, placeOnCanvas } from '../../unidtk-core.js';", 'const { saveConfig, showDebugMessage, logFrontend, repairMojibake, editMode, widgetsCanvas, config, defaultWidgetPosition, cachedTelegramCard, escapeHtml, placeOnCanvas } = { ...deps.core, saveConfig: async () => {} };')
+$tgSource = $tgSource.Replace("import { surfaceManager, syncSurfaceWash } from '../../surface-manager.js';", 'const { surfaceManager, syncSurfaceWash } = deps.surface;')
 $tgSource = $tgSource.Replace("import { calculateDuration, getDuration, prefersReducedMotion, EASINGS, motionTimeline } from '../../motion.js';", 'const { calculateDuration, getDuration, EASINGS, motionTimeline } = deps.motion; let fixtureReducedMotion = false; const prefersReducedMotion = () => fixtureReducedMotion || deps.motion.prefersReducedMotion();')
 $tgSource = $tgSource.Replace("import { getFileIconName, getFileTypeName } from '../../file-icons.js';", 'const { getFileIconName, getFileTypeName } = deps.icons;')
+if ($tgSource -match '(?m)^import .*$') {
+    throw "widget.js import not rewritten for the fixture: $($Matches[0])"
+}
 $tgSource += "`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'ui.js'))
 $tgSource = [regex]::Replace($tgSource, '(?m)^export \{[^}]+\};\r?$', '')
 $tgSource = $tgSource.Replace('export async function runTelegramUiTests()', 'async function runTelegramUiTests()')

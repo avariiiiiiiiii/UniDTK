@@ -69,13 +69,12 @@ function showFolderMenu(x, y, actions) {
 export async function renderFolderBody(card, body) {
   const folderId = card._folderId;
   const shortcuts = card._shortcutItems || [];
-  const missing = await missingTargets(shortcuts.map((s) => ({ target: s.path })));
 
   body.innerHTML = `
     <div class="shortcuts-grid" role="list">
       ${shortcuts.map((s, i) => `
-        <button type="button" class="shortcut-item ${missing.has(s.path) ? "is-missing" : ""}" role="listitem" data-index="${i}"
-          aria-label="${escapeHtml(s.name)}${missing.has(s.path) ? " — недоступен" : ""}">
+        <button type="button" class="shortcut-item" role="listitem" data-index="${i}"
+          aria-label="${escapeHtml(s.name)}">
           <div class="shortcut-icon ${s.type === "folder" ? "shortcut-folder" : ""}">${getShortcutIcon(s.name, s.type)}</div>
           <span class="shortcut-name">${escapeHtml(s.name)}</span>
         </button>
@@ -90,6 +89,18 @@ export async function renderFolderBody(card, body) {
     ${shortcuts.length ? "" : `<p class="widget-empty">Пусто. Нажмите «+» или вставьте скопированный файл (Ctrl+V).</p>`}
   `;
   card._afterBodyRender?.(body);
+  // The disk check is a round trip; the folder opens without waiting for it
+  // and marks unreachable targets when it answers (clicks read the mark live).
+  const grid = body.querySelector(".shortcuts-grid");
+  missingTargets(shortcuts.map((s) => ({ target: s.path }))).then((missing) => {
+    if (!grid.isConnected) return;
+    for (const btn of grid.querySelectorAll(".shortcut-item[data-index]")) {
+      const item = shortcuts[Number(btn.dataset.index)];
+      if (!item || !missing.has(item.path)) continue;
+      btn.classList.add("is-missing");
+      btn.setAttribute("aria-label", `${item.name} — недоступен`);
+    }
+  });
 
   const withRecord = async (fn) => {
     const folder = await folderRecord(folderId);

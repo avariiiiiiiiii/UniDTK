@@ -101,15 +101,28 @@ class SurfaceManager {
     return `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
   }
 
-  _createShadowLayer(record, collapsed = true) {
+  // The read half of _createShadowLayer. It runs with the other reads of a
+  // transition, before any write, so creating the layer forces no layout.
+  _measureShadow(record) {
     const element = record?.element;
-    if (!element || record.shadowLayer) return record?.shadowLayer || null;
-
+    if (!element || record.shadowLayer) return null;
     const computed = getComputedStyle(element);
     const boxShadow = computed.boxShadow;
     if (!boxShadow || boxShadow === "none") return null;
+    return {
+      boxShadow,
+      borderRadius: computed.borderRadius,
+      zIndex: computed.zIndex,
+      rect: record.surfaceRect || element.getBoundingClientRect(),
+    };
+  }
 
-    const rect = element.getBoundingClientRect();
+  _createShadowLayer(record, collapsed, measured) {
+    const element = record?.element;
+    if (!element || record.shadowLayer) return record?.shadowLayer || null;
+    if (!measured) return null;
+
+    const { boxShadow, borderRadius, zIndex, rect } = measured;
     const originRect = record.originRect || rect;
     const shadow = document.createElement("div");
     shadow.setAttribute("aria-hidden", "true");
@@ -120,7 +133,7 @@ class SurfaceManager {
       width: `${rect.width}px`,
       height: `${rect.height}px`,
       boxSizing: "border-box",
-      borderRadius: computed.borderRadius,
+      borderRadius,
       boxShadow,
       background: "transparent",
       border: "0",
@@ -128,7 +141,7 @@ class SurfaceManager {
       transformOrigin: "top left",
       transform: collapsed ? this._collapsedShadowTransform(rect, originRect, record.options?.axis) : "none",
       opacity: collapsed ? "0" : "1",
-      zIndex: computed.zIndex,
+      zIndex,
       willChange: "transform, opacity",
     });
 
@@ -151,12 +164,14 @@ class SurfaceManager {
     return { transform: style.transform, opacity: style.opacity };
   }
 
-  _shadowTrack(record, open, sampled = null) {
+  _shadowTrack(record, open, sampled, measured) {
     let layer = record.shadowLayer;
-    if (!layer) layer = this._createShadowLayer(record, open);
+    if (!layer) layer = this._createShadowLayer(record, open, measured);
     if (!layer) return;
 
-    const current = sampled || getComputedStyle(layer.element);
+    // A layer made by this transition has no animation yet: its inline style
+    // is its rendered state, and reading the computed one would force a layout.
+    const current = sampled || layer.element.style;
     const from = {
       transform: current.transform,
       opacity: Number.parseFloat(current.opacity) || 0,
@@ -243,9 +258,27 @@ class SurfaceManager {
   }
 
   _startTransition(record, open, sampled = null) {
+    // Every read comes before the first write below. A read after a write
+    // forces the browser to lay the page out again inside this one task.
     const from = sampled || this._sampleSurface(record);
     const shadowFrom = this._sampleShadow(record);
     const insets = this._refreshInsets(record);
+    const shadowMeasure = this._measureShadow(record);
+    const contentTargets = this._getContentTargets(record);
+    const contentFrom = contentTargets.map((target, index) => {
+      const sampledOpacity = from.contentOpacities?.[index];
+      if (sampledOpacity != null) return sampledOpacity;
+      const currentOpacity = Number.parseFloat(getComputedStyle(target).opacity);
+      return Number.isFinite(currentOpacity) ? currentOpacity : 1;
+    });
+    let backdropFrom = null;
+    if (record.backdrop) {
+      backdropFrom = from.backdropOpacity;
+      if (backdropFrom == null) {
+        const currentOpacity = Number.parseFloat(getComputedStyle(record.backdrop).opacity);
+        backdropFrom = Number.isFinite(currentOpacity) ? currentOpacity : (open ? 0 : 1);
+      }
+    }
     const fullClip = `inset(0px 0px 0px 0px round ${insets.targetR})`;
     const closedClip = `inset(${insets.topInset}px ${insets.rightInset}px ${insets.bottomInset}px ${insets.leftInset}px round ${insets.originR})`;
     const duration = this._openDuration(record);
@@ -303,7 +336,6 @@ class SurfaceManager {
       ];
     }
 
-    const contentTargets = this._getContentTargets(record);
     record.activeContentTargets = contentTargets;
     const contentDuration = open ? transitionDuration : Math.round(transitionDuration * 0.45);
     const timeline = motionTimeline({
@@ -317,27 +349,23 @@ class SurfaceManager {
       },
     });
     const tracks = [];
-    const shadowTrack = this._shadowTrack(record, open, shadowFrom);
+    const shadowTrack = this._shadowTrack(record, open, shadowFrom, shadowMeasure);
     if (shadowTrack) tracks.push(shadowTrack);
     tracks.push({ element: record.element, keyframes: boundaryKeyframes });
 
     for (const [index, target] of contentTargets.entries()) {
-      const currentOpacity = Number.parseFloat(getComputedStyle(target).opacity);
-      const opacity = from.contentOpacities?.[index] ?? (Number.isFinite(currentOpacity) ? currentOpacity : 1);
       tracks.push({
         element: target,
-        keyframes: [{ opacity }, { opacity: open ? 1 : 0 }],
+        keyframes: [{ opacity: contentFrom[index] }, { opacity: open ? 1 : 0 }],
         options: { duration: contentDuration, easing: open ? EASINGS.content : EASINGS.smooth },
       });
     }
 
     if (record.backdrop) {
-      const currentOpacity = Number.parseFloat(getComputedStyle(record.backdrop).opacity);
-      const opacity = from.backdropOpacity ?? (Number.isFinite(currentOpacity) ? currentOpacity : (open ? 0 : 1));
       if (open) record.backdrop.style.display = record.backdropDisplay || "block";
       tracks.push({
         element: record.backdrop,
-        keyframes: [{ opacity }, { opacity: open ? 1 : 0 }],
+        keyframes: [{ opacity: backdropFrom }, { opacity: open ? 1 : 0 }],
         options: { easing: EASINGS.standard },
       });
     }
@@ -385,13 +413,16 @@ class SurfaceManager {
             return;
           }
 
+          // A surface that Escape does not close does not own the key either:
+          // it passes on to the settings menu and the desktop chain, which
+          // fold such a surface (the Telegram card) their own way.
+          const top = this.activeStack[this.activeStack.length - 1];
+          if (!top || top.options.closeOnEscape === false) return;
+
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
           document.activeElement?.blur?.();
-
-          const top = this.activeStack[this.activeStack.length - 1];
-          if (!top || top.options.closeOnEscape === false) return;
 
           // If user pressed Escape again while topmost was already closing,
           // fast-finalize it immediately and dismiss the next surface in the LIFO stack.
@@ -664,9 +695,8 @@ class SurfaceManager {
       element.style.zIndex = String(opts.elevation);
     }
 
-    // Keep the outside shadow on a sibling layer. The root's animated
-    // clip-path masks its box-shadow until the final frame.
-    this._createShadowLayer(record, true);
+    // The outside shadow moves to a sibling layer in _startTransition (the
+    // root's animated clip-path would mask its box-shadow until the last frame).
     let contentTargets = [];
     if (typeof opts.content === "string") {
       contentTargets = Array.from(element.querySelectorAll(opts.content));
@@ -745,12 +775,7 @@ class SurfaceManager {
       document.activeElement?.blur?.();
     }
 
-    // Immediately stop receiving pointer events while closing
-    record.element.classList.add("surface-closing");
-    record.element.style.pointerEvents = "none";
-    record.element.style.willChange = "clip-path, opacity";
-    if (record.backdrop) record.backdrop.style.pointerEvents = "none";
-
+    // _startTransition stops pointer events in this same task, after its reads.
     this._startTransition(record, false, sampled);
   }
 

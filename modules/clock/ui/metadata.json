@@ -8,6 +8,9 @@
     "function": "renderClock",
     "sandbox": "<div class=\"widget-header\"></div><div class=\"widget-body\"></div>"
   },
+  "motion": {
+    "open": ""
+  },
   "tints": [
     {
       "id": "clock",

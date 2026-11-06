@@ -152,6 +152,9 @@ const TELEGRAM_CHAT_PAGE_SIZE = 24;
 const TELEGRAM_RAIL_CHAT_LIMIT = 14;
 const TELEGRAM_MAX_CACHED_CHATS = 6;
 const TELEGRAM_MAX_CACHED_MESSAGES = 300;
+// A click lays out only the end of a history (first layout costs ~0.3 ms a
+// row); fillTelegramHistoryHead writes the rest above it once the panel is open.
+const TELEGRAM_PREPARED_TAIL_MESSAGES = 30;
 
 // TDLib persists the full history on disk. This Map is only a renderer working
 // set, so keeping every opened chat and an unlimited message history here just
@@ -2297,9 +2300,11 @@ function telegramAlbumId(message) {
   return value == null || value === "" || String(value) === "0" ? "" : String(value);
 }
 
-function renderTelegramMessageRows(chat, messages, messageMap) {
+// Rows for messages[from, to). Each row still sees its real predecessor, so a
+// slice renders exactly the markup of the same rows in the whole history.
+function renderTelegramMessageRows(chat, messages, messageMap, from = 0, to = messages.length) {
   const rows = [];
-  for (let index = 0; index < messages.length;) {
+  for (let index = from; index < to;) {
     const message = messages[index];
     const albumId = telegramAlbumId(message);
     if (!albumId) {
@@ -2308,7 +2313,7 @@ function renderTelegramMessageRows(chat, messages, messageMap) {
       continue;
     }
     const first = index;
-    while (index < messages.length
+    while (index < to
       && telegramAlbumId(messages[index]) === albumId
       && messages[index].from === message.from) index += 1;
     const members = messages.slice(first, index);
@@ -2333,33 +2338,107 @@ function renderTelegramMessageRows(chat, messages, messageMap) {
 
 // Inner content of .tg-messages (load-earlier + bubbles / state). Used by both
 // full thread builds and lightweight message-list updates so drafts/composer stay put.
-function buildMessagesInnerHtml(chat, messages) {
-  if (!chat) return "";
+function telegramRenderedMessages(chat, messages) {
   const selectedThreadId = telegramForumThreadId(chat.id);
   // Keep each forum topic isolated from the general chat. A thread selection
   // must never fall back to the base chat cache, or it will render unrelated
   // messages and appear to freeze at the wrong scroll position.
-  const listToRender = selectedThreadId && selectedThreadId !== "0"
+  return selectedThreadId && selectedThreadId !== "0"
     ? (telegramRuntime.messages.get(telegramMessageCacheKey(chat.id, selectedThreadId)) || [])
     : messages;
-  const messageState = telegramMessageState(chat, listToRender);
-  const stateKey = telegramMessageCacheKey(chat.id, selectedThreadId);
+}
+
+function telegramLoadEarlierHtml(chat, listToRender) {
+  const stateKey = telegramMessageCacheKey(chat.id, telegramForumThreadId(chat.id));
   const historyExhausted = telegramRuntime.historyExhausted;
   const showLoadEarlier =
     telegramRuntime.messagesLoaded.has(stateKey) &&
     listToRender.length < TELEGRAM_MAX_CACHED_MESSAGES &&
     listToRender.some((message) => message.id != null && message.id !== "" && Number.isFinite(Number(message.id))) &&
     !(historyExhausted && historyExhausted.has(stateKey));
+  return showLoadEarlier ? `<button type="button" class="tg-load-earlier">Более ранние сообщения</button>` : "";
+}
+
+// Inner content of .tg-messages from message `from` on. `from > 0` is a tail:
+// the head (with the load-earlier button) is written later by
+// fillTelegramHistoryHead, so the button is left out here.
+function buildMessagesInnerHtml(chat, messages, from = 0) {
+  if (!chat) return "";
+  const listToRender = telegramRenderedMessages(chat, messages);
+  const messageState = telegramMessageState(chat, listToRender);
   const messageMap = new Map(listToRender.map((m) => [String(m.id), m]));
   return `
-      ${showLoadEarlier ? `<button type="button" class="tg-load-earlier">Более ранние сообщения</button>` : ""}
-      ${messageState || renderTelegramMessageRows(chat, listToRender, messageMap)}
+      ${from === 0 ? telegramLoadEarlierHtml(chat, listToRender) : ""}
+      ${messageState || renderTelegramMessageRows(chat, listToRender, messageMap, from)}
     `;
 }
 
-function buildThreadHtml(active, messages, showAuth, status, showSettings) {
-  return showAuth ? renderTelegramAuth(status, showSettings) : renderTelegramThread(active, messages);
+/**
+ * First message of the tail a click renders. The tail always reaches back to
+ * every id in `keepIds` (a saved reading position or a jump target), and never
+ * starts inside an album, whose members render as one row.
+ */
+function telegramPreparedTailStart(chat, messages, keepIds = []) {
+  if (!chat) return 0;
+  const list = telegramRenderedMessages(chat, messages);
+  let start = Math.max(0, list.length - TELEGRAM_PREPARED_TAIL_MESSAGES);
+  for (const id of keepIds) {
+    if (id == null || id === "") continue;
+    const index = list.findIndex((message) => String(message.id) === String(id));
+    if (index >= 0 && index < start) start = index;
+  }
+  const albumId = start > 0 ? telegramAlbumId(list[start]) : "";
+  while (albumId && start > 0 && telegramAlbumId(list[start - 1]) === albumId) start -= 1;
+  return start;
 }
+
+/**
+ * Write the history above a prepared tail. The tail's nodes and media stay;
+ * the reading position is held by the height the head adds. Refuses (returns
+ * false) when the history changed since the tail was built: then the cache
+ * still holds the tail markup and the next update rebuilds the list in full.
+ */
+function fillTelegramHistoryHead(card, widgetId) {
+  const scroller = card?.querySelector(".tg-messages");
+  const fill = scroller?._tgHeadFill;
+  if (!fill) return false;
+  scroller._tgHeadFill = null;
+  const chats = telegramVisibleChats();
+  // The request lives on the scroller it was made for: another chat gets a new
+  // scroller, and a rebuild of this one drops the request.
+  const active = chats.find((chat) => chat.id === fill.chatId);
+  if (!active) return false;
+  const messages = telegramRuntime.messages.get(telegramMessageCacheKey(active.id, telegramForumThreadId(active.id))) || [];
+  const list = telegramRenderedMessages(active, messages);
+  if (telegramMessageState(active, list) || buildMessagesInnerHtml(active, messages, fill.from) !== fill.html) return false;
+
+  const messageMap = new Map(list.map((m) => [String(m.id), m]));
+  const headHtml = telegramLoadEarlierHtml(active, list) + renderTelegramMessageRows(active, list, messageMap, 0, fill.from);
+  const before = scroller.scrollHeight;
+  const top = scroller.scrollTop;
+  const firstTail = scroller.firstElementChild;
+  scroller.insertAdjacentHTML("afterbegin", headHtml);
+  scroller.scrollTop = top + (scroller.scrollHeight - before);
+  // Its scroll event is not a "user reached the top" gesture.
+  settleTelegramScroll(scroller);
+  for (let node = scroller.firstElementChild; node && node !== firstTail; node = node.nextElementSibling) {
+    const rows = node.matches(".tg-message") ? [node] : node.querySelectorAll(".tg-message");
+    for (const row of rows) wireTelegramMessageRow(card, widgetId, row, active);
+    node.querySelectorAll(".tg-inline-btn").forEach(wireTelegramInlineButton);
+    if (node.matches(".tg-load-earlier")) wireTelegramLoadEarlier(card, widgetId, node, scroller, active);
+  }
+  if (card._tgSectionCache) card._tgSectionCache.thread = buildMessagesInnerHtml(active, messages);
+  return true;
+}
+
+function buildThreadHtml(active, messages, showAuth, status, showSettings, from = 0) {
+  return showAuth ? renderTelegramAuth(status, showSettings) : renderTelegramThread(active, messages, from);
+}
+
+// toLocale*String with options builds a fresh Intl formatter on every call
+// (~0.5 ms); one label per message made opening a long chat freeze the click.
+const telegramClockFormat = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' });
+const telegramDayFormat = new Intl.DateTimeFormat([], { month: 'short', day: 'numeric' });
 
 function formatTelegramTime(timeStr) {
   if (!timeStr) return "";
@@ -2374,11 +2453,10 @@ function formatTelegramTime(timeStr) {
   if (isNaN(ts)) return timeStr;
   const date = new Date(ts * 1000);
   const now = new Date();
-  if (date.toDateString() === now.toDateString()) {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  } else {
-    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  }
+  const today = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  return (today ? telegramClockFormat : telegramDayFormat).format(date);
 }
 
 function telegramMessageState(chat, messages) {
@@ -2557,8 +2635,14 @@ function telegramSetActiveChat(card, widgetId, chatId, originEl = null) {
   refreshTelegramMessages(card, widgetId, chatId, true);
   const activeMessages = telegramRuntime.messages.get(msgKey) || [];
   const showAuth = (config.positions[widgetId]?.showSettings === true) || shouldShowTelegramAuth(telegramRuntime.status);
-  const threadInnerHtml = buildThreadHtml(active, activeMessages, showAuth, telegramRuntime.status, false);
-  const preparedMessageHtml = showAuth ? null : buildMessagesInnerHtml(active, activeMessages);
+  // The morphing thread lays out only the history's tail; the head is written
+  // above it once the morph commits.
+  const pendingAnchor = telegramRuntime.pendingScrollAnchor;
+  const switchFrom = canMorph && !showAuth
+    ? telegramPreparedTailStart(active, activeMessages, [pendingAnchor?.chatId === chatId ? pendingAnchor.messageId : null])
+    : 0;
+  const threadInnerHtml = buildThreadHtml(active, activeMessages, showAuth, telegramRuntime.status, false, switchFrom);
+  const preparedMessageHtml = showAuth ? null : buildMessagesInnerHtml(active, activeMessages, switchFrom);
 
   if (canMorph && !showAuth) {
     telegramMorphToThread(card, widgetId, originEl, threadInnerHtml, incoming => {
@@ -2605,8 +2689,10 @@ function telegramSetActiveChat(card, widgetId, chatId, originEl = null) {
           restoreScroll: false, showAuth, contentOnly: false,
         });
         wireTelegramAvatarErrors(incoming.querySelector('.tg-thread-head'));
+        if (scroller && switchFrom > 0) scroller._tgHeadFill = { chatId, from: switchFrom, html: preparedMessageHtml };
       }
       if (card._tgSectionCache) card._tgSectionCache.thread = preparedMessageHtml;
+      fillTelegramHistoryHead(card, widgetId);
       markTelegramChatRead(card, chatId, { force: true });
     });
     // The refresh started before preparing the incoming history.
@@ -3075,6 +3161,38 @@ function restoreTelegramLiveTail(card, widgetId, chatId) {
 
 // Thread messages section: scroll restore, older-load, media, spoilers, attachments.
 // Composer is intentionally not touched here so drafts/focus survive data refreshes.
+// Inline keyboard button clicks.
+function wireTelegramInlineButton(btn) {
+  btn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const btnType = btn.dataset.btnType;
+    const url = btn.dataset.url;
+    const data = btn.dataset.data;
+    const chatId = btn.dataset.chatId;
+    const msgId = btn.dataset.messageId;
+    if (btnType === "inlineKeyboardButtonTypeUrl" && url) {
+      invoke("plugin:opener|open_url", { url: url }).catch(() => false);
+    } else if (btnType === "inlineKeyboardButtonTypeCallback" && data) {
+      btn.classList.add("loading");
+      try {
+        await invoke("telegram_send_callback_query", { request: { chatId, messageId: msgId, data } });
+      } catch (err) {
+        logFrontend("callback query error: " + err);
+      } finally {
+        btn.classList.remove("loading");
+      }
+    }
+  });
+}
+
+function wireTelegramLoadEarlier(card, widgetId, button, messageScroller, active) {
+  button.addEventListener("click", () => {
+    const chatId = messageScroller?.dataset.chatId || active?.id;
+    if (!chatId) return;
+    loadTelegramOlderMessages(card, widgetId, chatId);
+  });
+}
+
 // contentOnly: re-wire children after an in-place messages innerHTML replace without
 // stacking scroll/click listeners on the scroller element itself.
 function wireTelegramMessagesSection(card, widgetId, body, active, {
@@ -3169,11 +3287,8 @@ function wireTelegramMessagesSection(card, widgetId, body, active, {
       });
     }
 
-    body.querySelector(".tg-load-earlier")?.addEventListener("click", () => {
-      const chatId = messageScroller?.dataset.chatId || active?.id;
-      if (!chatId) return;
-      loadTelegramOlderMessages(card, widgetId, chatId);
-    });
+    const loadEarlier = body.querySelector(".tg-load-earlier");
+    if (loadEarlier) wireTelegramLoadEarlier(card, widgetId, loadEarlier, messageScroller, active);
   }
   const downBtn = body.querySelector(".tg-scroll-down-btn");
   if (downBtn && !downBtn._tgWired) {
@@ -3214,29 +3329,7 @@ function wireTelegramMessagesSection(card, widgetId, body, active, {
     wireTelegramMessageRow(card, widgetId, row, active);
   });
 
-  // Inline keyboard button clicks
-  body.querySelectorAll(".tg-inline-btn").forEach((btn) => {
-    btn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const btnType = btn.dataset.btnType;
-      const url = btn.dataset.url;
-      const data = btn.dataset.data;
-      const chatId = btn.dataset.chatId;
-      const msgId = btn.dataset.messageId;
-      if (btnType === "inlineKeyboardButtonTypeUrl" && url) {
-        invoke("plugin:opener|open_url", { url: url }).catch(() => false);
-      } else if (btnType === "inlineKeyboardButtonTypeCallback" && data) {
-        btn.classList.add("loading");
-        try {
-          await invoke("telegram_send_callback_query", { request: { chatId, messageId: msgId, data } });
-        } catch (err) {
-          logFrontend("callback query error: " + err);
-        } finally {
-          btn.classList.remove("loading");
-        }
-      }
-    });
-  });
+  body.querySelectorAll(".tg-inline-btn").forEach(wireTelegramInlineButton);
 
   // Reply preview click -> scroll to original message (delegated so dynamically appended messages work)
   if (messageScroller && !messageScroller._replyWired) {
@@ -3637,6 +3730,7 @@ function updateTelegramWidget(card, widgetId) {
     const previousScroll = captureTelegramScroll(messageScroller);
     const prevChatId = messageScroller.dataset.chatId || null;
     const prevThreadId = messageScroller.dataset.threadId || null;
+    messageScroller._tgHeadFill = null;
     messageScroller.innerHTML = effectiveThreadHtml;
     cache.thread = effectiveThreadHtml;
     wireTelegramMessagesSection(card, widgetId, body, active, {
@@ -4657,9 +4751,18 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
     }
   }
   const showSettings = pos.showSettings === true;
-  const threadInnerHtml = expanded ? buildThreadHtml(active, activeMessages, showAuth, status, showSettings) : "";
   // Forum chat with no topic selected: thread shows a hint (topics in column).
   const showTopicHint = expanded && !showAuth && showForumTopics && active?.id === forumChat?.id && !telegramForumThreadId(forumChat.id);
+  // An open click lays out only the history's tail; it reaches back to the
+  // saved reading position and to a pending jump target.
+  const pendingAnchor = telegramRuntime.pendingScrollAnchor;
+  const preparedFrom = preparing && expanded && !showAuth && !showTopicHint && active
+    ? telegramPreparedTailStart(active, activeMessages, [
+      previousScroll && !previousScroll.atLatest ? previousScroll.messageId : null,
+      pendingAnchor?.chatId === active.id ? pendingAnchor.messageId : null,
+    ])
+    : 0;
+  const threadInnerHtml = expanded ? buildThreadHtml(active, activeMessages, showAuth, status, showSettings, preparedFrom) : "";
   const effectiveThreadInnerHtml = showTopicHint
     ? `<div class="tg-thread-head">
         <span class="tg-thread-avatar" data-initials="${escapeHtml(active.initials)}">${telegramAvatarInner(active)}</span>
@@ -4668,7 +4771,7 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
       <div class="tg-messages"><div class="tg-state">Выберите тему</div></div>`
     : threadInnerHtml;
   const messagesInnerHtml = expanded && !showAuth
-    ? (showTopicHint ? '<div class="tg-state">Выберите тему</div>' : buildMessagesInnerHtml(active, activeMessages)) : "";
+    ? (showTopicHint ? '<div class="tg-state">Выберите тему</div>' : buildMessagesInnerHtml(active, activeMessages, preparedFrom)) : "";
   card._tgSectionCache = { rail: railHtml, list: listHtml, thread: messagesInnerHtml, topics: topicsHtml, topicsChatId: forumChat?.id || null };
 
   // Preserve composer draft/focus across full-widget rebuilds (polls, message sync).
@@ -4735,6 +4838,10 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
     </div>
   `;
   syncTelegramTopicsVisibility(body, showForumTopics);
+  if (preparedFrom > 0) {
+    const scroller = body.querySelector(".tg-messages");
+    if (scroller) scroller._tgHeadFill = { chatId: active.id, from: preparedFrom, html: messagesInnerHtml };
+  }
   // Preparation owns the exact final DOM. Activation below only installs
   // handlers/effects after the surface is visible, without replacing its nodes.
   const activate = () => {
@@ -6464,11 +6571,15 @@ function tgIsEmojiOnly(text) {
   return /\p{Extended_Pictographic}/u.test(trimmed) || /[\u{1F1E6}-\u{1F1FF}]/u.test(trimmed);
 }
 
+// One segmenter for the module: building an Intl object per message is not free.
+const tgGraphemeSegmenter = typeof Intl !== "undefined" && Intl.Segmenter
+  ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+
 function tgGraphemeCount(text) {
   const trimmed = (text || "").trim();
-  if (typeof Intl !== "undefined" && Intl.Segmenter) {
+  if (tgGraphemeSegmenter) {
     let count = 0;
-    for (const _ of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(trimmed)) count++;
+    for (const _ of tgGraphemeSegmenter.segment(trimmed)) count++;
     return count;
   }
   return [...trimmed].length;
@@ -6521,7 +6632,7 @@ function formatTelegramChatStatus(chat) {
   return { text: statusStr, online: false };
 }
 
-function renderTelegramThread(chat, messages) {
+function renderTelegramThread(chat, messages, from = 0) {
   if (!chat) {
     const isAuth = shouldShowTelegramAuth(telegramRuntime.status);
     if (isAuth) return renderTelegramAuth(telegramRuntime.status);
@@ -6623,7 +6734,7 @@ function renderTelegramThread(chat, messages) {
   const showTopicHint = chat.isForum && !telegramForumThreadId(chat.id);
   const messagesInner = showTopicHint
     ? `<div class="tg-state">Выберите тему</div>`
-    : buildMessagesInnerHtml(chat, messages);
+    : buildMessagesInnerHtml(chat, messages, from);
 
   const threadId = telegramForumThreadId(chat.id);
   const pinKey = threadId ? `${chat.id}:${threadId}` : String(chat.id);
@@ -6848,6 +6959,7 @@ function activateTelegramExpandedRender(card, widgetId) {
   const activate = card._tgActivatePrepared;
   card._tgActivatePrepared = null;
   activate?.();
+  fillTelegramHistoryHead(card, widgetId);
   card._tgPendingUpdate = false;
   updateTelegramWidget(card, widgetId);
 }
@@ -7003,13 +7115,15 @@ function toggleTelegramWidget(card, widgetId) {
     onClosed: () => {
       // Runs synchronously inside the close finalize, before the browser paints
       // — snap back to the dock in one task so there is no full-panel flash.
-      card.style.transition = "none";
-      card.classList.remove("expanded", "expand-left", "expand-right");
-      pos.expanded = false;
+      // Canvas reads first: after the writes below they would force a layout
+      // of the whole expanded panel that the dock render then throws away.
       const cW = widgetsCanvas.clientWidth || window.innerWidth || 1920;
       const dW = pos.w || 56;
       const dH = pos.h || 520;
       const at = placeOnCanvas({ ...pos, x: pos.x ?? cW - dW - 12, y: pos.y ?? 118, w: dW, h: dH });
+      card.style.transition = "none";
+      card.classList.remove("expanded", "expand-left", "expand-right");
+      pos.expanded = false;
       card.style.left = Math.max(0, Math.min(at.x, cW - dW - 12)) + "px";
       card.style.top = at.y + "px";
       card.style.width = dW + "px";

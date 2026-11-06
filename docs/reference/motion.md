@@ -102,10 +102,10 @@ r[motion.lifo-stack]
 - Every open surface is registered in the core array `SurfaceManager.activeStack`.
 - The `Escape` key and clicks outside a window are handled by one global core listener.
 - Pressing `Escape` closes **exactly one surface, the topmost one**:
-  $$\text{Context menu} \xrightarrow{\text{Esc}} \text{Modal} \xrightarrow{\text{Esc}} \text{Explorer} \xrightarrow{\text{Esc}} \text{Collapse widgets}$$
+  $$\text{Context menu} \xrightarrow{\text{Esc}} \text{Modal} \xrightarrow{\text{Esc}} \text{Explorer} \xrightarrow{\text{Esc}} \text{Settings menu} \xrightarrow{\text{Esc}} \text{Collapse widgets}$$
 - Background windows and widgets must not be closed while a top-level modal is open.
 
-The last arrow is a fallback, not a stack entry. It is explained in [section 9 of Surfaces](surfaces.md#9-the-lifo-stack-and-the-global-listeners).
+The last two steps are desktop steps, not stack entries, and a surface that Escape does not close (`closeOnEscape: false`) passes the key on to them. They are explained in [section 9 of Surfaces](surfaces.md#9-the-lifo-stack-and-the-global-listeners).
 
 ### Rule 2.5: Protecting Widget Coordinates and Integrity
 

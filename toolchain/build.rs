@@ -332,6 +332,21 @@ fn lint_module_contracts() {
                 fail("a container cannot be embeddable: nesting is one level deep".into());
             }
         }
+        // The motion budget of `udtk doctor -simulate` clicks this selector
+        // inside the module's card; a renamed class would drop the check silently.
+        if let Some(motion) = value.get("motion") {
+            let open = motion["open"].as_str().unwrap_or_else(|| fail("motion.open must be a string".into()));
+            let class = open.trim_start_matches('.');
+            if !class.is_empty() {
+                let named = std::fs::read_dir(&ui).into_iter().flatten().flatten().any(|file| {
+                    file.path().extension().is_some_and(|ext| ext == "js")
+                        && std::fs::read_to_string(file.path()).is_ok_and(|source| source.contains(class))
+                });
+                if !named {
+                    fail(format!("motion.open {open} is not named in any ui/*.js"));
+                }
+            }
+        }
         for tint in value["tints"].as_array().into_iter().flatten() {
             if tint["id"].as_str().is_none() || tint["label"].as_str().is_none() {
                 fail(format!("tint needs id and label: {tint}"));

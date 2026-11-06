@@ -445,6 +445,38 @@ impl Cdp {
         }
         Ok(())
     }
+
+    /// Key down then up, as a real keyboard. Blink only emits `keypress` (and
+    /// the character) for a keyDown carrying text; without text the two types
+    /// are equivalent for the DOM keydown.
+    fn key_press(&mut self, spec: &PressKey, modifiers: u32) -> Result<(), String> {
+        let down_type = if spec.text.is_some() { "keyDown" } else { "rawKeyDown" };
+        let mut down = serde_json::json!({
+            "type": down_type,
+            "key": spec.key,
+            "code": spec.code,
+            "windowsVirtualKeyCode": spec.vk,
+            "modifiers": modifiers,
+            "location": 0,
+            "autoRepeat": false,
+            "isSystemKey": false,
+        });
+        if let Some(text) = &spec.text {
+            down["text"] = serde_json::json!(text);
+            down["unmodifiedText"] = serde_json::json!(text);
+        }
+        let up = serde_json::json!({
+            "type": "keyUp",
+            "key": spec.key,
+            "code": spec.code,
+            "windowsVirtualKeyCode": spec.vk,
+            "modifiers": modifiers,
+            "location": 0,
+        });
+        self.call("Input.dispatchKeyEvent", down)?;
+        self.call("Input.dispatchKeyEvent", up)?;
+        Ok(())
+    }
 }
 
 const HARNESS: &str = "window.__UNIDTK_HARNESS__";
@@ -837,32 +869,7 @@ fn gui_cmd(args: &[String]) -> Result<String, String> {
             "press" => {
                 match resolve_press(body) {
                     Ok((spec, modifiers)) => {
-                        // Blink only emits `keypress` (and the character) for a
-                        // keyDown carrying text; without text the two types are
-                        // equivalent for the DOM keydown this step exists for.
                         let down_type = if spec.text.is_some() { "keyDown" } else { "rawKeyDown" };
-                        let mut down = serde_json::json!({
-                            "type": down_type,
-                            "key": spec.key,
-                            "code": spec.code,
-                            "windowsVirtualKeyCode": spec.vk,
-                            "modifiers": modifiers,
-                            "location": 0,
-                            "autoRepeat": false,
-                            "isSystemKey": false,
-                        });
-                        if let Some(text) = &spec.text {
-                            down["text"] = serde_json::json!(text);
-                            down["unmodifiedText"] = serde_json::json!(text);
-                        }
-                        let up = serde_json::json!({
-                            "type": "keyUp",
-                            "key": spec.key,
-                            "code": spec.code,
-                            "windowsVirtualKeyCode": spec.vk,
-                            "modifiers": modifiers,
-                            "location": 0,
-                        });
                         receipt["key"] = serde_json::json!({
                             "key": spec.key,
                             "code": spec.code,
@@ -871,12 +878,9 @@ fn gui_cmd(args: &[String]) -> Result<String, String> {
                             "modifiers": modifiers,
                             "event": down_type,
                         });
-                        for payload in [down, up] {
-                            if let Err(e) = cdp.call("Input.dispatchKeyEvent", payload) {
-                                ok = false;
-                                receipt["error"] = serde_json::json!(e);
-                                break;
-                            }
+                        if let Err(e) = cdp.key_press(&spec, modifiers) {
+                            ok = false;
+                            receipt["error"] = serde_json::json!(e);
                         }
                     }
                     Err((refused, message)) => {
@@ -2308,19 +2312,19 @@ fn parse_simulate_metadata(text: &str, module_id: &str) -> Option<SimulateTarget
     })
 }
 
-/// Render entry points, discovered from `metadata.json` — never hard-coded.
+/// Every module's `metadata.json` as `(module id, text)`, the first found per id.
 ///
 /// Candidates cover the checkout (`modules/<id>/ui/metadata.json`), the
 /// installed layout (`modules/<id>/metadata.json` next to the app) and the
 /// staged frontend tree. Sorted by module id for a deterministic report.
-fn simulate_targets() -> Vec<SimulateTarget> {
+fn module_metadata() -> Vec<(String, String)> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Some(root) = find_repo_root() {
         dirs.push(root.join("modules"));
         dirs.push(root.join("toolchain").join("dist").join("modules"));
     }
     dirs.push(install_dir().join("modules"));
-    let mut out: Vec<SimulateTarget> = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     for modules_dir in &dirs {
         let Ok(entries) = std::fs::read_dir(modules_dir) else {
             continue;
@@ -2330,7 +2334,7 @@ fn simulate_targets() -> Vec<SimulateTarget> {
                 Some(id) => id,
                 None => continue,
             };
-            if out.iter().any(|t| t.module_id == id) {
+            if out.iter().any(|(known, _)| *known == id) {
                 continue;
             }
             // Checkout keeps UI sources under `ui/`; installed/staged trees
@@ -2339,18 +2343,39 @@ fn simulate_targets() -> Vec<SimulateTarget> {
                 entry.path().join("ui").join("metadata.json"),
                 entry.path().join("metadata.json"),
             ];
-            for meta in &candidates {
-                if let Ok(text) = std::fs::read_to_string(meta) {
-                    if let Some(target) = parse_simulate_metadata(&text, &id) {
-                        out.push(target);
-                        break;
-                    }
-                }
+            if let Some(text) = candidates.iter().find_map(|meta| std::fs::read_to_string(meta).ok()) {
+                out.push((id, text));
             }
         }
     }
-    out.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+/// Render entry points, discovered from `metadata.json` — never hard-coded.
+fn simulate_targets() -> Vec<SimulateTarget> {
+    module_metadata()
+        .iter()
+        .filter_map(|(id, text)| parse_simulate_metadata(text, id))
+        .collect()
+}
+
+/// One surface the motion budget opens with a real click and closes with Escape.
+struct MotionTarget {
+    label: String,
+    selector: String,
+}
+
+/// `motion: {open}` of a module: the selector inside its desk card whose click
+/// opens a surface with no other effect; empty means the card itself.
+fn parse_motion_metadata(text: &str, module_id: &str) -> Option<MotionTarget> {
+    let val: serde_json::Value = serde_json::from_str(text).ok()?;
+    let open = val.get("motion")?.get("open")?.as_str()?.trim();
+    let card = format!(".widget-card[data-widget-type=\"{module_id}\"]");
+    Some(MotionTarget {
+        label: format!("modules/{module_id}"),
+        selector: if open.is_empty() { card } else { format!("{card} {open}") },
+    })
 }
 
 /// The `-env` section, derived from the modules' dependency manifests.
@@ -3490,8 +3515,129 @@ fn run_simulation(out: &mut String) -> bool {
         }
     }
 
+    if motion_budget(out) {
+        any_failure = true;
+    }
+
     out.push('\n');
     any_failure
+}
+
+/// A frame or a main-thread task longer than this is a visible stutter: three
+/// vsyncs at 60 Hz. The same number bounds the click-to-motion task.
+const MOTION_BUDGET_MS: i64 = 50;
+
+/// The motion budget: every declared surface is opened with a real click and
+/// closed with Escape, while the page records frame gaps and long tasks.
+///
+/// Targets are the core's own (`harness.motionTargets()`: menu, folder) and
+/// the modules' `motion.open` from metadata.json. It only starts from a quiet
+/// desk and waits for each surface to settle in frames, so it never collapses
+/// what the user has open and never races the motion tokens.
+fn motion_budget(out: &mut String) -> bool {
+    out.push_str("\n  motion budget (live surfaces, frame/task <= 50 ms):\n");
+    let mut cdp = match Cdp::open() {
+        Ok(cdp) => cdp,
+        Err(e) => {
+            out.push_str(&format!("    [INFO] motion budget unavailable ({e})\n"));
+            return false;
+        }
+    };
+    let escape = match press_key("Escape", false) {
+        Ok(spec) => spec,
+        Err((_, message)) => {
+            out.push_str(&format!("    [FAIL] Escape key: {message}\n"));
+            return true;
+        }
+    };
+    let eval = |cdp: &mut Cdp, call: &str| cdp.evaluate(&format!("{HARNESS}.{call}"));
+    match eval(&mut cdp, "isDeskQuiet()") {
+        Ok(serde_json::Value::Bool(true)) => {}
+        Ok(_) => {
+            out.push_str("    [SKIP] a surface or the menu is open; the budget runs from a quiet desk\n");
+            return false;
+        }
+        Err(e) => {
+            out.push_str(&format!("    [INFO] motion budget unavailable ({e})\n"));
+            return false;
+        }
+    }
+
+    let mut targets: Vec<MotionTarget> = eval(&mut cdp, "motionTargets()")
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| {
+            Some(MotionTarget {
+                label: t.get("label")?.as_str()?.to_string(),
+                selector: t.get("selector")?.as_str()?.to_string(),
+            })
+        })
+        .collect();
+    targets.extend(module_metadata().iter().filter_map(|(id, text)| parse_motion_metadata(text, id)));
+
+    let phase = |value: &serde_json::Value| -> (i64, i64) {
+        (
+            value["worstFrameMs"].as_i64().unwrap_or(0),
+            value["longestTaskMs"].as_i64().unwrap_or(0),
+        )
+    };
+    let settled = |value: &Result<serde_json::Value, String>| {
+        value.as_ref().ok().and_then(|v| v["settled"].as_bool()).unwrap_or(false)
+    };
+
+    let mut failed = false;
+    let _ = eval(&mut cdp, "startMotionProbe()");
+    for target in &targets {
+        let node = match resolve_step_target(&mut cdp, &target.selector) {
+            Ok(node) => node,
+            Err(_) => {
+                out.push_str(&format!("    [INFO] {}: not on the desk\n", target.label));
+                continue;
+            }
+        };
+        if node["occluded"].as_bool().unwrap_or(false) {
+            out.push_str(&format!("    [WARN] {}: covered, not clicked\n", target.label));
+            continue;
+        }
+        let x = node["point"]["x"].as_f64().unwrap_or(0.0);
+        let y = node["point"]["y"].as_f64().unwrap_or(0.0);
+
+        let _ = eval(&mut cdp, "readMotionProbe()");
+        let clicked = cdp.mouse_click(x, y);
+        let opened = eval(&mut cdp, "waitMotionSettled(false)");
+        let open = eval(&mut cdp, "readMotionProbe()").unwrap_or_default();
+        let pressed = cdp.key_press(&escape, 0);
+        let closed = eval(&mut cdp, "waitMotionSettled(true)");
+        let close = eval(&mut cdp, "readMotionProbe()").unwrap_or_default();
+
+        if clicked.is_err() || !settled(&opened) {
+            failed = true;
+            out.push_str(&format!("    [FAIL] {}: did not open from a click\n", target.label));
+            if !settled(&closed) {
+                break;
+            }
+        } else if pressed.is_err() || !settled(&closed) {
+            failed = true;
+            out.push_str(&format!("    [FAIL] {}: Escape did not close it; budget stopped\n", target.label));
+            break;
+        } else {
+            let (open_frame, open_task) = phase(&open);
+            let (close_frame, close_task) = phase(&close);
+            let worst = open_frame.max(open_task).max(close_frame).max(close_task);
+            let verdict = if worst > MOTION_BUDGET_MS { "FAIL" } else { "OK" };
+            if worst > MOTION_BUDGET_MS {
+                failed = true;
+            }
+            out.push_str(&format!(
+                "    [{verdict}] {}: open frame {open_frame} ms, task {open_task} ms; close frame {close_frame} ms, task {close_task} ms\n",
+                target.label
+            ));
+        }
+    }
+    let _ = eval(&mut cdp, "stopMotionProbe()");
+    failed
 }
 
 #[allow(dead_code)]
@@ -3607,6 +3753,29 @@ mod tests {
         assert_eq!(resolve_press("ctrl++").unwrap_err().0, "empty-key");
         assert_eq!(resolve_press("hyper+a").unwrap_err().0, "unknown-modifier");
         assert_eq!(resolve_press("ctrl+nope").unwrap_err().0, "unknown-key");
+    }
+
+    #[test]
+    fn motion_metadata_builds_card_selectors() {
+        let inner = parse_motion_metadata(r#"{"motion":{"open":".tg-rail-toggle"}}"#, "telegram").unwrap();
+        assert_eq!(inner.label, "modules/telegram");
+        assert_eq!(inner.selector, ".widget-card[data-widget-type=\"telegram\"] .tg-rail-toggle");
+        let card = parse_motion_metadata(r#"{"motion":{"open":""}}"#, "clock").unwrap();
+        assert_eq!(card.selector, ".widget-card[data-widget-type=\"clock\"]");
+        assert!(parse_motion_metadata(r#"{"name":"no motion"}"#, "x").is_none());
+    }
+
+    #[test]
+    fn motion_targets_come_from_metadata() {
+        let declared: Vec<String> = module_metadata()
+            .iter()
+            .filter_map(|(id, text)| parse_motion_metadata(text, id))
+            .map(|t| t.label)
+            .collect();
+        assert!(
+            declared.iter().any(|l| l == "modules/telegram") && declared.iter().any(|l| l == "modules/clock"),
+            "telegram and clock must declare `motion.open`: {declared:?}"
+        );
     }
 
     #[test]

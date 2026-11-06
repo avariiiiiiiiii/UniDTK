@@ -14,8 +14,9 @@ This is the first file an agent reads. It says what is true today and where to r
 | **Design tokens / themes** | 🟢 Two built-in presets: Classic (flat) + Sea Glass (jelly), schema v4: colors, fonts, geometry, material, palette + tintMap, optics | CSS custom properties, `data-material`, `unidtk-theme-changed`, OKLCH ink, pre-paint from the `paint` cache | [desk.md](reference/desk.md), session 125 |
 | **Core (kernel)** | 🟢 Stable | Headless Rust, `unidtk-api`, TCP IPC `127.0.0.1:26540` | [kernel.md](reference/kernel.md) |
 | **Storage (DB)** | 🟢 Stable | Clean `redb` transactions (`unidtk.redb`, `unidtk_logs.redb`) | [storage.md](reference/storage.md) |
-| **CLI bridge (`udtk`)** | 🟢 Stable | Rust CLI, CDP WebSocket, TCP IPC | [udtk book](udtk/README.md) |
-| **Production GUI** | 🟢 Stable | Tauri v2, WebView2 (Working Set RAM: ~420 MB) | [the page](book/ch06-the-page.md) |
+| **CLI bridge (`udtk`)** | 🟢 Stable | Rust CLI, CDP WebSocket, TCP IPC; `doctor -simulate` measures a motion budget (real click/Escape, frame and task ≤ 50 ms) | [udtk book](udtk/ch11-doctor-the-diagnostic-loop.md), session 136 |
+| **Production GUI** | 🟢 Stable | Tauri v2, WebView2 (Working Set of the process tree: 571 MB after a test run, session 136) | [the page](book/ch06-the-page.md) |
+| **Motion** | 🟢 Budget met | Worst frame: menu/folder/clock 17 ms, Telegram 17–33 ms, no long task; Telegram open click 68 → 25 ms. Open: a history refresh during the open still rebuilds the list (80–118 ms) | [surfaces](reference/surfaces.md), session 136 |
 | **Experimental GUI** | 🟡 Gate 1 ready | GPUI, DirectX 11, DirectComposition (RAM: **59.7 MB**, CPU: **0.39%**) | [GPUI host](reference/gpui-host.md) |
 | **Module: Clock** | 🟢 Ready (GPUI) | GPUI, Nothing Ndot 55 typography, on-demand timer (1 Hz) | [GPUI host](reference/gpui-host.md) |
 | **Module: Glyph Bar** | 🟢 Ready (GPUI) | GPUI, 10 LED segments, WASAPI master volume | [GPUI host](reference/gpui-host.md) |

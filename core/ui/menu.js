@@ -99,13 +99,19 @@ function renderShell() {
   quit.addEventListener("click", () => runOnce(quit, () => invoke("quit_app")));
 }
 
+/**
+ * Escape for the open menu, wherever focus is: VPN steps back to "Desk",
+ * any other view closes. Called by the desktop's Escape chain before it folds
+ * widgets; returns false when the menu is closed.
+ */
+export function handleMenuEscape() {
+  if (!isMenuOpen()) return false;
+  if (currentView === "vpn") showView("desk");
+  else closeMenu();
+  return true;
+}
+
 function onPanelKeydown(e) {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    if (currentView === "vpn") showView("desk");
-    else closeMenu();
-    return;
-  }
   // Tabs: arrows move between them (WAI-ARIA tabs pattern).
   const tab = e.target.closest?.(".menu-tab");
   if (tab && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {

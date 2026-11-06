@@ -7,6 +7,9 @@
     "function": "renderTelegramWidget",
     "sandbox": "<div class=\"widget-header\"></div><div class=\"widget-body\"></div>"
   },
+  "motion": {
+    "open": ".tg-rail-toggle"
+  },
   "tints": [
     {
       "id": "telegram",

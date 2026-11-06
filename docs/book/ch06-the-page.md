@@ -119,6 +119,7 @@ Filename: modules/glyph-bar/ui/metadata.json (abridged)
 | `container`, `embeddable` | `core/ui/nesting.js` | the widget hosts others, or lives inside another widget |
 | `tints` | `core/ui/theme.js` | the colors the theme may paint on the module |
 | `simulate` | the build lint, and `udtk doctor -simulate` | the file and function the doctor probes |
+| `motion` | the build lint, and `udtk doctor -simulate` | `open`: what in the card to click to open its surface for the motion budget |
 
 ## 6.6 Building a card and mounting the widget
 

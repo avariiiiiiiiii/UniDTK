@@ -63,4 +63,4 @@ A module is in one of three states (`moduleState` in `core/ui/menu.js`): `off`; 
 
 r[modules.metadata]
 
-`metadata.json` declares how the menu and the desk treat a module: `backend: true` allows the background state, `settingsView` names the view that "Configure…" opens, `tints` and `lookOptions` give its share of the theme, and `container` and `embeddable` decide nesting. `lint_module_contracts()` in `toolchain/build.rs` checks the theme slots and the nesting fields and fails the build on an error.
+`metadata.json` declares how the menu and the desk treat a module: `backend: true` allows the background state, `settingsView` names the view that "Configure…" opens, `tints` and `lookOptions` give its share of the theme, `container` and `embeddable` decide nesting, and `motion.open` names the selector in its desk card whose click opens a surface with no other effect (empty means the card), for the motion budget of `udtk doctor -simulate`. `lint_module_contracts()` in `toolchain/build.rs` checks the theme slots, the nesting fields, and that a `motion.open` class is named in the module's `ui/*.js`, and fails the build on an error.

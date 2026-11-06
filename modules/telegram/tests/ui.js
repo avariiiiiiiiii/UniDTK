@@ -24,15 +24,31 @@ export async function runTelegramUiTests() {
   telegramRuntime.forumTopics.set('forum', [{ id: '7', title: 'General', lastMessage: '', unreadCount: 0 }, { id: '8', title: 'Other', lastMessage: '', unreadCount: 2 }]);
   config.positions[id] = { activeChatId: 'fixture', expanded: true };
   try {
+    const nowTs = Math.floor(Date.now() / 1000);
+    const pastTs = nowTs - 86400 * 3;
+    check('time labels keep the locale format',
+      formatTelegramTime(String(nowTs)) === new Date(nowTs * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      && formatTelegramTime(String(pastTs)) === new Date(pastTs * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    // One label per message on the open path: building a formatter per call
+    // cost ~0.5 ms each, which made a 300-message chat freeze the click.
+    const formatStart = performance.now();
+    for (let i = 0; i < 600; i++) formatTelegramTime(String(nowTs - i * 3600));
+    check('time labels reuse their formatters', performance.now() - formatStart < 30);
     renderTelegramWidget(card, id, { preparing: true });
     const body = card.querySelector('.widget-body');
     const scroller = body.querySelector('.tg-messages');
     const layout = body.querySelector('.tg-layout');
     const search = body.querySelector('.tg-chat-search');
     const composer = body.querySelector('.tg-input');
-    check('prepared real history, no mock', !!scroller && !body.querySelector('.tg-opening-shell') && scroller.querySelectorAll('.tg-message').length === 80);
+    // The click only lays out the visible end of the history; the rest is
+    // written above it once the surface is open (first layout is ~0.3 ms a row).
+    check('prepared real history tail, no mock', !!scroller && !body.querySelector('.tg-opening-shell') && scroller.querySelectorAll('.tg-message').length === TELEGRAM_PREPARED_TAIL_MESSAGES);
     check('prepared first paint at bottom', scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 2);
     check('prepared activation deferred', typeof card._tgActivatePrepared === 'function' && !scroller._replyWired);
+    const tailLast = [...scroller.querySelectorAll('.tg-message')].at(-1);
+    check('head fill completes history', fillTelegramHistoryHead(card, id) && scroller.querySelectorAll('.tg-message').length === 80);
+    check('head fill keeps tail nodes and bottom', tailLast.isConnected && scroller.contains(tailLast) && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 2);
+    check('head fill leaves nothing to rebuild', card._tgSectionCache.thread === buildMessagesInnerHtml(chats[0], messages));
     wireTelegramMessagesSection(card, id, body, chats[0], { showAuth: true });
     check('live first paint at bottom', scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 2);
     await frame();
@@ -97,6 +113,15 @@ export async function runTelegramUiTests() {
     renderTelegramWidget(card, id, { preparing: true });
     const fresh = body.querySelector('.tg-messages');
     check('new account ignores old reading position', fresh.scrollHeight - fresh.clientHeight - fresh.scrollTop < 2);
+    // History changed between the prepared click and the open: the tail on
+    // screen is stale, so the head is not written over it; the update rebuilds.
+    const editedLast = { ...messages[79], text: 'Edited while opening' };
+    telegramRuntime.messages.set('fixture', [...messages.slice(0, 79), editedLast]);
+    check('head fill refuses a changed history', !fillTelegramHistoryHead(card, id) && fresh.querySelectorAll('.tg-message').length === TELEGRAM_PREPARED_TAIL_MESSAGES);
+    updateTelegramWidget(card, id);
+    const rebuilt = body.querySelector('.tg-messages');
+    check('changed history rebuilds in full', rebuilt.querySelectorAll('.tg-message').length === 80 && rebuilt.textContent.includes('Edited while opening'));
+    telegramRuntime.messages.set('fixture', messages);
     card.style.width = '560px';
     chats.push({ id: 'next', title: 'Next', initials: 'N', kind: 'private', unread: 0 }, { id: 'third', title: 'Third', initials: 'T', kind: 'private', unread: 0 });
     for (const chatId of ['next', 'third']) {
@@ -123,15 +148,18 @@ export async function runTelegramUiTests() {
     oldInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await Promise.resolve();
     check('outgoing Enter cannot send during transition', !fixtureCalls.some(call => call.command === 'telegram_send_message'));
+    check('switch prepares only the history tail', incomingMessages.querySelectorAll('.tg-message').length === TELEGRAM_PREPARED_TAIL_MESSAGES);
     const previewWidth = incoming.getBoundingClientRect().width;
-    const previewScroll = incomingMessages.scrollTop;
+    // The head is written above the tail, so the reading position is the
+    // distance from the bottom, not the raw scrollTop.
+    const previewFromBottom = incomingMessages.scrollHeight - incomingMessages.scrollTop;
     const previewMessage = incomingMessages.querySelector(".tg-message");
     card._tgPendingUpdate = true;
     firstTimeline.finish();
     await firstTimeline.finished;
-    check('unchanged pending refresh retains message nodes', incomingMessages.querySelector('.tg-message') === previewMessage);
+    check('unchanged pending refresh retains message nodes', incomingMessages.contains(previewMessage) && incomingMessages.querySelectorAll('.tg-message').length === 80);
     check('handoff retains prepared thread and scroller', body.querySelector('.tg-layout > .tg-thread') === incoming && incoming.querySelector('.tg-messages') === incomingMessages);
-    check('handoff retains width and history position', Math.abs(incoming.getBoundingClientRect().width - previewWidth) < 2 && Math.abs(incomingMessages.scrollTop - previewScroll) < 2);
+    check('handoff retains width and history position', Math.abs(incoming.getBoundingClientRect().width - previewWidth) < 2 && Math.abs(incomingMessages.scrollHeight - incomingMessages.scrollTop - previewFromBottom) < 2);
     const input = incoming.querySelector('.tg-input');
     input.value = 'new draft';
     input.dispatchEvent(new Event('input'));
@@ -152,10 +180,10 @@ export async function runTelegramUiTests() {
     telegramRuntime.historyExhausted.add('empty');
     telegramSetActiveChat(card, id, 'empty', body.querySelector('[data-chat-id="empty"]'));
     const emptyTimeline = card._activeMorphAnim;
-    check('cold history renders loading before first frame', card._activeMorphCard.querySelector('.tg-state.loading')?.textContent === 'Loading messages');
+    check('cold history renders loading before first frame', card._activeMorphCard.querySelector('.tg-state.loading')?.textContent === 'Загрузка сообщений');
     await Promise.resolve(); await Promise.resolve();
     emptyTimeline.finish(); await emptyTimeline.finished;
-    check('empty reply replaces loading after handoff', body.querySelector('.tg-state')?.textContent === 'No messages here' && !body.querySelector('.tg-state.loading'));
+    check('empty reply replaces loading after handoff', body.querySelector('.tg-state')?.textContent === 'Сообщений нет' && !body.querySelector('.tg-state.loading'));
     fixtureReducedMotion = true;
     telegramSetActiveChat(card, id, 'next', body.querySelector('[data-chat-id="next"]'));
     check('reduced motion commits immediately with wired input', !card._tgTransitioning && !card._activeMorphCard && body.querySelector('.tg-messages').dataset.chatId === 'next' && body.querySelector('.tg-thread')._tgComposerWired);

@@ -5,7 +5,7 @@ import { initThemeSystem, applyTheme, getActiveTheme, getAllPresets, syncThemeIn
 import { canNest, effectiveNested, moveNested } from "./nesting.js";
 import { showToast } from "./toast.js";
 import { surfaceManager, syncSurfaceWash } from "./surface-manager.js";
-import { initMenu, openMenu, closeMenu } from "./menu.js";
+import { initMenu, openMenu, closeMenu, handleMenuEscape } from "./menu.js";
 import { renderFolderBody } from "./folder-body.js";
 
 initMotionSystem();
@@ -2445,6 +2445,13 @@ document.addEventListener("keydown", (e) => {
       e.stopPropagation();
       e.preventDefault();
       invoke("set_desktop_input_focus", { focused: false }).catch(() => {});
+      return;
+    }
+    // The settings menu sits above the desktop: one Escape closes it alone
+    // (r[motion.lifo-stack]), even when focus left it for the desk.
+    if (handleMenuEscape()) {
+      e.preventDefault();
+      e.stopPropagation();
       return;
     }
     collapseAllShellWidgets();

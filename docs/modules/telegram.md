@@ -347,6 +347,19 @@ if (chat?.isForum || chat?.hasSubchats || chat?.linkedCommunityId) {
 
 The message loader does not receive the thread ID as a parameter. `refreshTelegramMessages(card, widgetId, chatId, force)` reads the topic from the map and sends it to the `telegram_messages` command as `threadId`. Its message cache key comes from the same map (`telegramMessageCacheKey`). The old note said the thread ID was passed in; the code reads it from the map.
 
+### 8.5 The tail first, the head after the morph
+
+The browser lays out a freshly inserted message row for about 0.3 ms, measured live: 73 rows took 23 ms, 30 rows 9 ms. A click that builds the whole cached history (up to 300 messages) therefore holds the main thread before the first frame of the morph. So two clicks build only the end of the history:
+
+- the open of the panel (`renderTelegramWidget` with `preparing`);
+- a chat switch inside the open panel (`telegramSetActiveChat`, the morph path).
+
+`telegramPreparedTailStart` picks the first row: the last `TELEGRAM_PREPARED_TAIL_MESSAGES` (30) messages, reaching back to the saved reading position and to a pending jump target, and never starting inside an album. `buildMessagesInnerHtml(chat, messages, from)` renders from that row. Each row still sees its real predecessor, and the reply map covers the whole history, so a tail row is the same markup it has in the full list. The load-earlier button belongs to the head and is left out.
+
+When the surface is open (`activateTelegramExpandedRender`) or the morph commits, `fillTelegramHistoryHead` writes the rows above the tail, adds the height they take to `scrollTop`, and wires only the new rows. The tail's nodes and media stay. It writes nothing when the history changed since the tail was built: it rebuilds the tail markup from the current data and compares it with the markup on screen. Then the section cache still holds the tail, and the next `updateTelegramWidget` rebuilds the list in full. A rebuild of the scroller drops the pending request, so a head is never written twice.
+
+Time labels use two module-level `Intl.DateTimeFormat` objects. `toLocaleTimeString` with options builds a new formatter on every call, about 0.5 ms each, and that was half of the click before session 136.
+
 ---
 
 ## Step 9: The verification record

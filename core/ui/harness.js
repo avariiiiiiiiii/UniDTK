@@ -9,6 +9,7 @@
  */
 
 import { setMotionScale } from "./motion.js";
+import { surfaceManager } from "./surface-manager.js";
 import { invoke, sessionInfo as fetchSessionInfo } from "@unidtk/bridge";
 
 // Global error ring buffer (last 50 errors)
@@ -319,6 +320,89 @@ export const UniDtkHarness = {
 
   invoke(cmd, args) {
     return invoke(cmd, args);
+  },
+
+  /**
+   * Surfaces of the core itself for the motion budget of `udtk doctor
+   * -simulate`: the settings menu and one folder card. Modules declare theirs
+   * in metadata.json (`motion.open`); the CLI adds those.
+   */
+  motionTargets() {
+    const targets = [];
+    if (document.getElementById("openMenu")) targets.push({ label: "core:menu", selector: "#openMenu" });
+    const folder = [...document.querySelectorAll(".widget-card")].find((card) => card._folderId);
+    if (folder?.dataset.id) {
+      targets.push({ label: "core:folder", selector: `.widget-card[data-id="${CSS.escape(folder.dataset.id)}"]` });
+    }
+    return targets;
+  },
+
+  /** No surface, no expanded card, no settings menu: what a click starts from. */
+  isDeskQuiet() {
+    const menu = document.getElementById("menuContainer");
+    return surfaceManager.activeStack.length === 0
+      && (!menu || menu.hidden)
+      && !document.querySelector(".widget-card.expanded");
+  },
+
+  /**
+   * Resolve once the desk reaches `quiet` (see isDeskQuiet) and no finite
+   * animation or transition is still running. Counted in frames, not in
+   * milliseconds, so the wait follows the motion scale; gives up after 240.
+   */
+  async waitMotionSettled(quiet) {
+    const finiteRunning = () => document.getAnimations().some((animation) =>
+      animation.playState === "running" && animation.effect?.getComputedTiming().endTime !== Infinity);
+    for (let frames = 0; frames < 240; frames++) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      if (this.isDeskQuiet() === quiet && !finiteRunning()) return { settled: true, frames };
+    }
+    return { settled: false, frames: 240 };
+  },
+
+  /** Record frame gaps and long tasks until readMotionProbe / stopMotionProbe. */
+  startMotionProbe() {
+    this.stopMotionProbe();
+    const probe = { gaps: [], tasks: [], last: performance.now(), raf: 0, observer: null };
+    const frame = (now) => {
+      probe.gaps.push(now - probe.last);
+      probe.last = now;
+      probe.raf = requestAnimationFrame(frame);
+    };
+    probe.raf = requestAnimationFrame(frame);
+    try {
+      probe.observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) probe.tasks.push(entry.duration);
+      });
+      probe.observer.observe({ entryTypes: ["longtask"] });
+    } catch (_) { /* long tasks unsupported: frame gaps still measure */ }
+    this._motionProbe = probe;
+    return true;
+  },
+
+  /** Worst frame gap and longest task since the last read, then reset. */
+  readMotionProbe() {
+    const probe = this._motionProbe;
+    if (!probe) return null;
+    const result = {
+      frames: probe.gaps.length,
+      worstFrameMs: Math.round(Math.max(0, ...probe.gaps)),
+      longTasks: probe.tasks.length,
+      longestTaskMs: Math.round(Math.max(0, ...probe.tasks)),
+    };
+    probe.gaps.length = 0;
+    probe.tasks.length = 0;
+    probe.last = performance.now();
+    return result;
+  },
+
+  stopMotionProbe() {
+    const probe = this._motionProbe;
+    if (!probe) return false;
+    cancelAnimationFrame(probe.raf);
+    probe.observer?.disconnect();
+    this._motionProbe = null;
+    return true;
   },
 };
 
