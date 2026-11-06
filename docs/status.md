@@ -16,7 +16,7 @@ This is the first file an agent reads. It says what is true today and where to r
 | **Storage (DB)** | 🟢 Stable | Clean `redb` transactions (`unidtk.redb`, `unidtk_logs.redb`) | [storage.md](reference/storage.md) |
 | **CLI bridge (`udtk`)** | 🟢 Stable | Rust CLI, CDP WebSocket, TCP IPC; `doctor -simulate` measures a motion budget (real click/Escape, frame and task ≤ 50 ms) | [udtk book](udtk/ch11-doctor-the-diagnostic-loop.md), session 136 |
 | **Production GUI** | 🟢 Stable | Tauri v2, WebView2 (Working Set of the process tree: 571 MB after a test run, session 136) | [the page](book/ch06-the-page.md) |
-| **Motion** | 🟢 Budget met | Worst frame: menu/folder/clock 17 ms, Telegram 17–33 ms, no long task; Telegram open click 68 → 25 ms. Open: a history refresh during the open still rebuilds the list (80–118 ms) | [surfaces](reference/surfaces.md), session 136 |
+| **Motion** | 🟢 Budget met | Worst frame: menu/folder/clock 17 ms, Telegram 17–33 ms, no long task; Telegram open click 68 → 25 ms. A history change during the open patches only the changed rows (session 136 follow-up; fixture-proven, not yet seen live). Open: `doctor -simulate` budget is flaky under machine load, Telegram long tasks of 60–137 ms in some runs are unexplained | [surfaces](reference/surfaces.md), session 136 |
 | **Experimental GUI** | 🟡 Gate 1 ready | GPUI, DirectX 11, DirectComposition (RAM: **59.7 MB**, CPU: **0.39%**) | [GPUI host](reference/gpui-host.md) |
 | **Module: Clock** | 🟢 Ready (GPUI) | GPUI, Nothing Ndot 55 typography, on-demand timer (1 Hz) | [GPUI host](reference/gpui-host.md) |
 | **Module: Glyph Bar** | 🟢 Ready (GPUI) | GPUI, 10 LED segments, WASAPI master volume | [GPUI host](reference/gpui-host.md) |

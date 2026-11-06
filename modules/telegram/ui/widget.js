@@ -2302,7 +2302,7 @@ function telegramAlbumId(message) {
 
 // Rows for messages[from, to). Each row still sees its real predecessor, so a
 // slice renders exactly the markup of the same rows in the whole history.
-function renderTelegramMessageRows(chat, messages, messageMap, from = 0, to = messages.length) {
+function telegramMessageRowStrings(chat, messages, messageMap, from = 0, to = messages.length) {
   const rows = [];
   for (let index = from; index < to;) {
     const message = messages[index];
@@ -2333,7 +2333,11 @@ function renderTelegramMessageRows(chat, messages, messageMap, from = 0, to = me
     const albumReactionsHtml = memberWithReactions ? renderTelegramReactionsHtml(memberWithReactions, chat?.id) : "";
     rows.push(`<div class="tg-album ${direction}" data-album-id="${escapeHtml(albumId)}">${memberRows}${albumReactionsHtml ? `<div class="tg-album-reactions">${albumReactionsHtml}</div>` : ""}</div>`);
   }
-  return rows.join("");
+  return rows;
+}
+
+function renderTelegramMessageRows(chat, messages, messageMap, from = 0, to = messages.length) {
+  return telegramMessageRowStrings(chat, messages, messageMap, from, to).join("");
 }
 
 // Inner content of .tg-messages (load-earlier + bubbles / state). Used by both
@@ -2371,6 +2375,66 @@ function buildMessagesInnerHtml(chat, messages, from = 0) {
       ${from === 0 ? telegramLoadEarlierHtml(chat, listToRender) : ""}
       ${messageState || renderTelegramMessageRows(chat, listToRender, messageMap, from)}
     `;
+}
+
+/**
+ * Bring the rows on screen up to date after the history changed, rewriting
+ * only the rows from the first one that differs (a new message, an edit of the
+ * last one). Older rows keep their nodes, media and scroll anchor, and only the
+ * new nodes are wired. `cache.thread` is the markup the DOM was written from;
+ * with a head fill pending it is the tail markup, and the request is renewed.
+ * Returns false when the DOM cannot be proven to match (nothing is promised
+ * about it then), so the caller rewrites the whole list.
+ */
+function patchTelegramThreadRows(card, widgetId, scroller, active, messages, cache) {
+  const fill = scroller._tgHeadFill;
+  const from = fill ? fill.from : 0;
+  const threadId = telegramForumThreadId(active?.id);
+  if (!active || (fill && fill.chatId !== active.id) || typeof cache.thread !== "string" || telegramRuntime.pendingScrollAnchor
+      || scroller.dataset.chatId !== active.id
+      || String(scroller.dataset.threadId || "") !== String(threadId || "")) return false;
+  const list = telegramRenderedMessages(active, messages);
+  if (telegramMessageState(active, list) || (fill && from >= list.length)) return false;
+  const messageMap = new Map(list.map((m) => [String(m.id), m]));
+  const head = `
+      ${from === 0 ? telegramLoadEarlierHtml(active, list) : ""}
+      `;
+  const rows = telegramMessageRowStrings(active, list, messageMap, from);
+  const next = `${head}${rows.join("")}
+    `;
+  const prev = cache.thread;
+  let common = 0;
+  for (const limit = Math.min(prev.length, next.length); common < limit && prev.charCodeAt(common) === next.charCodeAt(common);) common += 1;
+  if (common < head.length) return false;
+  if (prev !== next) {
+    let keep = 0;
+    for (let offset = head.length; keep < rows.length && offset + rows[keep].length <= common; keep += 1) offset += rows[keep].length;
+    const lead = head.includes("tg-load-earlier") ? 1 : 0;
+    const first = scroller.children[lead + keep];
+    if (scroller.children.length < lead + keep) return false;
+    const previousScroll = captureTelegramScroll(scroller);
+    if (first) {
+      const range = document.createRange();
+      range.setStartBefore(first);
+      range.setEndAfter(scroller.lastChild);
+      range.deleteContents();
+    }
+    const firstNew = scroller.lastElementChild;
+    scroller.insertAdjacentHTML("beforeend", rows.slice(keep).join(""));
+    if (scroller.children.length !== lead + rows.length) return false;
+    restoreTelegramScroll(scroller, previousScroll);
+    settleTelegramScroll(scroller);
+    for (let node = firstNew ? firstNew.nextElementSibling : scroller.firstElementChild; node; node = node.nextElementSibling) {
+      const rowsInNode = node.matches(".tg-message") ? [node] : node.querySelectorAll(".tg-message");
+      for (const row of rowsInNode) wireTelegramMessageRow(card, widgetId, row, active);
+      node.querySelectorAll(".tg-inline-btn").forEach(wireTelegramInlineButton);
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => syncTelegramVisibleMedia(card, widgetId, scroller)));
+  }
+  cache.thread = next;
+  if (fill) fill.html = next;
+  if (telegramRuntime.messagesLoaded.has(telegramMessageCacheKey(active.id))) markTelegramChatRead(card, active.id);
+  return true;
 }
 
 /**
@@ -3726,7 +3790,10 @@ function updateTelegramWidget(card, widgetId) {
   }
 
 
-  if (!showAuth && messageScroller && effectiveThreadHtml !== cache.thread) {
+  if (!showAuth && messageScroller && effectiveThreadHtml !== cache.thread && !showTopicHint
+      && patchTelegramThreadRows(card, widgetId, messageScroller, active, messages, cache)) {
+    // Rows brought up to date in place; the section below would rewrite them all.
+  } else if (!showAuth && messageScroller && effectiveThreadHtml !== cache.thread) {
     const previousScroll = captureTelegramScroll(messageScroller);
     const prevChatId = messageScroller.dataset.chatId || null;
     const prevThreadId = messageScroller.dataset.threadId || null;

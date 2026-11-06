@@ -121,6 +121,43 @@ export async function runTelegramUiTests() {
     updateTelegramWidget(card, id);
     const rebuilt = body.querySelector('.tg-messages');
     check('changed history rebuilds in full', rebuilt.querySelectorAll('.tg-message').length === 80 && rebuilt.textContent.includes('Edited while opening'));
+    // History changes while the chat is open: rows before the first changed
+    // one keep their nodes, and the list equals a full build.
+    const firstRow = rebuilt.querySelector('[data-message-id="1"]');
+    const row79 = rebuilt.querySelector('[data-message-id="79"]');
+    const arrived = { id: '81', text: 'Arrived while open', from: 'Author', time: '' };
+    const grown = [...messages.slice(0, 79), editedLast, arrived];
+    telegramRuntime.messages.set('fixture', grown);
+    updateTelegramWidget(card, id);
+    const sameHtml = (name, x, y) => { let i = 0; while (i < x.length && x[i] === y[i]) i++; const cut = (v) => v.slice(Math.max(0, i - 20), i + 70).split(String.fromCharCode(34)).join(String.fromCharCode(39)).split(String.fromCharCode(10)).join('~'); check(x === y ? name : `${name} @${i}/${x.length}/${y.length} A=${cut(x)} B=${cut(y)}`, x === y); };
+    const rowsOf = (el) => Array.from(el.children).map(c => c.outerHTML).join('');
+    const fullBuild = (list) => { const probe = document.createElement('div'); telegramRuntime.messages.set('fixture', list); probe.innerHTML = buildMessagesInnerHtml(chats[0], list); return rowsOf(probe); };
+    check('new message keeps older rows', rebuilt.contains(firstRow) && rebuilt.contains(row79) && rebuilt.querySelectorAll('.tg-message').length === 81 && rebuilt.textContent.includes('Arrived while open'));
+    sameHtml('appended list equals a full build', rowsOf(rebuilt), fullBuild(grown));
+    const row80 = rebuilt.querySelector('[data-message-id="80"]');
+    const lastEdit = { ...arrived, text: 'Edited again' };
+    telegramRuntime.messages.set('fixture', [...grown.slice(0, 80), lastEdit]);
+    updateTelegramWidget(card, id);
+    check('edit of the last row keeps the rest', rebuilt.contains(firstRow) && rebuilt.contains(row80) && rebuilt.textContent.includes('Edited again') && !rebuilt.textContent.includes('Arrived while open'));
+    sameHtml('edited list equals a full build', rowsOf(rebuilt), fullBuild([...grown.slice(0, 80), lastEdit]));
+    telegramRuntime.messages.set('fixture', messages.slice(0, 60));
+    updateTelegramWidget(card, id);
+    check('shorter history keeps 60 rows', rebuilt.querySelectorAll('.tg-message').length === 60);
+    sameHtml('shorter list equals a full build', rowsOf(rebuilt), fullBuild(messages.slice(0, 60)));
+    // A refresh during the open, with the prepared tail on screen and its head
+    // fill pending: the tail is patched and the fill stays valid.
+    telegramRuntime.messages.set('fixture', messages);
+    body.replaceChildren();
+    renderTelegramWidget(card, id, { preparing: true });
+    const pending = body.querySelector('.tg-messages');
+    pending.dataset.chatId = 'fixture'; pending.dataset.threadId = '';
+    const tailRow = pending.querySelector('[data-message-id="70"]');
+    const grownMessages = [...messages, { id: '81', text: 'Arrived during open', from: 'Author', time: '' }];
+    telegramRuntime.messages.set('fixture', grownMessages);
+    updateTelegramWidget(card, id);
+    check('refresh during open patches the tail', pending.contains(tailRow) && pending.textContent.includes('Arrived during open') && pending._tgHeadFill);
+    check('head fill follows the patched tail', fillTelegramHistoryHead(card, id));
+    sameHtml('head fill after a patch equals a full build', rowsOf(pending), fullBuild(grownMessages));
     telegramRuntime.messages.set('fixture', messages);
     card.style.width = '560px';
     chats.push({ id: 'next', title: 'Next', initials: 'N', kind: 'private', unread: 0 }, { id: 'third', title: 'Third', initials: 'T', kind: 'private', unread: 0 });
