@@ -4772,6 +4772,18 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
     return;
   }
   card.classList.add("telegram-widget", "no-header");
+  // While the card folds, a click anywhere on it opens it again (the surface
+  // keeps pointer events for that: keepPointerOnClose). It never reaches the
+  // controls under the pointer.
+  if (!card._tgReopenWired) {
+    card._tgReopenWired = true;
+    card.addEventListener("click", (e) => {
+      if (editMode || surfaceManager.getRecord(card)?.state !== "closing") return;
+      e.preventDefault();
+      e.stopPropagation();
+      toggleTelegramWidget(card, card.dataset.id);
+    }, true);
+  }
   const previousMessages = card.querySelector(".tg-messages");
   const dockedScroll = preparing && card._tgDockedScroll?.generation === telegramRuntime.accountGeneration
     ? card._tgDockedScroll : null;
@@ -4917,6 +4929,12 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
   }
   // Preparation owns the exact final DOM. Activation below only installs
   // handlers/effects after the surface is visible, without replacing its nodes.
+  // The fold button answers from the first frame: a click reverses the open.
+  card.querySelector(".tg-collapse")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (editMode) return;
+    collapseTelegramWidget(card, widgetId);
+  });
   const activate = () => {
   wireTelegramRailSection(card, widgetId, body);
   wireTelegramListSection(card, widgetId, body);
@@ -4972,11 +4990,6 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
       cancelActiveTelegramMorph(card);
       renderTelegramWidget(card, widgetId);
     }
-  });
-  card.querySelector(".tg-collapse")?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (editMode) return;
-    collapseTelegramWidget(card, widgetId);
   });
   const chatSearch = body.querySelector(".tg-chat-search");
   body.querySelector("[data-tg-action='toggle-archive']")?.addEventListener("click", async (event) => {
@@ -7034,12 +7047,20 @@ function flyTelegramAvatars(card, from, to, open, duration) {
   timeline.play();
 }
 
+// The prepared panel takes no input until it is wired, but its header stays
+// live: the fold button must answer while the card is still opening.
+function setTelegramPanelInert(card, inert) {
+  card.querySelector('.widget-body').inert = false;
+  const layout = card.querySelector('.tg-layout');
+  if (layout) layout.inert = inert;
+}
+
 function activateTelegramExpandedRender(card, widgetId) {
   if (!card.isConnected || !card.classList.contains('expanded') ||
       surfaceManager.getRecord(card)?.state !== 'open') return;
   card._tgSurfaceTransitioning = false;
   card._tgPreparing = false;
-  card.querySelector('.widget-body').inert = false;
+  setTelegramPanelInert(card, false);
   const activate = card._tgActivatePrepared;
   card._tgActivatePrepared = null;
   activate?.();
@@ -7170,7 +7191,7 @@ function toggleTelegramWidget(card, widgetId) {
   // no invented chat/message arrangement to jump away from at the handoff.
   card._tgPreparing = true;
   renderTelegramWidget(card, widgetId, { preparing: true });
-  card.querySelector('.widget-body').inert = true;
+  setTelegramPanelInert(card, true);
 
   card._tgSurfaceTransitioning = true;
   surfaceManager.openSurface(card, {
@@ -7183,6 +7204,7 @@ function toggleTelegramWidget(card, widgetId) {
     elevation: "120",
     closeOnOutsideClick: false,
     closeOnEscape: false,
+    keepPointerOnClose: true,
     onTransitionStart: ({ open, duration }) => {
       syncSurfaceWash(card, open, duration);
       const list = telegramAvatarRects(card, '.tg-chat-list', '.tg-row-avatar');
@@ -7219,7 +7241,7 @@ function toggleTelegramWidget(card, widgetId) {
       card._tgSurfaceTransitioning = false;
       card._tgPreparing = false;
       card._tgActivatePrepared = null;
-      card.querySelector('.widget-body').inert = false;
+      setTelegramPanelInert(card, false);
       card._tgPendingUpdate = false;
       renderTelegramDock(card, widgetId);
       const rail = card.querySelector('.tg-rail');

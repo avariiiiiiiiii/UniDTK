@@ -362,6 +362,8 @@ When the history changes while the chat is open (a new message, an edit of the l
 
 While a head fill is pending the scroller carries `tg-history-filling` (`setTelegramHeadFill`) and its scrollbar colour is transparent: the thumb size would jump when the head arrives. The avatar flight (`flyTelegramAvatars`) carries the avatar only: badges (`em`, `i`, the row's `.tg-row-unread`) are removed from the ghost, hidden at both ends for the flight, and fade in after it. Unread chips: a chat with sound is the light chip, a muted one the ink chip; the jelly rules restate both because they outrank the Classic `.muted` rule.
 
+A click reverses an open or a close in flight. While the card opens, only the panel's `.tg-layout` is inert (`setTelegramPanelInert`), so the fold button in the panel header answers from the first frame (it is wired during the prepared render, not at activation). While the card folds, the surface keeps pointer events (`keepPointerOnClose`), and a capture-phase click listener on the card calls `toggleTelegramWidget`, which reopens from the sampled point; the click never reaches the controls under it.
+
 Time labels use two module-level `Intl.DateTimeFormat` objects. `toLocaleTimeString` with options builds a new formatter on every call, about 0.5 ms each, and that was half of the click before session 136.
 
 ---

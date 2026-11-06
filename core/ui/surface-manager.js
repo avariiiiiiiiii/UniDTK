@@ -289,14 +289,15 @@ class SurfaceManager {
     if (open) {
       record.state = "opening";
       record.element.classList.add("surface-active");
-      record.element.classList.remove("surface-closing");
+      record.element.classList.remove("surface-closing", "surface-pointer-live");
       record.element.style.pointerEvents = "";
       record.element.style.willChange = "clip-path, opacity";
       if (record.backdrop) record.backdrop.style.pointerEvents = "";
     } else {
       record.state = "closing";
       record.element.classList.add("surface-closing");
-      record.element.style.pointerEvents = "none";
+      record.element.classList.toggle("surface-pointer-live", !!record.options?.keepPointerOnClose);
+      record.element.style.pointerEvents = record.options?.keepPointerOnClose ? "" : "none";
       record.element.style.willChange = "clip-path, opacity";
       if (record.backdrop) record.backdrop.style.pointerEvents = "none";
     }
@@ -521,6 +522,7 @@ class SurfaceManager {
    * @param {HTMLElement} [options.backdrop] - Background overlay element to fade in
    * @param {boolean} [options.closeOnOutsideClick=true]
    * @param {boolean} [options.closeOnEscape=true]
+   * @param {boolean} [options.keepPointerOnClose=false] - Keep pointer events while the close runs, so the owner can reverse it with a click
    * @param {string|number} [options.elevation] - e.g. "var(--z-surface-modal)"
    * @param {string} [options.display] - Display mode to apply when shown
    * @param {"both"|"x"} [options.axis="both"] - Constrain the reveal to the horizontal axis when the dock and surface share a vertical lane
@@ -823,7 +825,7 @@ class SurfaceManager {
     this._cancelRecordAnimations(record);
     record.activeContentTargets = [];
 
-    element.classList.remove("surface-active", "surface-open", "surface-closing");
+    element.classList.remove("surface-active", "surface-open", "surface-closing", "surface-pointer-live");
     element.style.clipPath = "";
     element.style.pointerEvents = "";
     element.style.willChange = "";

@@ -1215,6 +1215,11 @@ body.edit-mode .resize-handle:hover::after {
   pointer-events: none !important;
 }
 
+/* A surface opened with keepPointerOnClose answers clicks while it folds. */
+.surface-closing.surface-pointer-live {
+  pointer-events: auto !important;
+}
+
 /* Explorer overlay — managed via SurfaceManager */
 .explorer-overlay {
   position: fixed;

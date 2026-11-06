@@ -134,6 +134,10 @@ Here `remainingRatio` is the distance still to travel divided by the full distan
 
 Reversal in the code means "sample, then start a new timeline from the sampled values". The result looks like a reversal, because the new timeline begins at the same point the opening was at. It is not the WAAPI `reverse()` call. Section 2 explained the difference.
 
+### 8.3.1 A Click Can Reverse a Close
+
+`_startTransition()` turns pointer events off for a closing surface. A surface opened with `keepPointerOnClose: true` (the Telegram card) keeps them (no inline `pointer-events: none`, and the class `surface-pointer-live` lifts the `!important` rule of `.surface-closing` in `styles.css`), so its owner can listen for a click while the close runs and call `openSurface()` on the closing record, which re-samples and opens from the rendered point. The owner must stop that click before it reaches the controls under the pointer.
+
 ### 8.4 A Second Escape or Click Finishes at Once
 
 If the user closes a surface that is already closing, the listeners call `_finalizeClose()` immediately, then start the close of the next surface in the stack (section 9).

@@ -290,6 +290,27 @@ export async function runTelegramUiTests() {
     const cancelledByAccount = card._activeMorphAnim;
     clearTelegramAccountState();
     check('account reset cancels morph immediately', cancelledByAccount.state === 'cancelled' && !body.querySelector('.tg-surface-morph') && !card._tgTransitioning);
+    // A click reverses an open in flight: the fold button works as soon as the
+    // card is prepared, and a click on a closing card opens it again.
+    const realCollapse = collapseTelegramWidget, realToggle = toggleTelegramWidget, realGetRecord = surfaceManager.getRecord;
+    let collapsed = 0, toggled = 0;
+    collapseTelegramWidget = () => { collapsed += 1; };
+    toggleTelegramWidget = () => { toggled += 1; };
+    try {
+      renderTelegramWidget(card, id, { preparing: true });
+      setTelegramPanelInert(card, true);
+      const foldButton = card.querySelector('.tg-collapse');
+      check('fold button stays live while the panel waits', !foldButton.closest('[inert]') && card.querySelector('.tg-layout').inert);
+      foldButton.click();
+      check('fold during the open collapses the card', collapsed === 1 && toggled === 0);
+      setTelegramPanelInert(card, false);
+      check('panel is live again', !card.querySelector('.tg-layout').inert);
+      surfaceManager.getRecord = () => ({ state: 'closing' });
+      foldButton.click();
+      check('click on a closing card opens it again', toggled === 1 && collapsed === 1);
+    } finally {
+      collapseTelegramWidget = realCollapse; toggleTelegramWidget = realToggle; surfaceManager.getRecord = realGetRecord;
+    }
     return { passed: checks.filter(c => c.ok).length, total: checks.length, checks };
   } finally {
     card.remove();
