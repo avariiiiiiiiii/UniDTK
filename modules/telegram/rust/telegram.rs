@@ -2436,7 +2436,13 @@ fn receiver_loop(
         let text = match td.receive(0.5) {
             Ok(Some(text)) => text,
             Ok(None) => continue,
-            Err(_) => break,
+            // One undecodable reply is skipped, like a JSON parse failure below.
+            // Breaking here ended the receiver for good: the client stayed
+            // "started" while every request timed out.
+            Err(error) => {
+                unidtk_api::log(format!("telegram: TDLib reply skipped: {error}"));
+                continue;
+            }
         };
         let value: Value = match serde_json::from_str(&text) {
             Ok(value) => value,
