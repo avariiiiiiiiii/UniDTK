@@ -88,6 +88,17 @@ function requestTelegramWidgetRender(card, widgetId) {
 }
 window.__telegramRuntime = telegramRuntime;
 
+/**
+ * Puts text that failed to go out back into the composer. Whatever the user
+ * typed while the request was in flight stays: the failed text goes in front.
+ */
+function restoreComposerText(input, chatId, text) {
+  const typedMeanwhile = input?.value || "";
+  const merged = typedMeanwhile ? `${text}\n${typedMeanwhile}` : text;
+  if (input) input.value = merged;
+  telegramRuntime.drafts.set(chatId, merged);
+}
+
 /** Clear all per-chat / per-account client state (logout or switch account). */
 function clearTelegramAccountState() {
   document.querySelectorAll('.telegram-widget').forEach(card => {
@@ -4505,6 +4516,12 @@ function wireTelegramComposer(card, widgetId, body, active, capturedComposer = {
         }
       } catch (error) {
         logFrontend("edit message error: " + error);
+        if (generation === telegramRuntime.accountGeneration) {
+          // The edit did not reach Telegram: keep the text and the edit target.
+          telegramRuntime.editMessage.set(chatId, editing);
+          restoreComposerText(input, chatId, text);
+          showDebugMessage(`Не удалось изменить сообщение: ${error?.message || error}`);
+        }
       } finally {
         if (generation === telegramRuntime.accountGeneration) {
           telegramRuntime.sending = false;
@@ -4540,11 +4557,11 @@ function wireTelegramComposer(card, widgetId, body, active, capturedComposer = {
       }
     } catch (error) {
       if (generation !== telegramRuntime.accountGeneration) return;
-      if (input) {
-        input.value = text;
-        input.setAttribute("aria-label", String(error?.message || error));
-      }
-      telegramRuntime.drafts.set(chatId, text);
+      if (input) input.setAttribute("aria-label", String(error?.message || error));
+      restoreComposerText(input, chatId, text);
+      // The reply target was taken before the request; the retry needs it again.
+      if (replying) telegramRuntime.replyMessage.set(chatId, replying);
+      showDebugMessage(`Сообщение не отправлено: ${error?.message || error}`);
       return;
     } finally {
       if (generation === telegramRuntime.accountGeneration) {
