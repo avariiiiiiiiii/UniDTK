@@ -5,6 +5,7 @@ import { explorerAsset } from './asset.js';
 import { ContextMenu } from './context-menu.js';
 import { PreviewPanel } from './preview.js';
 import { TabManager } from './tabs.js';
+import { showToast } from '../../toast.js';
 
 // Items beyond this index render without the staggered appear animation.
 const APPEAR_LIMIT = 24;
@@ -1911,7 +1912,13 @@ class NothingExplorer {
             try {
                 await invoke('create_directory', { path: newPath });
                 break;
-            } catch {
+            } catch (e) {
+                // Only a taken name is retried with the next number; any other
+                // failure (access denied, bad name) is the user's to see.
+                if (!String(e).includes('already exists')) {
+                    showToast(`Не удалось создать папку: ${e}`, { tone: 'error' });
+                    return;
+                }
                 counter++;
                 name = `New Folder (${counter})`;
                 newPath = tab.path + '\\' + name;
@@ -1934,7 +1941,11 @@ class NothingExplorer {
             try {
                 await invoke('create_empty_file', { path: newPath });
                 break;
-            } catch {
+            } catch (e) {
+                if (!String(e).includes('already exists')) {
+                    showToast(`Не удалось создать файл: ${e}`, { tone: 'error' });
+                    return;
+                }
                 counter++;
                 name = `New File (${counter}).txt`;
                 newPath = tab.path + '\\' + name;

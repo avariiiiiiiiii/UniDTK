@@ -131,6 +131,11 @@ pub fn open_with_default(path: &str) -> Result<(), String> {
 }
 
 pub fn create_directory(path: &str) -> Result<(), String> {
+    // create_dir_all succeeds for a folder that exists, which made "New Folder"
+    // reuse the same name forever; say so, as create_empty_file does.
+    if Path::new(path).exists() {
+        return Err("already exists".to_string());
+    }
     std::fs::create_dir_all(path).map_err(|e| format!("create dir: {e}"))
 }
 
@@ -376,6 +381,14 @@ pub fn unique_path(dir: &str, name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creating_a_folder_that_exists_is_an_error() {
+        let root = Scratch::new("mkdir-twice");
+        let dir = root.0.join("New Folder");
+        assert!(create_directory(path_str(&dir)).is_ok());
+        assert_eq!(create_directory(path_str(&dir)), Err("already exists".to_string()));
+    }
 
     #[test]
     fn drive_roots_are_never_deleted() {
