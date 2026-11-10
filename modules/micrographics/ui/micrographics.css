@@ -57,7 +57,7 @@ body.edit-mode .micrographics-card .mg-atom { pointer-events: auto; cursor: move
 .micrographics-card .resize-handle.corner { display: none; pointer-events: none; padding: 0; border: 0; touch-action: none; }
 body.edit-mode .micrographics-card .resize-handle.corner { display: block; pointer-events: auto; }
 .micrographics-card .mg-version-switcher { top: -32px; right: 0; padding: 0; color: inherit; font-family: inherit; }
-.micrographics-card .mg-location-request { display: none; position: absolute; left: 0; bottom: -32px; height: 26px; padding: 2px 8px; background: var(--bg-color, #111); color: inherit; border: 1px solid currentColor; font: 13px var(--font-mono,Consolas,monospace); cursor: pointer; pointer-events: auto; }
+.micrographics-card .mg-location-request { display: none; position: absolute; left: 0; bottom: -32px; height: 26px; padding: 2px 8px; background: rgba(var(--bg-surface-rgb), 0.92); color: rgb(var(--fg-rgb)); border: 1px solid currentColor; font: 13px var(--font-mono,Consolas,monospace); cursor: pointer; pointer-events: auto; }
 body.edit-mode .micrographics-card .mg-location-request:not([hidden]) { display: block; }
 .micrographics-card .mg-location-request:disabled { opacity: .6; cursor: wait; }
 body.edit-mode .micrographics-card .widget-instance-remove { pointer-events: auto; }
