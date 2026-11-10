@@ -273,6 +273,31 @@ function syncTaskLabel(task) {
   return `${label}: ${status}${progress}`;
 }
 
+/** Switches AI DJ in the backend. False (with the reason on screen) when it refuses. */
+async function setAiDjBackend(enabled) {
+  try {
+    await invoke("toggle_ai_dj", { enabled });
+    return true;
+  } catch (err) {
+    showDebugMessage(`AI DJ: ${err?.message || err}`);
+    return false;
+  }
+}
+
+/**
+ * The saved mode lives in the widget config, while the backend always starts
+ * with AI DJ off. Bring the backend to the saved mode once per card; if it
+ * refuses, the saved mode is dropped so the button does not claim it.
+ */
+function restoreAiDjMode(musicId) {
+  if (!config.positions?.[musicId]?.aiDj) return;
+  setAiDjBackend(true).then((accepted) => {
+    if (accepted) return;
+    config.positions[musicId].aiDj = false;
+    saveConfig();
+  });
+}
+
 async function renderMusicMenu(body, musicId) {
   if (typeof body?._aiDjCleanup === "function") {
     body._aiDjCleanup();
@@ -515,18 +540,18 @@ async function renderMusicMenu(body, musicId) {
       const mode = btn.dataset.mode;
       if (!config.positions[musicId]) config.positions[musicId] = {};
 
-      if (mode === "normal") {
-        config.positions[musicId].autoShuffle = false;
-        config.positions[musicId].aiDj = false;
-        invoke("toggle_ai_dj", { enabled: false }).catch(() => {});
-      } else if (mode === "shuffle") {
-        config.positions[musicId].autoShuffle = true;
-        config.positions[musicId].aiDj = false;
-        invoke("toggle_ai_dj", { enabled: false }).catch(() => {});
-      } else if (mode === "ai_dj") {
-        config.positions[musicId].autoShuffle = false;
-        config.positions[musicId].aiDj = true;
-        invoke("toggle_ai_dj", { enabled: true }).catch(() => {});
+      const previous = {
+        autoShuffle: !!config.positions[musicId].autoShuffle,
+        aiDj: !!config.positions[musicId].aiDj,
+      };
+      config.positions[musicId].autoShuffle = mode === "shuffle";
+      config.positions[musicId].aiDj = mode === "ai_dj";
+      // The backend answers first: a refused switch must not leave the button,
+      // the saved mode and the player disagreeing.
+      if (!(await setAiDjBackend(mode === "ai_dj"))) {
+        config.positions[musicId].autoShuffle = previous.autoShuffle;
+        config.positions[musicId].aiDj = previous.aiDj;
+        return;
       }
       saveConfig();
 
@@ -1250,6 +1275,7 @@ async function renderMusicMenu(body, musicId) {
 function renderMusicPlayer(card, widgetId) {
   card.classList.add("music-widget");
   card.classList.add("no-header");
+  restoreAiDjMode(widgetId);
   
   card.insertAdjacentHTML("beforeend", `
     <div class="music-player-container">
