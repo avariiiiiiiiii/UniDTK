@@ -1085,8 +1085,10 @@ pub fn camelot_compatible(key1: &str, key2: &str) -> bool {
 
     // Parse Camelot codes: number (1-12) + letter (A or B)
     let parse = |k: &str| -> Option<(u32, char)> {
-        let num = k[..k.len() - 1].parse::<u32>().ok()?;
+        // The letter first: an empty key has none, and slicing before this
+        // check used to panic on it.
         let letter = k.chars().last()?;
+        let num = k[..k.len() - letter.len_utf8()].parse::<u32>().ok()?;
         Some((num, letter))
     };
 
@@ -1234,6 +1236,16 @@ fn run_onnx_inference(mel_spec: &[Vec<f32>]) -> Result<Vec<f32>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn camelot_compatible_never_panics_on_odd_keys() {
+        assert!(!camelot_compatible("", "8A"));
+        assert!(!camelot_compatible("8A", ""));
+        assert!(!camelot_compatible("é", "8A"));
+        assert!(camelot_compatible("8A", "9A"));
+        assert!(camelot_compatible("8A", "8B"));
+        assert!(camelot_compatible("", ""));
+    }
+
     use super::*;
 
     #[test]
