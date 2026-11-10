@@ -114,7 +114,9 @@ fn make_wparam(low: usize, high: usize) -> WPARAM {
 }
 
 fn make_lparam(low: isize, high: isize) -> LPARAM {
-    let combined = (high << 16) | low;
+    // Each coordinate is a 16-bit word: a negative x (a monitor left of the
+    // primary) must not spill its sign bits into the y word.
+    let combined = ((high & 0xFFFF) << 16) | (low & 0xFFFF);
     LPARAM(combined)
 }
 
@@ -704,5 +706,38 @@ pub fn stop_input_forwarding(hwnd: HWND) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lparam_tests {
+    use super::make_lparam;
+
+    fn x_of(l: isize) -> i16 {
+        (l & 0xFFFF) as u16 as i16
+    }
+
+    fn y_of(l: isize) -> i16 {
+        ((l >> 16) & 0xFFFF) as u16 as i16
+    }
+
+    #[test]
+    fn a_negative_x_does_not_corrupt_y() {
+        let l = make_lparam(-5, 300).0;
+        assert_eq!(x_of(l), -5);
+        assert_eq!(y_of(l), 300);
+    }
+
+    #[test]
+    fn both_coordinates_may_be_negative() {
+        let l = make_lparam(-5, -7).0;
+        assert_eq!(x_of(l), -5);
+        assert_eq!(y_of(l), -7);
+    }
+
+    #[test]
+    fn positive_coordinates_are_unchanged() {
+        let l = make_lparam(1919, 1079).0;
+        assert_eq!((x_of(l), y_of(l)), (1919, 1079));
     }
 }
