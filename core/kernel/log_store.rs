@@ -130,7 +130,7 @@ impl LogStore {
                 Err(_) => continue,
             };
             if let Some(lf) = level_filter {
-                if !lf.is_empty() && entry.level.to_lowercase() != *lf {
+                if !lf.is_empty() && !entry.level.eq_ignore_ascii_case(lf) {
                     continue;
                 }
             }
@@ -409,6 +409,27 @@ mod tests {
         assert_eq!(removed, 2);
         assert_eq!(store.list(10, None, None).unwrap().len(), 0);
         assert_eq!(store.stats().unwrap()["total"], 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn level_filter_ignores_case_of_the_request() {
+        let dir = std::env::temp_dir().join(format!("test_shell_logs_level_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = LogStore::open(dir.join("logs.redb")).unwrap();
+        store
+            .insert_batch(&[entry(1, 1000, "INFO", "backend", "a"), entry(2, 2000, "ERROR", "backend", "b")])
+            .unwrap();
+
+        // The documented form is upper case; the stored level is upper case too.
+        for spelling in ["ERROR", "error", "Error"] {
+            let hits = store.list(10, Some(spelling), None).unwrap();
+            assert_eq!(hits.len(), 1, "level filter {spelling:?}");
+            assert_eq!(hits[0].message, "b");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
