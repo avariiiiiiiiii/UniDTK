@@ -272,15 +272,17 @@ fn parse_config(input: &str, mut config: AppConfig) -> AppConfig {
 }
 
 fn clean_value(value: &str) -> String {
-    let value = value.split('#').next().unwrap_or(value).trim();
-    if value.len() >= 2
-        && ((value.starts_with('\'') && value.ends_with('\''))
-            || (value.starts_with('"') && value.ends_with('"')))
-    {
-        value[1..value.len() - 1].to_string()
-    } else {
-        value.to_string()
+    let value = value.trim();
+    // A quoted value ends at its closing quote: a '#' inside it is part of the
+    // value (a folder named "C#Pop"), and only text after the quote is a comment.
+    for quote in ['\'', '"'] {
+        if let Some(rest) = value.strip_prefix(quote) {
+            if let Some(end) = rest.find(quote) {
+                return rest[..end].to_string();
+            }
+        }
     }
+    value.split('#').next().unwrap_or(value).trim().to_string()
 }
 
 fn format_config(config: &AppConfig) -> String {
@@ -435,4 +437,22 @@ fn known_binary_locations(name: &str) -> Vec<PathBuf> {
         }
     }
     candidates
+}
+
+#[cfg(test)]
+mod clean_value_tests {
+    use super::clean_value;
+
+    #[test]
+    fn hash_inside_a_quoted_value_is_kept() {
+        assert_eq!(clean_value("'C:\\Music\\C#Pop'"), "C:\\Music\\C#Pop");
+        assert_eq!(clean_value("\"a#b\""), "a#b");
+    }
+
+    #[test]
+    fn a_comment_after_the_value_is_dropped() {
+        assert_eq!(clean_value("'x' # my library"), "x");
+        assert_eq!(clean_value("5 # comment"), "5");
+        assert_eq!(clean_value("true"), "true");
+    }
 }
