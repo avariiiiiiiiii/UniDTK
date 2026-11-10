@@ -240,7 +240,12 @@ fn is_packaged_aumid(parsing_name: &str) -> bool {
 /// A packaged app shortcut (`shell:AppsFolder\<AUMID>`): launched and drawn
 /// by the shell itself, never "missing" on disk.
 pub fn is_packaged_app(target: &str) -> bool {
-    target.len() > APPS_FOLDER.len() && target[..APPS_FOLDER.len()].eq_ignore_ascii_case(APPS_FOLDER)
+    // `get` answers None when the cut falls inside a multi-byte character
+    // (a Cyrillic path), where slicing with [..n] would panic.
+    target
+        .get(..APPS_FOLDER.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(APPS_FOLDER))
+        && target.len() > APPS_FOLDER.len()
 }
 
 /// Programs of the Start menu (all users and the current one) and Store apps, by name.
@@ -481,6 +486,15 @@ pub fn migrate_copied_shortcuts(db: &crate::unidtk_db::UniDtkDatabase) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_app_check_survives_a_path_with_multibyte_characters() {
+        // The cut at APPS_FOLDER.len() falls inside the Cyrillic letter.
+        let target = format!("{}{}z", "x".repeat(APPS_FOLDER.len() - 1), "я");
+        assert!(!is_packaged_app(&target));
+        assert!(!is_packaged_app(""));
+        assert!(is_packaged_app(&format!("{APPS_FOLDER}Some.App_123")));
+    }
 
     #[test]
     fn url_detection_skips_drive_letters() {
