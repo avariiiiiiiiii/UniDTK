@@ -114,7 +114,25 @@ export class ContextMenu {
         const isDir = item?.is_dir || item?.isDir;
 
         if (type === 'file') {
-            if (isDir) {
+            if (item?.is_root) {
+                // A drive or a place on "This PC": it can be opened, not changed.
+                this.element.innerHTML = `
+                    <div class="cm-row">
+                        <div class="cm-item" data-action="open">
+                            <img src="${explorerAsset('icons/ui/cm-open.svg')}" class="cm-icon" alt="">
+                            <span class="cm-label">Открыть</span>
+                        </div>
+                        <div class="cm-item" data-action="open-terminal">
+                            <img src="${explorerAsset('icons/ui/cm-terminal.svg')}" class="cm-icon" alt="">
+                            <span class="cm-label">Терминал</span>
+                        </div>
+                        <div class="cm-item" data-action="copy-path">
+                            <img src="${explorerAsset('icons/ui/cm-copy-path.svg')}" class="cm-icon" alt="">
+                            <span class="cm-label">Копировать путь</span>
+                        </div>
+                    </div>
+                `;
+            } else if (isDir) {
                 this.element.innerHTML = `
                     <div class="cm-row">
                         <div class="cm-item" data-action="open">

@@ -136,7 +136,8 @@ class NothingExplorer {
                 total_space: null,
                 free_space: null,
             }));
-            this._cachedDrives = drives;
+            // A stop-gap list without labels or sizes: never cached, so the next
+            // call asks for the real drives again.
             return drives;
         } catch (e) {
             console.error('get_raw_drives error:', e);
@@ -313,8 +314,7 @@ class NothingExplorer {
         if (path === '::MY_PC::') {
             tab.path = path;
             tab.title = 'Этот компьютер';
-            tab.history.push(path);
-            tab.historyIndex = tab.history.length - 1;
+            this.recordVisit(tab, path);
             tab.items = [];
             this.updatePathBar(path);
             this.updateNavButtons();
@@ -346,8 +346,7 @@ class NothingExplorer {
             const filtered = items.filter(i => String(i?.name || '').toLowerCase() !== 'desktop.ini');
             tab.path = path;
             tab.title = this.tabManager.getFolderName(path);
-            tab.history.push(path);
-            tab.historyIndex = tab.history.length - 1;
+            this.recordVisit(tab, path);
 
             const sorted = this.sortItems(filtered, this.sortColumn, this.sortAscending);
             tab.items = sorted;
@@ -968,7 +967,7 @@ class NothingExplorer {
                     if (!this.selectedFiles.has(item.path)) {
                         this.selectFile(item, e);
                     }
-                    this.contextMenu.show(e.clientX, e.clientY, 'file', item);
+                    this.contextMenu.show(e.clientX, e.clientY, 'file', { ...item, is_dir: true, is_root: true });
                 });
 
                 container.appendChild(el);
@@ -1019,7 +1018,7 @@ class NothingExplorer {
                     if (!this.selectedFiles.has(item.path)) {
                         this.selectFile(item, e);
                     }
-                    this.contextMenu.show(e.clientX, e.clientY, 'file', item);
+                    this.contextMenu.show(e.clientX, e.clientY, 'file', { ...item, is_dir: true, is_root: true });
                 });
 
                 container.appendChild(row);
@@ -1982,8 +1981,7 @@ class NothingExplorer {
 
         // Enter opens the selected item (folder stays in-shell).
         document.addEventListener('keydown', (e) => {
-            const overlay = document.querySelector('.explorer-overlay');
-            if (overlay && !overlay.classList.contains('visible')) return;
+            if (!this.isShown()) return;
             if (e.key !== 'Enter') return;
             if (e.target?.closest('input, textarea, [contenteditable]')) return;
             const path = [...this.selectedFiles][0];
@@ -2032,6 +2030,9 @@ class NothingExplorer {
         });
 
         document.addEventListener('keydown', (e) => {
+            // The explorer is an overlay: its hotkeys must not act on a hidden
+            // selection while the user works on the desktop.
+            if (!this.isShown()) return;
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
             if (e.key === 'Delete') this.deleteSelected();
@@ -2404,9 +2405,29 @@ class NothingExplorer {
         container.classList.remove('hidden');
     }
 
+    /**
+     * Writes a navigation into the tab history. Opening the folder that is
+     * already current (refresh, delete, rename, paste) is not a visit; a new
+     * folder drops the forward entries, as a browser does.
+     */
+    recordVisit(tab, path) {
+        if (tab.history[tab.historyIndex] === path) return;
+        tab.history = tab.history.slice(0, tab.historyIndex + 1);
+        tab.history.push(path);
+        tab.historyIndex = tab.history.length - 1;
+    }
+
+    /** True while the explorer overlay is on screen. */
+    isShown() {
+        const overlay = document.querySelector('.explorer-overlay');
+        return !overlay || overlay.classList.contains('visible');
+    }
+
     async deleteSelected() {
         const paths = [...this.selectedFiles];
         if (paths.length === 0) return;
+        // "This PC" lists drives and places, not files: nothing there is deletable.
+        if (this.tabManager.getActiveTab()?.path === '::MY_PC::') return;
 
         for (const p of paths) {
             try {
@@ -2573,17 +2594,6 @@ class NothingExplorer {
             this.showOperationError('Не удалось вставить', failures.join('; '));
         }
         this.refreshCurrent();
-    }
-
-    selectAll() {
-        const tab = this.tabManager.getActiveTab();
-        if (!tab) return;
-
-        this.selectedFiles.clear();
-        document.querySelectorAll('.file-item, .file-row').forEach(el => {
-            el.classList.add('selected');
-            this.selectedFiles.add(el.dataset.path);
-        });
     }
 }
 

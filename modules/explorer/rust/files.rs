@@ -307,7 +307,17 @@ fn copy_recursive(from: &Path, to: &Path) -> Result<(), String> {
     }
 }
 
+/// A drive root (`C:\`, `C:`) or an empty path: never a target for delete.
+fn is_filesystem_root(path: &str) -> bool {
+    let trimmed = path.trim().trim_end_matches(['\\', '/']);
+    let bytes = trimmed.as_bytes();
+    trimmed.is_empty() || (bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
 pub fn delete_to_recycle_bin(path: &str) -> Result<(), String> {
+    if is_filesystem_root(path) {
+        return Err(format!("refusing to delete a drive root: {path:?}"));
+    }
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::HWND;
@@ -366,6 +376,17 @@ pub fn unique_path(dir: &str, name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drive_roots_are_never_deleted() {
+        for root in ["C:\\", "C:", "d:/", "", "  "] {
+            assert!(is_filesystem_root(root), "{root:?} is a root");
+            assert!(delete_to_recycle_bin(root).is_err(), "{root:?} must be refused");
+        }
+        for ordinary in ["C:\\Users", "D:\\a\\b.txt", "C:\\Windows\\"] {
+            assert!(!is_filesystem_root(ordinary), "{ordinary:?} is not a root");
+        }
+    }
 
     /// Scratch directory under the system temp dir, removed on drop (also on panic).
     struct Scratch(PathBuf);
