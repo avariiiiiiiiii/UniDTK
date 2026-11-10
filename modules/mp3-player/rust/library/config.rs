@@ -128,18 +128,19 @@ impl ConfigStore {
     where
         F: FnOnce(&mut AppConfig),
     {
-        let snapshot = {
-            let mut config = self.inner.lock().expect("config lock poisoned");
-            apply(&mut config);
-            *config = config.clone().normalized();
-            config.clone()
-        };
+        // The lock is held through the write: two mutations cannot reach the
+        // disk in the opposite order of the memory.
+        let mut config = self.inner.lock().expect("config lock poisoned");
+        apply(&mut config);
+        *config = config.clone().normalized();
+        let snapshot = config.clone();
         self.write_to_disk(&snapshot)?;
         Ok(snapshot)
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let config = self.get().normalized();
+        let guard = self.inner.lock().expect("config lock poisoned");
+        let config = guard.clone().normalized();
         self.write_to_disk(&config)
     }
 
@@ -454,5 +455,41 @@ mod clean_value_tests {
         assert_eq!(clean_value("'x' # my library"), "x");
         assert_eq!(clean_value("5 # comment"), "5");
         assert_eq!(clean_value("true"), "true");
+    }
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_mutations_leave_the_disk_equal_to_memory() {
+        let dir = std::env::temp_dir().join(format!("mp3_config_race_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let store = ConfigStore {
+            path: Arc::new(path.clone()),
+            inner: Arc::new(Mutex::new(AppConfig::default())),
+        };
+
+        let workers: Vec<_> = (0..8usize)
+            .map(|t| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    for i in 0..60usize {
+                        let value = (t * 60 + i) % 9 + 1;
+                        store.mutate(|config| config.sync_parallelism = value).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let on_disk = parse_config(&fs::read_to_string(&path).unwrap(), AppConfig::default());
+        assert_eq!(on_disk.sync_parallelism, store.get().sync_parallelism);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
