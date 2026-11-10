@@ -1108,9 +1108,27 @@ pub fn find_thumbnail_for(audio_path: &Path) -> Option<String> {
 }
 
 fn short_source_label(url: &str) -> String {
-    if url.len() <= 54 {
+    if url.chars().count() <= 54 {
         url.to_string()
     } else {
-        format!("{}...", &url[..54])
+        format!("{}...", url.chars().take(54).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::short_source_label;
+
+    #[test]
+    fn a_long_url_with_multibyte_characters_is_cut_on_a_character() {
+        let url = "я".repeat(60);
+        let label = short_source_label(&url);
+        assert_eq!(label.chars().count(), 57);
+        assert!(label.ends_with("..."));
+    }
+
+    #[test]
+    fn a_short_url_is_unchanged() {
+        assert_eq!(short_source_label("https://example.com/list"), "https://example.com/list");
     }
 }
