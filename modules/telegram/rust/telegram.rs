@@ -412,12 +412,10 @@ pub struct TelegramEditMessageRequest {
 pub struct TelegramDeleteMessagesRequest {
     pub chat_id: String,
     pub message_ids: Vec<String>,
-    #[serde(default = "default_true")]
+    /// Delete for every participant. Absent means for me only: the destructive
+    /// choice has to be asked for.
+    #[serde(default)]
     pub revoke: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -456,7 +454,7 @@ pub struct TelegramDeleteChatHistoryRequest {
     pub chat_id: String,
     #[serde(default)]
     pub remove_from_chat_list: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub revoke: bool,
 }
 
@@ -6156,6 +6154,19 @@ mod tests {
         let path = std::env::temp_dir().join(format!("telegram_legacy_{tag}_{}.json", std::process::id()));
         std::fs::write(&path, "{}").unwrap();
         path
+    }
+
+    #[test]
+    fn a_delete_request_without_revoke_is_not_for_everyone() {
+        let messages: TelegramDeleteMessagesRequest =
+            serde_json::from_str(r#"{"chatId":"1","messageIds":["2"]}"#).unwrap();
+        assert!(!messages.revoke);
+        let history: TelegramDeleteChatHistoryRequest =
+            serde_json::from_str(r#"{"chatId":"1","removeFromChatList":true}"#).unwrap();
+        assert!(!history.revoke);
+        let asked: TelegramDeleteMessagesRequest =
+            serde_json::from_str(r#"{"chatId":"1","messageIds":["2"],"revoke":true}"#).unwrap();
+        assert!(asked.revoke);
     }
 
     #[test]
