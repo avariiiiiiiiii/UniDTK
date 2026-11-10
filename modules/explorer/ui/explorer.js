@@ -7,6 +7,37 @@ import { PreviewPanel } from './preview.js';
 import { TabManager } from './tabs.js';
 import { showToast } from '../../toast.js';
 
+/**
+ * Splits a Windows path into its root and the folders below it. A drive root is
+ * `C:\`; a UNC root is `\\server\share\` and keeps both leading backslashes, so a
+ * path built from the parts is still a valid path.
+ */
+export function winPathParts(path) {
+    const sep = '\\';
+    const text = String(path || '').replace(/\//g, sep);
+    const segs = text.split(sep).filter(Boolean);
+    if (text.startsWith(sep + sep) && segs.length >= 2) {
+        return { root: sep + sep + segs[0] + sep + segs[1] + sep, rest: segs.slice(2) };
+    }
+    if (/^[A-Za-z]:$/.test(segs[0] || '')) {
+        return { root: segs[0].toUpperCase() + sep, rest: segs.slice(1) };
+    }
+    return { root: '', rest: segs };
+}
+
+/** The folder that contains `path`; null at a drive or share root, where "This PC" comes next. */
+export function parentOf(path) {
+    const { root, rest } = winPathParts(path);
+    if (rest.length === 0) return null;
+    if (rest.length === 1) return root || null;
+    return root + rest.slice(0, -1).join('\\');
+}
+
+/** `dir` plus one name, with exactly one separator between them. */
+export function joinWinPath(dir, name) {
+    return dir.endsWith('\\') ? dir + name : dir + '\\' + name;
+}
+
 // Items beyond this index render without the staggered appear animation.
 const APPEAR_LIMIT = 24;
 // Large folders render the first screenful at once, the rest per frame
@@ -383,7 +414,7 @@ class NothingExplorer {
                 this.showEmpty(true, String(e?.message || e || 'Нет доступа к этому расположению'));
             }
         } finally {
-            this.showLoading(false);
+            if (this._isNavigationCurrent(tab, navToken)) this.showLoading(false);
         }
     }
 
@@ -1055,7 +1086,7 @@ class NothingExplorer {
     }
 
     getDrivesItems() {
-        return this._cachedDrives || [];
+        return this._driveItems || [];
     }
 
     renderFiles(items) {
@@ -1456,17 +1487,18 @@ class NothingExplorer {
             return;
         }
 
-        const parts = path.split(/[\\/]/).filter(Boolean);
-        let cumPath = '';
+        const { root, rest } = winPathParts(path);
+        const parts = [];
+        if (root) parts.push({ label: root.replace(/\\$/, ''), target: root });
+        let walked = root;
+        for (const name of rest) {
+            walked = joinWinPath(walked, name);
+            parts.push({ label: name, target: walked });
+        }
 
-        parts.forEach((part, i) => {
-            if (i === 0 && /^[A-Za-z]:?$/.test(part)) {
-                const driveLetter = part.replace(':', '').toUpperCase();
-                cumPath = driveLetter + ':\\';
-                part = driveLetter + ':';
-            } else {
-                cumPath += (i === 0 ? '' : (cumPath.endsWith('\\') ? '' : '\\')) + part;
-            }
+        parts.forEach((crumb, i) => {
+            const part = crumb.label;
+            const cumPath = crumb.target;
             const isLast = i === parts.length - 1;
             const seg = document.createElement('span');
             seg.className = 'path-segment' + (isLast ? ' active' : '');
@@ -1654,7 +1686,7 @@ class NothingExplorer {
                 } catch {}
             }
 
-            this._cachedDrives = (drives || []).map((d) => ({
+            this._driveItems = (drives || []).map((d) => ({
                 name: d.display,
                 path: d.path,
                 icon: 'drive.svg',
@@ -2044,7 +2076,8 @@ class NothingExplorer {
             // The explorer is an overlay: its hotkeys must not act on a hidden
             // selection while the user works on the desktop.
             if (!this.isShown()) return;
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+            if (e.key === 'F5' || e.key === 'Backspace') e.preventDefault();
 
             if (e.key === 'Delete') this.deleteSelected();
             if (e.key === 'F2') this.renameSelected();
@@ -2241,17 +2274,7 @@ class NothingExplorer {
         const tab = this.tabManager.getActiveTab();
         if (!tab || tab.path === '::MY_PC::') return;
 
-        const parts = tab.path.split(/[\\/]/).filter(Boolean);
-        if (parts.length > 1) {
-            parts.pop();
-            let parentPath = parts.join('\\');
-            if (/^[A-Za-z]:$/.test(parentPath)) {
-                parentPath += '\\';
-            }
-            this.navigateTo(parentPath, null, 'up');
-        } else {
-            this.navigateTo('::MY_PC::', null, 'up');
-        }
+        this.navigateTo(parentOf(tab.path) ?? '::MY_PC::', null, 'up');
     }
 
     async navigateToSilent(path, transitionType = null, origin = null) {
@@ -2339,8 +2362,11 @@ class NothingExplorer {
             }
         } catch (e) {
             console.error('Navigation error:', e);
+            if (this._isNavigationCurrent(tab, navToken)) {
+                showToast(`Не удалось открыть: ${e?.message || e}`, { tone: 'error' });
+            }
         } finally {
-            this.showLoading(false);
+            if (!tab || this._isNavigationCurrent(tab, navToken)) this.showLoading(false);
         }
     }
 
@@ -2399,14 +2425,9 @@ class NothingExplorer {
             container.querySelectorAll('.search-result-item').forEach(el => {
                 el.addEventListener('click', () => {
                     const path = el.dataset.path;
-                    const parts = path.split(/[\\/]/).filter(Boolean);
-                    parts.pop();
-                    let parentPath = parts.join('\\');
-                    if (/^[A-Za-z]:$/.test(parentPath)) {
-                        parentPath += '\\';
-                    }
-                    if (parentPath) {
-                        this.navigateTo(parentPath);
+                    const parent = parentOf(path);
+                    if (parent) {
+                        this.navigateTo(parent);
                     }
                     document.getElementById('searchInput').value = '';
                     this.closeSearch();
@@ -2502,8 +2523,14 @@ class NothingExplorer {
             labelEl.style.display = originalDisplay;
 
             if (commit && newName && newName !== oldName) {
-                const dir = path.split(/[\\/]/).slice(0, -1).join('\\');
-                const newPath = dir + '\\' + newName;
+                // A name is one path segment: no separators, no characters Windows forbids.
+                if (/[\\/:*?"<>|]/.test(newName)) {
+                    showToast('Имя не может содержать \\ / : * ? " < > |', { tone: 'error' });
+                    return;
+                }
+                const dir = parentOf(path);
+                if (dir === null) return;
+                const newPath = joinWinPath(dir, newName);
                 try {
                     await invoke('rename_path', { from: path, to: newPath });
                     this.selectedFiles.clear();

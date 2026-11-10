@@ -49,6 +49,9 @@ export class PreviewPanel {
         const resultEl = document.getElementById('hashResult');
         resultEl.classList.remove('hidden');
         resultEl.textContent = 'Подсчёт…';
+        // The answer belongs to this file: if another one is selected meanwhile,
+        // its digest must not appear under the new selection.
+        const file = this.currentFile;
 
         try {
             let hash;
@@ -57,8 +60,10 @@ export class PreviewPanel {
             } else {
                 hash = await invoke('hash_file_sha256', { path: this.currentFile.path });
             }
+            if (this.currentFile !== file) return;
             resultEl.textContent = `${type.toUpperCase()}: ${hash}`;
         } catch (e) {
+            if (this.currentFile !== file) return;
             resultEl.textContent = 'Не удалось вычислить хеш';
         }
     }
