@@ -1788,7 +1788,11 @@ listen("wallpaper-wheel", (event) => {
   const glyphBar = el?.closest?.(".glyph-bar-widget, .gb-container, .gb-seg");
   if (glyphBar && !editMode) {
     const notches = wheelNotches("glyph-bar", delta);
-    if (notches) nudgeSystemVolume(notches * 10);
+    if (notches) {
+      import("../modules/glyph-bar/widget.js")
+        .then((m) => m.nudgeSystemVolume(notches * 10))
+        .catch((err) => logFrontend(`glyph-bar wheel failed: ${err?.message || err}`));
+    }
     return;
   }
 
@@ -1828,7 +1832,7 @@ document.getElementById("openMenu")?.addEventListener("click", (e) => {
 // ─── Visibility-driven refresh ───
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
-    try { updateClockTime(); } catch {}
+    import("../modules/clock/widget.js").then((m) => m.updateClockTime()).catch(() => {});
   }
 });
 
@@ -2485,9 +2489,11 @@ window.addEventListener("telegram-send-file", async (e) => {
   if (!card.classList.contains("expanded")) {
     import("../modules/telegram/widget.js").then((m) => m.toggleTelegramWidget(card, widgetId)).catch(() => {});
   }
+  // The runtime state belongs to the Telegram module: read it from there.
+  const tg = await import("../modules/telegram/widget.js");
+  const telegramRuntime = tg.telegramRuntime;
   if (!telegramRuntime.chatsLoaded && !telegramRuntime.chats?.length) {
     if (!telegramRuntime.loadingChats) {
-      const tg = await import("../modules/telegram/widget.js");
       await tg.refreshTelegramChats(card, widgetId);
     } else {
       for (let i = 0; i < 30; i++) {
