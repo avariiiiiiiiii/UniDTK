@@ -3373,10 +3373,27 @@ pub fn get_chat_pinned_message(
 /// the leading error code, not by substring — "…1404…" or a 404-like number
 /// inside the message text must not pass.
 fn is_no_pinned_message_error(err: &str) -> bool {
-    if err.split(':').next().map(str::trim) == Some("404") {
+    err.split(':').next().map(str::trim) == Some("404")
+}
+
+/// Title heuristic of the community fallback: a chat belongs to the parent
+/// when both carry the community word, or when its title starts with the
+/// part of the parent's title before the first `|`. An empty part matches
+/// nothing (it used to match every chat).
+fn same_community_by_title(parent_title: &str, title: &str) -> bool {
+    if parent_title.is_empty() {
+        return false;
+    }
+    if parent_title.contains("Элиор") && title.contains("Элиор") {
         return true;
     }
-    err.to_ascii_lowercase().contains("not found")
+    match parent_title.split_once('|') {
+        Some((prefix, _)) => {
+            let prefix = prefix.trim();
+            !prefix.is_empty() && title.starts_with(prefix)
+        }
+        None => false,
+    }
 }
 
 /// Log pin-request failures at most once per
@@ -4011,10 +4028,7 @@ pub fn get_forum_topics(
                     return true;
                 }
             }
-            if !parent_title.is_empty() && (
-                (parent_title.contains("Элиор") && c.title.contains("Элиор")) ||
-                (parent_title.contains('|') && c.title.starts_with(parent_title.split('|').next().unwrap_or("").trim()))
-            ) {
+            if same_community_by_title(parent_title, &c.title) {
                 return true;
             }
             false
@@ -6136,6 +6150,24 @@ mod tests {
         let path = std::env::temp_dir().join(format!("telegram_legacy_{tag}_{}.json", std::process::id()));
         std::fs::write(&path, "{}").unwrap();
         path
+    }
+
+    #[test]
+    fn only_error_code_404_means_no_pinned_message() {
+        assert!(is_no_pinned_message_error("404: Message not found"));
+        assert!(!is_no_pinned_message_error("400: Chat not found"));
+        assert!(!is_no_pinned_message_error("1404: something"));
+        assert!(!is_no_pinned_message_error("request timed out"));
+    }
+
+    #[test]
+    fn an_empty_title_prefix_matches_no_chat() {
+        assert!(!same_community_by_title("| Chat", "Anything"));
+        assert!(!same_community_by_title("  | Chat", "Anything"));
+        assert!(!same_community_by_title("", "Anything"));
+        assert!(same_community_by_title("Club | Chat", "Club news"));
+        assert!(!same_community_by_title("Club | Chat", "Other"));
+        assert!(!same_community_by_title("Club", "Club news"));
     }
 
     #[test]
