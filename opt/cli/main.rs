@@ -744,6 +744,16 @@ fn resolve_press(body: &str) -> Result<(PressKey, u32), (String, String)> {
     Ok((spec, modifiers))
 }
 
+/// The `--json` receipt of `gui` stays on stdout whatever happened; a failed step
+/// still ends the command with a non-zero exit code, as the plain output does.
+fn gui_json_outcome(failed: bool, doc: String) -> Result<String, String> {
+    if failed {
+        println!("{doc}");
+        return Err("gui: a step failed (see the JSON receipt on stdout)".to_string());
+    }
+    Ok(doc)
+}
+
 fn gui_cmd(args: &[String]) -> Result<String, String> {
     let json_flag = args.iter().any(|a| a == "--json");
     let force = args.iter().any(|a| a == "--force");
@@ -917,11 +927,12 @@ fn gui_cmd(args: &[String]) -> Result<String, String> {
     }
 
     if json_flag {
-        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+        let doc = serde_json::to_string_pretty(&serde_json::json!({
             "ok": !failed,
             "steps": receipts,
         }))
-        .unwrap_or_default());
+        .unwrap_or_default();
+        return gui_json_outcome(failed, doc);
     }
 
     let mut out = String::new();
@@ -3622,6 +3633,9 @@ fn motion_budget(out: &mut String) -> bool {
             failed = true;
             out.push_str(&format!("    [FAIL] {}: Escape did not close it; budget stopped\n", target.label));
             break;
+        } else if open.is_null() || close.is_null() {
+            failed = true;
+            out.push_str(&format!("    [FAIL] {}: the motion probe returned no reading\n", target.label));
         } else {
             let (open_frame, open_task) = phase(&open);
             let (close_frame, close_task) = phase(&close);
@@ -3836,6 +3850,12 @@ mod tests {
             !result.contains("@INSTALL_DIR@"),
             "placeholder must be fully substituted"
         );
+    }
+
+    #[test]
+    fn gui_json_receipt_of_a_failed_step_is_an_error() {
+        assert!(gui_json_outcome(true, "{}".to_string()).is_err());
+        assert_eq!(gui_json_outcome(false, "{}".to_string()).unwrap(), "{}");
     }
 
     #[test]
