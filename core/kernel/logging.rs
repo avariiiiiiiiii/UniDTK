@@ -106,9 +106,31 @@ pub fn log_frontend(message: &str, level: Option<&str>) {
         level: normalize_level(level).to_string(),
         source: "frontend".to_string(),
         module: "frontend".to_string(),
-        message: message.to_string(),
+        message: clamp_message(message, MAX_FRONTEND_MESSAGE_BYTES),
         meta: None,
     });
+}
+
+/// The page is untrusted input to the journal: one message may not be larger
+/// than this, or a single call could fill the journal and the log file.
+const MAX_FRONTEND_MESSAGE_BYTES: usize = 8 * 1024;
+
+/// Cuts a message to `max` bytes on a character boundary and says how much was left out.
+fn clamp_message(message: &str, max: usize) -> String {
+    if message.len() <= max {
+        return message.to_string();
+    }
+    let mut end = max;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... [{} more bytes]", &message[..end], message.len() - end)
+}
+
+/// One journal entry is one line of `unidtk.log`: a line break inside a message
+/// (a pasted stack trace, or text imitating a log line) must not start a new line.
+fn single_line(message: &str) -> String {
+    message.replace("\r\n", " | ").replace(['\r', '\n'], " | ")
 }
 
 /// List log entries (newest first) with optional filters.
@@ -266,7 +288,7 @@ fn append_file(entries: &[LogEntry]) {
         } else {
             ""
         };
-        let _ = writeln!(file, "[{timestamp}] {prefix}{}", entry.message);
+        let _ = writeln!(file, "[{timestamp}] {prefix}{}", single_line(&entry.message));
     }
     let _ = file.flush();
 }
@@ -304,7 +326,25 @@ fn normalize_level(level: Option<&str>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_level;
+    use super::{clamp_message, normalize_level, single_line};
+
+    #[test]
+    fn an_oversized_message_is_cut_on_a_character_and_says_so() {
+        let long = "я".repeat(100);
+        let cut = clamp_message(&long, 11);
+        assert!(cut.starts_with(&"я".repeat(5)));
+        assert!(cut.ends_with("more bytes]"));
+        assert!(cut.len() < long.len());
+        assert_eq!(clamp_message("short", 11), "short");
+    }
+
+    #[test]
+    fn a_line_break_in_a_message_does_not_start_a_new_log_line() {
+        let forged = "first\r\n[2026-01-01 00:00:00.000] setup: done\nthird";
+        let line = single_line(forged);
+        assert!(!line.contains('\n') && !line.contains('\r'));
+        assert!(line.contains("first | [2026-01-01"));
+    }
 
     #[test]
     fn levels_are_normalized_to_the_three_the_store_keeps() {

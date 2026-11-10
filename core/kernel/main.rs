@@ -1613,13 +1613,17 @@ fn request_wallpaper_attach(app: &tauri::AppHandle, force: bool) {
     }
     let handle = app.clone();
     thread::spawn(move || {
-        struct ResetFlag;
+        // Only the attach that raised the flag may lower it: a forced attach never
+        // raised it, and clearing it would let a second loop start beside a running one.
+        struct ResetFlag(bool);
         impl Drop for ResetFlag {
             fn drop(&mut self) {
-                ATTACH_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+                if self.0 {
+                    ATTACH_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
             }
         }
-        let _guard = ResetFlag;
+        let _guard = ResetFlag(!force);
 
         // Phase 1 (up to ~15 s): strictly wait for WorkerW, disallowing Progman fallback
         // to avoid black screen covering wallpaper during logon initialization.
@@ -2447,8 +2451,13 @@ fn main() {
                         request_wallpaper_attach(app, true);
                     }
                     "quit" => {
-                        let _ = wallpaper::reset();
-                        app.exit(0);
+                        // The same path as the menu's Exit: it waits, bounded, for the
+                        // elevated helper to stop the VPN. The wait sleeps, so it runs
+                        // off the event loop.
+                        let app = app.clone();
+                        thread::spawn(move || {
+                            let _ = quit_app(app);
+                        });
                     }
                     _ => {}
                 })

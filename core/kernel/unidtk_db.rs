@@ -209,9 +209,14 @@ impl UniDtkDatabase {
         let table = txn.open_table(FOLDERS).map_err(|e| e.to_string())?;
         let mut result = Vec::new();
         for item in table.iter().map_err(|e| e.to_string())? {
-            let (_key, val) = item.map_err(|e| e.to_string())?;
-            if let Ok(record) = serde_json::from_slice::<FolderRecord>(val.value()) {
-                result.push(record);
+            let (key, val) = item.map_err(|e| e.to_string())?;
+            match serde_json::from_slice::<FolderRecord>(val.value()) {
+                Ok(record) => result.push(record),
+                // A record that cannot be read is skipped, not hidden: say which one.
+                Err(error) => crate::log_line(format!(
+                    "folders: record {:?} cannot be read and is skipped: {error}",
+                    key.value()
+                )),
             }
         }
         result.sort_by(|a, b| a.name.cmp(&b.name));
