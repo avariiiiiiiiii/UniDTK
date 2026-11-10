@@ -55,6 +55,11 @@ const CHAT_PINNED_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(300);
 
 static TELEGRAM_DB: OnceLock<Arc<dyn unidtk_api::ModuleDb>> = OnceLock::new();
 
+/// `@extra` of the fire-and-forget getMe / getUser requests whose reply sets
+/// our own user id. Far above the request counter (`alloc_extra` counts from 1),
+/// so no reply to an ordinary request can ever carry it.
+const EXTRA_MY_USER: u64 = 1 << 50;
+
 const DEFAULT_TELEGRAM_API_ID: &str = "38708022";
 const DEFAULT_TELEGRAM_API_HASH: &str = "0d82dab78dc08e1393ee1e609c49b41d";
 
@@ -1457,7 +1462,7 @@ impl TelegramInner {
                         let _ = self.send(json!({
                             "@type": "getUser",
                             "user_id": uid,
-                            "@extra": 1001
+                            "@extra": EXTRA_MY_USER
                         }));
                     }
                 }
@@ -1487,7 +1492,7 @@ impl TelegramInner {
             // Direct getUser response (fire-and-forget send has no waiter).
             Some("user") => {
                 let extra = value.get("@extra").and_then(|e| e.as_u64().or_else(|| e.as_i64().map(|v| v as u64)));
-                if extra == Some(1001) {
+                if extra == Some(EXTRA_MY_USER) {
                     if let Some(uid) = value.get("id").and_then(Value::as_i64) {
                         self.my_user_id = Some(uid);
                     }
@@ -1869,7 +1874,7 @@ impl TelegramInner {
                 }));
                 let _ = self.send(json!({
                     "@type": "getMe",
-                    "@extra": 1001
+                    "@extra": EXTRA_MY_USER
                 }));
                 "Authorized.".into()
             }
@@ -2588,7 +2593,7 @@ fn ensure_started(inner: &Arc<Mutex<TelegramInner>>) -> Result<TelegramStatus, S
         if g.authorized && g.td.is_some() {
             let _ = g.send(json!({
                 "@type": "getMe",
-                "@extra": 1001
+                "@extra": EXTRA_MY_USER
             }));
         }
     }
@@ -6131,6 +6136,13 @@ mod tests {
         let path = std::env::temp_dir().join(format!("telegram_legacy_{tag}_{}.json", std::process::id()));
         std::fs::write(&path, "{}").unwrap();
         path
+    }
+
+    #[test]
+    fn the_my_user_marker_is_outside_the_request_counter() {
+        // The counter starts at 1; the marker used to be 1001 and collided after 1000 requests.
+        assert!(EXTRA_MY_USER > 1_000_000_000);
+        assert!(EXTRA_MY_USER < (1u64 << 53), "must survive a JSON number round trip");
     }
 
     #[test]
