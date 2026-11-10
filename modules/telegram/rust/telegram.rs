@@ -5946,14 +5946,35 @@ fn load_config() -> TelegramConfig {
         .and_then(|text| serde_json::from_str(&text).ok())
     {
         let res = with_config_defaults(config);
-        let _ = std::fs::remove_file(&path);
-        let _ = save_raw_config(&res);
+        migrate_legacy_config(&path, TELEGRAM_DB.get().is_some(), &res, save_raw_config);
         return res;
     }
 
     let config = with_config_defaults(TelegramConfig::default());
     let _ = save_raw_config(&config);
     config
+}
+
+/// Moves the legacy JSON config into the database. The file is the only copy
+/// until the database write has succeeded, so it is removed only after that.
+/// Without a database the file is the store itself and stays untouched.
+fn migrate_legacy_config(
+    path: &std::path::Path,
+    db_backed: bool,
+    config: &TelegramConfig,
+    save: impl FnOnce(&TelegramConfig) -> Result<(), String>,
+) {
+    if !db_backed {
+        return;
+    }
+    match save(config) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(path);
+        }
+        Err(error) => unidtk_api::log(format!(
+            "telegram: legacy config kept, database write failed: {error}"
+        )),
+    }
 }
 
 fn load_config_from_db(db: &dyn unidtk_api::ModuleDb) -> TelegramConfig {
@@ -6105,6 +6126,35 @@ pub fn create_module() -> Box<dyn unidtk_api::Module> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_file(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("telegram_legacy_{tag}_{}.json", std::process::id()));
+        std::fs::write(&path, "{}").unwrap();
+        path
+    }
+
+    #[test]
+    fn legacy_config_survives_a_failed_database_write() {
+        let path = legacy_file("failed");
+        migrate_legacy_config(&path, true, &TelegramConfig::default(), |_| Err("disk full".into()));
+        assert!(path.exists(), "the only copy must stay when the database write fails");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_config_is_removed_after_a_successful_database_write() {
+        let path = legacy_file("saved");
+        migrate_legacy_config(&path, true, &TelegramConfig::default(), |_| Ok(()));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn legacy_config_is_the_store_when_there_is_no_database() {
+        let path = legacy_file("nodb");
+        migrate_legacy_config(&path, false, &TelegramConfig::default(), |_| panic!("must not save"));
+        assert!(path.exists());
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn proxy_mode_defaults_to_byedpi_and_migrates_vless() {

@@ -140,6 +140,8 @@ function clearTelegramAccountState() {
   telegramRuntime.pausedAnimations.clear();
   if (telegramRuntime.customEmojiPaths) telegramRuntime.customEmojiPaths.clear();
   if (telegramRuntime.pendingCustomEmojiFetches) telegramRuntime.pendingCustomEmojiFetches.clear();
+  if (telegramRuntime.replyCache) telegramRuntime.replyCache.clear();
+  if (telegramRuntime.pendingReplies) telegramRuntime.pendingReplies.clear();
   telegramRuntime.detachedState = null;
   telegramRuntime.jumpToken = 0;
   tgMention.open = false;
@@ -2174,9 +2176,11 @@ function telegramMessageRowHtml(chat, message, prevMessage, messageMap, isAlbumM
   const rawRid = message.replyToMessageId;
   const rid = (rawRid !== null && rawRid !== undefined && rawRid !== 0 && rawRid !== "0") ? String(rawRid).trim() : "";
   if (rid) {
+    // Message ids repeat between chats: the cache is keyed by chat and message.
+    const replyKey = `${chat?.id ?? ""}:${rid}`;
     let replied = messageMap?.get(rid)
       || (chat?.id && telegramRuntime.messages.get(telegramMessageCacheKey(chat.id))?.find((m) => String(m.id) === rid))
-      || (telegramRuntime.replyCache?.get(rid));
+      || (telegramRuntime.replyCache?.get(replyKey));
 
     let replySender = "";
     let replySnippet = "";
@@ -2207,14 +2211,14 @@ function telegramMessageRowHtml(chat, message, prevMessage, messageMap, isAlbumM
     } else {
       replySender = message.replyToSender || "";
       replySnippet = message.replyToText || "";
-      if (!replySnippet && chat?.id && rid && !telegramRuntime.pendingReplies?.has(rid) && !telegramRuntime.replyCache?.has(rid)) {
-        (telegramRuntime.pendingReplies ||= new Set()).add(rid);
+      if (!replySnippet && chat?.id && rid && !telegramRuntime.pendingReplies?.has(replyKey) && !telegramRuntime.replyCache?.has(replyKey)) {
+        (telegramRuntime.pendingReplies ||= new Set()).add(replyKey);
         invoke("telegram_get_message", { chatId: chat.id, messageId: rid }).then((msg) => {
           if (!msg) {
-            (telegramRuntime.replyCache ||= new Map()).set(rid, { notFound: true });
+            (telegramRuntime.replyCache ||= new Map()).set(replyKey, { notFound: true });
             return;
           }
-          (telegramRuntime.replyCache ||= new Map()).set(rid, msg);
+          (telegramRuntime.replyCache ||= new Map()).set(replyKey, msg);
           const elements = document.querySelectorAll(`.tg-msg-reply[data-reply-id="${CSS.escape(rid)}"]`);
           elements.forEach((el) => {
             const senderSpan = el.querySelector(".tg-msg-reply-from");
@@ -2234,7 +2238,7 @@ function telegramMessageRowHtml(chat, message, prevMessage, messageMap, isAlbumM
             }
           });
         }).catch(() => {
-          (telegramRuntime.replyCache ||= new Map()).set(rid, { notFound: true });
+          (telegramRuntime.replyCache ||= new Map()).set(replyKey, { notFound: true });
         });
       }
       if (!replySnippet) {
