@@ -15,7 +15,7 @@ The browser arguments are assembled by `merge_browser_args()`. It keeps whatever
 
 ## 5.2 Finding the page, and refusing foreign windows
 
-The CLI asks `cdpPort` of the app, through `ping`, and caches the answer for the process (`cdp_port()`). If the app is older and does not publish a port, the CLI falls back to 9222, because such a kernel always binds it. If the app does not answer at all, the error is `cannot determine the CDP port: app is not answering on 127.0.0.1:26540`.
+The CLI asks `cdpPort` of the app, through `ping`, and caches the answer for the process (`cdp_port()`). If the app does not publish a port (a build that is too old), the command fails with that reason; the port is never guessed. If the app does not answer at all, the error is `cannot determine the CDP port: app is not answering on 127.0.0.1:26540`.
 
 Then `cdp_ws_url()` in [opt/cli/main.rs](../../opt/cli/main.rs):
 

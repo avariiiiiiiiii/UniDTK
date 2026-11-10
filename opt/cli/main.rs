@@ -32,7 +32,6 @@ mod command_inventory;
 const IPC: &str = "127.0.0.1:26540";
 /// Fallback only — the live CDP port is published by the app over IPC (`ping` →
 /// `cdpPort`). A stale or foreign process may hold the conventional 9222.
-const CDP_FALLBACK: u16 = 9222;
 const CRLF: &str = "\r\n";
 
 fn main() {
@@ -198,33 +197,23 @@ fn cdp_port() -> Result<u16, String> {
         })?;
         let value: serde_json::Value =
             serde_json::from_str(&out).map_err(|e| format!("bad ping response: {e}"))?;
+        // The port is published in the ping reply and never guessed (ipc.cdp-always-on).
         match value.get("cdpPort").and_then(|p| p.as_u64()) {
             Some(port) => Ok(port as u16),
-            // A kernel older than S0 does not publish its port; it always binds the
-            // conventional one, and the app is proven alive by the IPC answer above.
-            None => Ok(CDP_FALLBACK),
+            None => Err("the app's ping reply does not publish a CDP port (build too old?)".to_string()),
         }
     })
     .clone()
 }
 
-fn cdp_get(path: &str) -> Result<serde_json::Value, String> {
-    let port = cdp_port()?;
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
-        .map_err(|e| format!("CDP not reachable on {port}: {e} (is the app running?)"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
-    let req = format!("GET {path} HTTP/1.1{0}Host: 127.0.0.1{0}Connection: close{0}{0}", CRLF);
-    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+/// Reads an HTTP answer to its end (the request says `Connection: close`) and
+/// returns the body. It used to stop as soon as the header terminator arrived,
+/// so a body that came in a later TCP segment was lost.
+fn read_http_body(stream: &mut impl Read, deadline: std::time::Instant) -> Result<String, String> {
     let mut resp = String::new();
     let mut buf = [0u8; 8192];
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if resp.contains(CRLF.repeat(2).as_str()) || resp.len() > 16 * 1024 {
-            break;
-        }
-        if std::time::Instant::now() > deadline {
+        if resp.len() > 4 * 1024 * 1024 || std::time::Instant::now() > deadline {
             break;
         }
         match stream.read(&mut buf) {
@@ -240,8 +229,20 @@ fn cdp_get(path: &str) -> Result<serde_json::Value, String> {
         }
     }
     let sep = CRLF.repeat(2);
-    let body = resp.split(sep.as_str()).nth(1).unwrap_or("");
-    serde_json::from_str(body).map_err(|e| format!("bad CDP json: {e} (resp len {})", resp.len()))
+    Ok(resp.split_once(sep.as_str()).map(|(_, body)| body.to_string()).unwrap_or_default())
+}
+
+fn cdp_get(path: &str) -> Result<serde_json::Value, String> {
+    let port = cdp_port()?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .map_err(|e| format!("CDP not reachable on {port}: {e} (is the app running?)"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+    let req = format!("GET {path} HTTP/1.1{0}Host: 127.0.0.1{0}Connection: close{0}{0}", CRLF);
+    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    let body = read_http_body(&mut stream, std::time::Instant::now() + Duration::from_secs(5))?;
+    serde_json::from_str(&body).map_err(|e| format!("bad CDP json: {e} (body len {})", body.len()))
 }
 
 /// How many WebView2 pages answer over CDP; an error when none does.
@@ -1535,13 +1536,15 @@ fn find_installer(root: &std::path::Path) -> Option<std::path::PathBuf> {
     let Ok(entries) = std::fs::read_dir(&nsis_dir) else {
         return None;
     };
+    // Old installers of earlier versions stay in this folder: take the newest.
     entries
         .flatten()
         .map(|e| e.path())
-        .find(|p| {
+        .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             name.ends_with("-setup.exe") && p.is_file()
         })
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
 }
 
 /// SHA-256 (lowercase hex) of a file via `certutil`.
@@ -1622,14 +1625,14 @@ fn run_installer_and_verify(
     let want_size = std::fs::metadata(release_dir.join("unidtk.exe"))
         .map(|m| m.len())
         .unwrap_or(0);
+    if want_size == 0 {
+        return Err("the staged unidtk.exe is missing or empty, so the install cannot be verified".into());
+    }
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         let pf_m = install.join("unidtk.exe");
         match std::fs::metadata(&pf_m) {
-            Ok(m)
-                if want_size == 0
-                    || m.len() == want_size =>
-            {
+            Ok(m) if m.len() == want_size => {
                 break;
             }
             _ => {
@@ -1916,6 +1919,15 @@ fn doc_check() -> Result<String, String> {
     }
 }
 
+/// A source tree has the kernel sources; an installed copy has only the task templates.
+fn is_source_tree(dir: &std::path::Path) -> bool {
+    dir.join("core/kernel/main.rs").exists()
+}
+
+fn in_source_checkout() -> bool {
+    find_repo_root().is_some_and(|root| is_source_tree(&root))
+}
+
 fn find_repo_root() -> Option<std::path::PathBuf> {
     let mut dir = std::env::current_dir().unwrap_or_default();
     for _ in 0..6 {
@@ -1988,6 +2000,7 @@ fn prepare_task_xml(raw_xml: &str, install_dir: &std::path::Path) -> String {
 fn is_task_registered(task_name: &str) -> bool {
     std::process::Command::new("schtasks")
         .args(["/query", "/tn", task_name])
+        .creation_flags(NO_WINDOW)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -2041,6 +2054,7 @@ fn register_task_by_def(def: &TaskDef, install_dir: &std::path::Path) -> Result<
     );
     let el_out = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", &ps_cmd])
+        .creation_flags(NO_WINDOW)
         .output();
     let _ = std::fs::remove_file(&temp_xml);
     if el_out.map(|o| o.status.success()).unwrap_or(false) && is_task_registered(def.name) {
@@ -2067,6 +2081,7 @@ fn unregister_task_by_name(name: &str) -> Result<String, String> {
     );
     let el_out = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", &ps_cmd])
+        .creation_flags(NO_WINDOW)
         .output();
     if el_out.map(|o| o.status.success()).unwrap_or(false) && !is_task_registered(name) {
         Ok(format!("Task '{name}' deleted (elevated)."))
@@ -2208,6 +2223,7 @@ fn ensure_dir_in_user_path(dir: &std::path::Path) -> Result<(), String> {
     );
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .creation_flags(NO_WINDOW)
         .output()
         .map_err(|e| format!("failed to run powershell: {e}"))?;
     if !output.status.success() {
@@ -2527,6 +2543,9 @@ fn run_env_section() -> (usize, String) {
 
     match find_env_file() {
         Some(env_file) => out.push_str(&format!("  .env: OK ({})\n", env_file.display())),
+        None if !in_source_checkout() => {
+            out.push_str("  .env: not needed (installed copy, no source checkout)\n");
+        }
         None => {
             out.push_str("  .env: MISSING (.env not found at the repository root)\n");
             failures += 1;
@@ -3336,7 +3355,7 @@ fn run_simulation(out: &mut String) -> bool {
 
     // 3. Frontend Error Log Audit — name from the inventory.
     let logs_cmd_name = command_inventory::SIMULATE_LOGS;
-    match ipc(json!({ "cmd": logs_cmd_name, "args": { "level": "ERROR", "limit": 10 } })) {
+    match ipc(json!({ "cmd": logs_cmd_name, "args": { "level": "ERROR", "limit": 200 } })) {
         Ok(res) => {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&res) {
                 let items = val.get("data").and_then(|d| d.as_array()).or_else(|| val.as_array());
@@ -3850,6 +3869,58 @@ mod tests {
             !result.contains("@INSTALL_DIR@"),
             "placeholder must be fully substituted"
         );
+    }
+
+    /// Hands out its parts one `read` at a time, like TCP segments.
+    struct Segments(Vec<Vec<u8>>);
+
+    impl Read for Segments {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.is_empty() {
+                return Ok(0);
+            }
+            let part = self.0.remove(0);
+            buf[..part.len()].copy_from_slice(&part);
+            Ok(part.len())
+        }
+    }
+
+    #[test]
+    fn http_body_arriving_after_the_headers_is_not_lost() {
+        let mut stream = Segments(vec![
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n".to_vec(),
+            b"[{\"type\":\"page\"}]".to_vec(),
+        ]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let body = read_http_body(&mut stream, deadline).unwrap();
+        assert_eq!(body, "[{\"type\":\"page\"}]");
+    }
+
+    #[test]
+    fn newest_installer_wins_over_an_old_one() {
+        let root = std::env::temp_dir().join(format!("udtk_installer_{}", std::process::id()));
+        let nsis = root.join("target/release/bundle/nsis");
+        std::fs::create_dir_all(&nsis).unwrap();
+        let old = nsis.join("Z_0.0.1-setup.exe");
+        let new = nsis.join("A_0.0.2-setup.exe");
+        std::fs::write(&new, "new").unwrap();
+        std::fs::write(&old, "old").unwrap();
+        // The older file gets the older timestamp, whatever the names say.
+        let past = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(past).unwrap();
+        assert_eq!(find_installer(&root).as_deref(), Some(new.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_a_tree_with_kernel_sources_is_a_source_checkout() {
+        let dir = std::env::temp_dir().join(format!("udtk_tree_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("scheduler-tasks")).unwrap();
+        assert!(!is_source_tree(&dir), "an installed copy has task templates only");
+        std::fs::create_dir_all(dir.join("core/kernel")).unwrap();
+        std::fs::write(dir.join("core/kernel/main.rs"), "").unwrap();
+        assert!(is_source_tree(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
