@@ -77,6 +77,7 @@
 - [Kanban](dev/kanban.md)
 - [Architecture kanban](dev/architecture-kanban.md)
 - [Customization menu audit](dev/menu-audit.md)
+- [Audit register, 2026-11-09](dev/audit-2026-11-09.md)
 
 # History
 
