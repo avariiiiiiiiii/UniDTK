@@ -1829,6 +1829,12 @@ pub fn connect(runtime: &VpnRuntime, tag: Option<String>) -> Result<(), String> 
                 inner.servers.first().cloned()
             })
             .ok_or_else(|| "no servers available".to_string())?;
+        // Commands must be safe to repeat: asking for the server the tunnel already
+        // uses must not tear the running core down and start it again.
+        if inner.connected && inner.selected_tag.as_deref() == Some(server.tag.as_str()) {
+            unidtk_api::log(format!("vpn: connect to '{}' ignored: already connected to it", server.tag));
+            return Ok(());
+        }
         let epoch = CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
         inner.connecting = true;
         inner.last_error = None;
