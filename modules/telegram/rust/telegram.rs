@@ -1733,7 +1733,9 @@ impl TelegramInner {
                 is_active: true,
             });
         }
-        let _ = save_raw_config(&config);
+        if let Err(error) = save_raw_config(&config) {
+            unidtk_api::log(format!("telegram: saving the account list failed: {error}"));
+        }
     }
 
     /// Track connection health and heal a stuck managed proxy with a backoff.
@@ -1813,7 +1815,9 @@ impl TelegramInner {
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or_else(|| config.api_hash.clone());
                 let dir = tdlib_account_dir(&self.active_account_id);
-                let _ = std::fs::create_dir_all(&dir);
+                if let Err(error) = std::fs::create_dir_all(&dir) {
+                    unidtk_api::log(format!("telegram: cannot create {}: {error}", dir.display()));
+                }
                 let _ = self.send(json!({
                     "@type": "setTdlibParameters",
                     "api_id": api_id,
@@ -2496,6 +2500,11 @@ fn shutdown_client(inner: &Arc<Mutex<TelegramInner>>) {
 /// Load TDLib if needed and spawn the single receiver thread. Never holds the
 /// inner mutex across TDLib waits.
 fn ensure_started(inner: &Arc<Mutex<TelegramInner>>) -> Result<TelegramStatus, String> {
+    // A module that was switched off stays off: status and chat-list polls call this,
+    // and would otherwise load TDLib again behind the switch.
+    if SUSPENDED.load(Ordering::SeqCst) {
+        return Err("the Telegram module is switched off".into());
+    }
     {
         let g = inner.lock().unwrap();
         if g.td.is_some() {
@@ -2974,11 +2983,13 @@ pub fn chats(runtime: &TelegramRuntime) -> Vec<TelegramChat> {
     // self.chats against the returned ids — getChats is still capped by its
     // limit, and retaining would drop already-loaded chats outside that
     // window. Archive / leave removals are handled in handle_chat_update.
-    let _ = td_request(
+    if let Err(error) = td_request(
         inner,
         json!({"@type": "getChats", "chat_list": null, "limit": 1000}),
         Duration::from_secs(2),
-    );
+    ) {
+        unidtk_api::log(format!("telegram: getChats (main list) failed, the list may be incomplete: {error}"));
+    }
     let mut list: Vec<TelegramChat> = inner.lock().unwrap().chats.values().cloned().collect();
     {
         let g = inner.lock().unwrap();
@@ -3044,7 +3055,7 @@ pub fn archive_chats(runtime: &TelegramRuntime) -> Vec<TelegramChat> {
             }
         }
     }
-    let _ = td_request(
+    if let Err(error) = td_request(
         inner,
         json!({
             "@type": "getChats",
@@ -3052,7 +3063,9 @@ pub fn archive_chats(runtime: &TelegramRuntime) -> Vec<TelegramChat> {
             "limit": 1000
         }),
         Duration::from_secs(2),
-    );
+    ) {
+        unidtk_api::log(format!("telegram: getChats (archive) failed, the list may be incomplete: {error}"));
+    }
     sorted_chats(
         inner
             .lock()
@@ -3715,6 +3728,8 @@ pub fn edit_message(
         if let Some(msgs) = g.messages.get_mut(&key) {
             if let Some(m) = msgs.iter_mut().find(|m| m.id == request.message_id) {
                 m.text = text.to_string();
+                // The edit was sent without entities: the old ones point into text that is gone.
+                m.entities = None;
             }
         }
     }
@@ -4767,7 +4782,10 @@ pub fn switch_account(
     };
 
     unidtk_api::log("telegram: switched account");
-    let _ = ensure_started(&runtime.inner);
+    if let Err(error) = ensure_started(&runtime.inner) {
+        unidtk_api::log(format!("telegram: start after the account switch failed: {error}"));
+        runtime.inner.lock().unwrap().remember_error(error);
+    }
     let status = runtime.inner.lock().unwrap().status();
     if let Some(app) = app_handle {
         let _ = tauri::Emitter::emit(&app, "telegram-status-update", &status);
@@ -4825,7 +4843,10 @@ pub fn add_account(runtime: &TelegramRuntime) -> Result<TelegramStatus, String> 
     };
 
     unidtk_api::log("telegram: added new account");
-    let _ = ensure_started(&runtime.inner);
+    if let Err(error) = ensure_started(&runtime.inner) {
+        unidtk_api::log(format!("telegram: start after adding the account failed: {error}"));
+        runtime.inner.lock().unwrap().remember_error(error);
+    }
     let status = runtime.inner.lock().unwrap().status();
     if let Some(app) = app_handle {
         let _ = tauri::Emitter::emit(&app, "telegram-status-update", &status);
@@ -4844,11 +4865,6 @@ pub fn remove_account(
     let was_active = config.active_account_id.as_deref() == Some(&account_id);
     config.accounts.retain(|a| a.id != account_id);
 
-    let data_dir = tdlib_account_dir(&account_id);
-    if account_id != "default" && data_dir.exists() {
-        let _ = std::fs::remove_dir_all(&data_dir);
-    }
-
     if was_active {
         let next_id = config
             .accounts
@@ -4857,9 +4873,23 @@ pub fn remove_account(
             .unwrap_or_else(|| "default".into());
         config.active_account_id = Some(next_id.clone());
         save_raw_config(&config)?;
-        let _ = switch_account(runtime, next_id);
+        // The switch shuts the removed account's client down; only then are its
+        // files free to be deleted.
+        if let Err(error) = switch_account(runtime, next_id) {
+            unidtk_api::log(format!("telegram: switching away from the removed account failed: {error}"));
+        }
     } else {
         save_raw_config(&config)?;
+    }
+
+    let data_dir = tdlib_account_dir(&account_id);
+    if account_id != "default" && data_dir.exists() {
+        if let Err(error) = std::fs::remove_dir_all(&data_dir) {
+            unidtk_api::log(format!(
+                "telegram: the data of removed account {account_id} could not be deleted ({}): {error}",
+                data_dir.display()
+            ));
+        }
     }
 
     Ok(list_accounts(runtime))
@@ -5974,7 +6004,9 @@ fn load_config() -> TelegramConfig {
     }
 
     let config = with_config_defaults(TelegramConfig::default());
-    let _ = save_raw_config(&config);
+    if let Err(error) = save_raw_config(&config) {
+        unidtk_api::log(format!("telegram: saving the default config failed: {error}"));
+    }
     config
 }
 
