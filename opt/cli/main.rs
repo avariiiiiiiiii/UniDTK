@@ -1496,9 +1496,14 @@ fn build_cmd(args: &[String]) -> Result<String, String> {
     if !task_ok {
         let exe = programs_dir.join("unidtk.exe");
         if exe.is_file() {
+            // Null standard handles, as in `udtk run`: inherited ones keep the
+            // caller's pipe open for the app's whole life.
             let _ = std::process::Command::new(&exe)
                 .current_dir(&programs_dir)
                 .creation_flags(NO_WINDOW)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn();
             restart_note = "restart: task start denied (medium-integrity shell) — spawned the app directly\n".into();
         }
@@ -2415,7 +2420,8 @@ fn run_cargo_check() -> (bool, String) {
     };
     let envs = load_env();
     let mut cmd = std::process::Command::new("cargo");
-    cmd.current_dir(&toolchain).args(["check"]);
+    // The whole workspace: a crate that no binary uses yet must compile too.
+    cmd.current_dir(&toolchain).args(["check", "--workspace"]);
     for (k, v) in &envs {
         cmd.env(k, v);
     }
