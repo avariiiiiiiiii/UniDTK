@@ -8,7 +8,7 @@ use windows::Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, keybd_event, KEYEVENTF_KEYUP, GetKeyboardLayout,
+            GetAsyncKeyState, GetKeyboardLayout,
             GetKeyboardState, GetKeyState, ToUnicodeEx, VK_CONTROL, VK_D, VK_E, VK_ESCAPE, VK_LWIN,
             VK_MENU, VK_R, VK_RWIN, VK_SHIFT,
         },
@@ -36,6 +36,24 @@ pub struct HotkeyDefinition {
     pub shift_required: bool,
     pub swallow: bool,
     pub enabled: bool,
+    pub scope: HotkeyScope,
+}
+
+/// Where a hotkey belongs. A `Desktop` hotkey fires only while the desktop or a
+/// shell window is in front; anywhere else the key stays with Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HotkeyScope {
+    Desktop,
+    Global,
+}
+
+impl HotkeyScope {
+    fn admits(self, foreground: ForegroundClass) -> bool {
+        match self {
+            HotkeyScope::Global => true,
+            HotkeyScope::Desktop => !matches!(foreground, ForegroundClass::Foreign),
+        }
+    }
 }
 
 static HOTKEYS: OnceLock<RwLock<Vec<HotkeyDefinition>>> = OnceLock::new();
@@ -62,6 +80,7 @@ fn default_hotkeys() -> Vec<HotkeyDefinition> {
             shift_required: false,
             swallow: true,
             enabled: true,
+            scope: HotkeyScope::Desktop,
         },
         HotkeyDefinition {
             id: "win_d".to_string(),
@@ -75,6 +94,7 @@ fn default_hotkeys() -> Vec<HotkeyDefinition> {
             shift_required: false,
             swallow: false,
             enabled: false,
+            scope: HotkeyScope::Global,
         },
         HotkeyDefinition {
             id: "win_r".to_string(),
@@ -88,6 +108,7 @@ fn default_hotkeys() -> Vec<HotkeyDefinition> {
             shift_required: false,
             swallow: false,
             enabled: false,
+            scope: HotkeyScope::Global,
         },
     ]
 }
@@ -208,6 +229,34 @@ fn remember_key(vk: u32, owner: KeyOwner) {
     KEY_OWNERS.with(|keys| keys.borrow_mut()[vk as usize] = Some(owner));
 }
 
+#[derive(Clone, Copy, Default)]
+struct Modifiers { win: bool, ctrl: bool, alt: bool, shift: bool }
+
+fn modifiers() -> Modifiers {
+    #[cfg(test)]
+    if let Some(held) = TEST_MODIFIERS.with(|value| value.get()) { return held; }
+    let pressed = |key: i32| unsafe { (GetAsyncKeyState(key) as u16 & 0x8000) != 0 };
+    Modifiers {
+        win: pressed(VK_LWIN.0 as i32) || pressed(VK_RWIN.0 as i32),
+        ctrl: pressed(VK_CONTROL.0 as i32),
+        alt: pressed(VK_MENU.0 as i32),
+        shift: pressed(VK_SHIFT.0 as i32),
+    }
+}
+
+/// A Win chord that we consume must not open the Start menu on the Win release:
+/// an unassigned key between the Win down and up cancels it.
+fn mask_start_menu() {
+    #[cfg(test)]
+    { START_MASKS.with(|count| count.set(count.get() + 1)); }
+    #[cfg(not(test))]
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP};
+        keybd_event(0xE8, 0, Default::default(), 0);
+        keybd_event(0xE8, 0, KEYEVENTF_KEYUP, 0);
+    }
+}
+
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code < 0 { return CallNextHookEx(None, code, wparam, lparam); }
     let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
@@ -263,24 +312,17 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         return CallNextHookEx(None, code, wparam, lparam);
     }
     if system_key(vk) { return CallNextHookEx(None, code, wparam, lparam); }
-    let pressed = |key: i32| (GetAsyncKeyState(key) as u16 & 0x8000) != 0;
-    let win = pressed(VK_LWIN.0 as i32) || pressed(VK_RWIN.0 as i32);
-    let ctrl = pressed(VK_CONTROL.0 as i32);
-    let alt = pressed(VK_MENU.0 as i32);
-    let shift = pressed(VK_SHIFT.0 as i32);
+    let Modifiers { win, ctrl, alt, shift } = modifiers();
 
     // Global shortcuts run before text routing; callbacks execute off the hook.
     let hotkey = get_registry().try_read().ok().and_then(|keys| keys.iter().find(|key|
         key.enabled && key.vk_code == vk && key.win_required == win
         && key.ctrl_required == ctrl && key.alt_required == alt
-        && key.shift_required == shift).cloned());
+        && key.shift_required == shift && key.scope.admits(foreground)).cloned());
     if let Some(key) = hotkey {
         if ACTIONS.get().is_some_and(|tx| tx.try_send(key.id.clone()).is_ok()) {
-            if key.id == "win_e" {
-                keybd_event(0xE8, 0, Default::default(), 0);
-                keybd_event(0xE8, 0, KEYEVENTF_KEYUP, 0);
-            }
             if key.swallow {
+                if key.win_required { mask_start_menu(); }
                 remember_key(vk, KeyOwner { target: 0, key_messages: false,
                     scan: kb.scanCode, extended: kb.flags.0 & 1 != 0,
                     generation: INPUT_GENERATION.load(Ordering::SeqCst) });
@@ -397,7 +439,11 @@ pub fn shutdown() {
 }
 
 #[cfg(test)]
-thread_local! { static TEST_FOREGROUND: std::cell::Cell<Option<ForegroundClass>> = const { std::cell::Cell::new(None) }; }
+thread_local! {
+    static TEST_FOREGROUND: std::cell::Cell<Option<ForegroundClass>> = const { std::cell::Cell::new(None) };
+    static TEST_MODIFIERS: std::cell::Cell<Option<Modifiers>> = const { std::cell::Cell::new(None) };
+    static START_MASKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 mod input_safety_tests {
@@ -431,6 +477,36 @@ mod input_safety_tests {
         assert_ne!(callback(0x45, WM_KEYUP), 1, "stole unowned release");
         KEY_OWNERS.with(|keys| *keys.borrow_mut() = [None; 256]);
         reset_input_focus();
+        TEST_FOREGROUND.with(|slot| slot.set(None));
+    }
+
+    // Win+E belongs to Windows outside the shell: no action, no Start mask, no owned key.
+    #[test]
+    fn desktop_hotkey_fires_only_on_the_desktop_or_the_shell() {
+        let (tx, rx) = sync_channel::<String>(8);
+        assert!(ACTIONS.set(tx).is_ok(), "only this test owns the action channel");
+        TEST_MODIFIERS.with(|slot| slot.set(Some(Modifiers { win: true, ..Modifiers::default() })));
+        let callback = |msg| unsafe {
+            let record = KBDLLHOOKSTRUCT { vkCode: VK_E.0 as u32, scanCode: 18, ..Default::default() };
+            keyboard_hook_proc(0, WPARAM(msg as usize), LPARAM(&record as *const _ as isize)).0
+        };
+
+        TEST_FOREGROUND.with(|slot| slot.set(Some(ForegroundClass::Foreign)));
+        assert_ne!(callback(WM_KEYDOWN), 1, "Win+E stolen from a foreign application");
+        assert!(rx.try_recv().is_err(), "overlay opened over a foreign application");
+        assert_eq!(START_MASKS.with(|n| n.get()), 0, "Start menu masked for a key we passed on");
+        assert_ne!(callback(WM_KEYUP), 1, "release of a passed key stolen");
+
+        for class in [ForegroundClass::Desktop, ForegroundClass::Shell] {
+            TEST_FOREGROUND.with(|slot| slot.set(Some(class)));
+            assert_eq!(callback(WM_KEYDOWN), 1, "Win+E not consumed in the shell");
+            assert_eq!(rx.try_recv().as_deref(), Ok("win_e"));
+            assert_eq!(callback(WM_KEYUP), 1, "release of a consumed key leaked");
+        }
+        assert_eq!(START_MASKS.with(|n| n.get()), 2);
+
+        KEY_OWNERS.with(|keys| *keys.borrow_mut() = [None; 256]);
+        TEST_MODIFIERS.with(|slot| slot.set(None));
         TEST_FOREGROUND.with(|slot| slot.set(None));
     }
 }
