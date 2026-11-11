@@ -23,6 +23,20 @@
   ; $INSTDIR: the application finds them via readDir of resources and draws a second "ghost" card
   ; (the same disease that prune_stale_resources cleans up in the dev directory). We clean up before copying:
   ; the Install section calls this hook before CheckIfAppIsRunning and before File.
+  ;
+  ; The hook runs before that check, so it stops a running application itself: the folders
+  ; below are in use by it, and deleting them from under a live app (or on an install the
+  ; user then cancels) would leave it without its modules. `udtk stop` reports success only
+  ; when nothing of the install is left running.
+  IfFileExists "$INSTDIR\udtk.exe" 0 uni_pre_clean
+    nsExec::ExecToStack '"$INSTDIR\udtk.exe" stop'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" uni_pre_clean 0
+      DetailPrint "udtk stop failed (code $0): $1"
+      MessageBox MB_OK|MB_ICONSTOP "UniDTK is still running and could not be stopped. Close it and run the installer again." /SD IDOK
+      Abort
+  uni_pre_clean:
   RMDir /r "$INSTDIR\modules"
   RMDir /r "$INSTDIR\fonts"
   RMDir /r "$INSTDIR\scheduler-tasks"
@@ -61,4 +75,11 @@
   StrCmp $0 "0" uni_unreg_ok 0
     DetailPrint "udtk tasks unregister failed (code $0): $1"
   uni_unreg_ok:
+  ; The install directory leaves the User PATH, where the install put it. Also only logged.
+  nsExec::ExecToStack '"$INSTDIR\udtk.exe" path remove'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" uni_path_removed 0
+    DetailPrint "udtk path remove failed (code $0): $1"
+  uni_path_removed:
 !macroend

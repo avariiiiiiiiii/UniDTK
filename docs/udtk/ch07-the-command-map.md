@@ -11,7 +11,7 @@
 | `udtk cdp-list` | Lists the CDP targets | Yes, plus CDP |
 | `udtk tasks [status\|register\|unregister\|cleanup-old]` | Manages the Windows scheduled tasks | No |
 | `udtk autostart [status\|enable\|disable]` | Controls the logon task `UniDTK` | No |
-| `udtk path [status\|ensure]` | Checks or adds the install directory to the User PATH | No |
+| `udtk path [status\|ensure\|remove]` | Checks, adds or removes the install directory in the User PATH | No |
 | `udtk build [-j N]` | The one release build: stop, build, install, verify, restart | No (it stops and restarts the app) |
 | `udtk stop` | Quits the app gracefully, then forces it, so that its files can be replaced | Optional |
 | `udtk run [args...]` | Starts the app that sits next to the CLI | No |

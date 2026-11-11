@@ -66,7 +66,7 @@ The files directly in the data folder are listed below. Each row names the funct
 
 | Item | Written by | Purpose |
 | :--- | :--- | :--- |
-| `HKCU\Environment\Path` | `core/kernel/path_env.rs`, run by `udtk path ensure` | Puts the installed folder on the user's `PATH`, so `udtk` runs from any terminal |
+| `HKCU\Environment\Path` | `core/kernel/path_env.rs`, run by `udtk path ensure` and `udtk path remove` | Puts the installed folder on the user's `PATH`, and takes it off at uninstall, so `udtk` runs from any terminal |
 
 ## Scheduled tasks
 

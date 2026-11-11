@@ -1283,7 +1283,7 @@ fn cli_commands() -> serde_json::Value {
                 { "name": "cdp-list", "desc": "List active CDP pages and targets" },
                 { "name": "autostart", "args": "[status|enable|disable]", "desc": "Manage the logon autostart task (UniDTK)" },
                 { "name": "tasks", "args": "[status|register [name]|unregister <name>|cleanup-old]", "desc": "Manage Windows Task Scheduler tasks" },
-                { "name": "path", "args": "[status|ensure]", "desc": "Check or register the CLI directory in the User PATH" },
+                { "name": "path", "args": "[status|ensure|remove]", "desc": "Check, register or remove the CLI directory in the User PATH" },
                 { "name": "doc", "args": "[--check]", "desc": "Render the project book and open it in the browser; --check finds what rotted in it" },
                 { "name": "build", "args": "[-j N]", "desc": "Build the release, make the installer, install and verify (stops and restarts the app)" },
                 { "name": "stop", "desc": "Stop the running app (graceful quit, then force) so its files can be replaced" },
@@ -1429,23 +1429,18 @@ fn build_cmd(args: &[String]) -> Result<String, String> {
                 .into(),
         );
     }
-    // 0. stop the running app so its DLLs unlock
-    let _ = stop_cmd();
-    // relocate our own exe so cargo can relink it (os error 32 otherwise)
-    let held = exe.with_file_name("udtk.exe.held");
-    let _ = std::fs::remove_file(&held);
-    let _ = std::fs::rename(&exe, &held);
+    // 0. stop the running app so its DLLs unlock; a build that cannot stop it
+    // would fail later with an opaque "os error 32"
+    stop_cmd().map_err(|e| format!("cannot start the build: {e}"))?;
+    // relocate our own exe so cargo can relink it (os error 32 otherwise); the
+    // guard puts it back on every way out that is not a successful build
+    let mut held_exe = HeldExe::hold(&exe)?;
     // 1. one tauri pass builds all three bins + the NSIS installer
-    let build_res = run_cargo_tauri(&["build", "--bundles", "nsis"], jobs);
-    if build_res.is_err() {
-        // on failure keep the CLI runnable by restoring our own exe
-        let _ = std::fs::rename(&held, &exe);
-        return build_res;
-    }
+    run_cargo_tauri(&["build", "--bundles", "nsis"], jobs)?;
     eprintln!("build OK");
     // cargo placed a fresh udtk.exe at the canonical path; drop the renamed
     // placeholder so the installer packs the new CLI, not our running copy.
-    let _ = std::fs::remove_file(&held);
+    held_exe.release_for_new_build();
     let root = find_repo_root().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let dll_src = root.join("opt/libmpv/libmpv-2.dll");
     let release_dir = root.join("target/release");
@@ -1655,8 +1650,54 @@ fn run_installer_and_verify(
     Ok("installed".into())
 }
 
+/// The running `udtk.exe` moved aside so cargo can relink it. Dropping the guard
+/// moves it back unless a successful build replaced it (`release_for_new_build`),
+/// so a failed step after the build, a `?` or a panic cannot leave
+/// `target\release` without a runnable CLI.
+struct HeldExe {
+    exe: std::path::PathBuf,
+    held: std::path::PathBuf,
+    keep_new: bool,
+}
+
+impl HeldExe {
+    fn hold(exe: &std::path::Path) -> Result<Self, String> {
+        let held = exe.with_file_name("udtk.exe.held");
+        let _ = std::fs::remove_file(&held);
+        std::fs::rename(exe, &held)
+            .map_err(|e| format!("cannot move {} aside for the build: {e}", exe.display()))?;
+        Ok(Self { exe: exe.to_path_buf(), held, keep_new: false })
+    }
+
+    /// The build produced the new CLI: the old copy is not needed any more.
+    fn release_for_new_build(&mut self) {
+        self.keep_new = true;
+        let _ = std::fs::remove_file(&self.held);
+    }
+}
+
+impl Drop for HeldExe {
+    fn drop(&mut self) {
+        if !self.keep_new && self.held.exists() {
+            let _ = std::fs::remove_file(&self.exe);
+            let _ = std::fs::rename(&self.held, &self.exe);
+        }
+    }
+}
+
+/// What `udtk stop` says about the processes left under the install directory
+/// after it quit and killed them: nothing left is "stopped", anything left is an error.
+fn stop_verdict(left: &[u32], killed: usize) -> Result<String, String> {
+    if left.is_empty() {
+        Ok(if killed == 0 { "stopped".into() } else { format!("stopped ({killed} process(es) had to be killed)") })
+    } else {
+        Err(format!("still running after quit and kill: pid {}", left.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")))
+    }
+}
+
 /// `udtk stop` — graceful quit of the running app (its own quit path), then
-/// force-kill anything from the install dir still holding DLLs open.
+/// force-kill anything from the install dir still holding DLLs open, then look
+/// again: success is reported only when nothing of the install is left running.
 fn stop_cmd() -> Result<String, String> {
     let install = install_dir();
     let mut graceful = false;
@@ -1671,6 +1712,7 @@ fn stop_cmd() -> Result<String, String> {
     }
     let grace_ms = if graceful { 3500 } else { 0 };
     let deadline = std::time::Instant::now() + Duration::from_millis(grace_ms + 2500);
+    let mut killed = 0usize;
     loop {
         let pids = list_processes_from(&install);
         if pids.is_empty() {
@@ -1678,10 +1720,13 @@ fn stop_cmd() -> Result<String, String> {
         }
         if std::time::Instant::now() > deadline {
             for pid in pids {
-                let _ = std::process::Command::new("taskkill")
+                let done = std::process::Command::new("taskkill")
                     .args(["/PID", &pid.to_string(), "/F"])
                     .creation_flags(NO_WINDOW)
                     .output();
+                if done.map(|o| o.status.success()).unwrap_or(false) {
+                    killed += 1;
+                }
             }
             break;
         }
@@ -1695,7 +1740,16 @@ fn stop_cmd() -> Result<String, String> {
                 .output();
         }
     }
-    Ok("stopped".into())
+    // A killed process takes a moment to leave the list; look again before judging.
+    let mut left = list_processes_from(&install);
+    for _ in 0..8 {
+        if left.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+        left = list_processes_from(&install);
+    }
+    stop_verdict(&left, killed)
 }
 
 /// PIDs of processes whose executable lives under `dir` (not including us).
@@ -2215,20 +2269,91 @@ fn autostart_cmd(args: &[String]) -> Result<String, String> {
     }
 }
 
-fn ensure_dir_in_user_path(dir: &std::path::Path) -> Result<(), String> {
-    let dir_str = dir.to_str().ok_or("Invalid path")?;
-    let ps_script = format!(
-        "$dir = '{}'; $old = [Environment]::GetEnvironmentVariable('Path', 'User'); if ($old -notlike \"*$dir*\") {{ [Environment]::SetEnvironmentVariable('Path', \"$old;$dir\", 'User') }}",
-        dir_str.replace('\'', "''")
-    );
+/// One PATH entry as it is compared: trimmed, no trailing backslash, no case.
+fn normalized_path_entry(entry: &str) -> String {
+    entry.trim().trim_end_matches(['\\', '/']).to_ascii_lowercase()
+}
+
+/// Whether `dir` is one of the entries of `path_var`. An entry that merely contains
+/// the directory in its name (`...\UniDTK2`) is another directory.
+fn path_has_dir(path_var: &str, dir: &str) -> bool {
+    let wanted = normalized_path_entry(dir);
+    path_var.split(';').any(|entry| normalized_path_entry(entry) == wanted)
+}
+
+/// `path_var` without any entry that is `dir`.
+fn path_without_dir(path_var: &str, dir: &str) -> String {
+    let wanted = normalized_path_entry(dir);
+    path_var
+        .split(';')
+        .filter(|entry| !entry.trim().is_empty() && normalized_path_entry(entry) != wanted)
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// `path_var` with `dir` as its last entry, unless it already is one.
+fn path_with_dir(path_var: &str, dir: &str) -> String {
+    if path_has_dir(path_var, dir) {
+        return path_var.to_string();
+    }
+    let base = path_var.trim_end_matches(';');
+    if base.is_empty() { dir.to_string() } else { format!("{base};{dir}") }
+}
+
+fn run_powershell(script: &str) -> Result<String, String> {
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .creation_flags(NO_WINDOW)
         .output()
         .map_err(|e| format!("failed to run powershell: {e}"))?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
+    Ok(String::from_utf8_lossy(&output.stdout).trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// The User PATH as stored in the registry, with `%VARIABLES%` left unexpanded.
+/// The PATH of this process is not it: it is a copy taken when the shell started.
+fn user_path_raw() -> Result<String, String> {
+    run_powershell(
+        "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment'); \
+         $k.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)",
+    )
+}
+
+fn ensure_dir_in_user_path(dir: &std::path::Path) -> Result<bool, String> {
+    let dir_str = dir.to_str().ok_or("Invalid path")?;
+    let old = user_path_raw()?;
+    if path_has_dir(&old, dir_str) {
+        return Ok(false);
+    }
+    write_user_path(&path_with_dir(&old, dir_str))?;
+    Ok(true)
+}
+
+/// Take `dir` out of the User PATH. `Ok(false)`: it was not there.
+fn remove_dir_from_user_path(dir: &std::path::Path) -> Result<bool, String> {
+    let dir_str = dir.to_str().ok_or("Invalid path")?;
+    let old = user_path_raw()?;
+    if !path_has_dir(&old, dir_str) {
+        return Ok(false);
+    }
+    write_user_path(&path_without_dir(&old, dir_str))?;
+    Ok(true)
+}
+
+fn write_user_path(new: &str) -> Result<(), String> {
+    // Written to the registry with the value kind it already has (usually
+    // REG_EXPAND_SZ, which a plain SetEnvironmentVariable would turn into REG_SZ),
+    // then an environment change is broadcast, so programs started afterwards see it.
+    // Setting and clearing a throwaway variable is what makes .NET send the broadcast.
+    run_powershell(&format!(
+        "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); \
+         $kind = $k.GetValueKind('Path'); $k.SetValue('Path', '{}', $kind); \
+         [Environment]::SetEnvironmentVariable('UDTK_PATH_REFRESH', '1', 'User'); \
+         [Environment]::SetEnvironmentVariable('UDTK_PATH_REFRESH', $null, 'User')",
+        new.replace('\'', "''")
+    ))?;
     Ok(())
 }
 
@@ -2240,12 +2365,16 @@ fn path_cmd(args: &[String]) -> Result<String, String> {
     let bin_dir = program_files_install_dir();
     match sub {
         "status" | "check" => {
-            let path_var = std::env::var("PATH").unwrap_or_default();
+            // The registry's User PATH, not this process's copy of it: a directory added
+            // a moment ago is in the first and not yet in the second.
+            let user_path = user_path_raw()?;
             let bin_str = bin_dir.to_string_lossy();
-            let in_path = path_var.split(';').any(|p| p.trim().eq_ignore_ascii_case(&bin_str));
+            let in_user_path = path_has_dir(&user_path, &bin_str);
+            let in_this_process = path_has_dir(&std::env::var("PATH").unwrap_or_default(), &bin_str);
             let udtk_exists = bin_dir.join("udtk.exe").exists();
-            if in_path {
-                Ok(format!("UniDTK CLI directory is in User PATH:\n  {}\n  udtk.exe present: {udtk_exists}", bin_dir.display()))
+            if in_user_path {
+                let note = if in_this_process { "" } else { "\n  (this shell started before it was added: open a new one)" };
+                Ok(format!("UniDTK CLI directory is in User PATH:\n  {}\n  udtk.exe present: {udtk_exists}{note}", bin_dir.display()))
             } else {
                 Ok(format!("UniDTK CLI directory is NOT in User PATH:\n  {}\n  Run 'udtk path ensure' to add it.", bin_dir.display()))
             }
@@ -2254,10 +2383,16 @@ fn path_cmd(args: &[String]) -> Result<String, String> {
             if !bin_dir.join("udtk.exe").is_file() {
                 return Err(format!("udtk.exe not found at {}", bin_dir.display()));
             }
-            ensure_dir_in_user_path(&bin_dir)?;
-            Ok(format!("Ensured UniDTK CLI directory in User PATH:\n  {}", bin_dir.display()))
+            let added = ensure_dir_in_user_path(&bin_dir)?;
+            let what = if added { "Added" } else { "Already in" };
+            Ok(format!("{what} User PATH:\n  {}", bin_dir.display()))
         }
-        other => Err(format!("unknown path subcommand: {other}\nUsage: udtk path [status|ensure]")),
+        "remove" | "rm" => {
+            let removed = remove_dir_from_user_path(&bin_dir)?;
+            let what = if removed { "Removed from" } else { "Was not in" };
+            Ok(format!("{what} User PATH:\n  {}", bin_dir.display()))
+        }
+        other => Err(format!("unknown path subcommand: {other}\nUsage: udtk path [status|ensure|remove]")),
     }
 }
 
@@ -3619,7 +3754,7 @@ fn motion_budget(out: &mut String) -> bool {
 
     let mut failed = false;
     let _ = eval(&mut cdp, "startMotionProbe()");
-    for target in &targets {
+    'targets: for target in &targets {
         let node = match resolve_step_target(&mut cdp, &target.selector) {
             Ok(node) => node,
             Err(_) => {
@@ -3634,40 +3769,63 @@ fn motion_budget(out: &mut String) -> bool {
         let x = node["point"]["x"].as_f64().unwrap_or(0.0);
         let y = node["point"]["y"].as_f64().unwrap_or(0.0);
 
-        let _ = eval(&mut cdp, "readMotionProbe()");
-        let clicked = cdp.mouse_click(x, y);
-        let opened = eval(&mut cdp, "waitMotionSettled(false)");
-        let open = eval(&mut cdp, "readMotionProbe()").unwrap_or_default();
-        let pressed = cdp.key_press(&escape, 0);
-        let closed = eval(&mut cdp, "waitMotionSettled(true)");
-        let close = eval(&mut cdp, "readMotionProbe()").unwrap_or_default();
+        // Two passes: the second starts from whatever the first left behind, which is
+        // where a stand-in or a hidden node that was not given back shows up.
+        let (mut open_frame, mut open_task, mut close_frame, mut close_task) = (0, 0, 0, 0);
+        let mut problem: Option<String> = None;
+        for _pass in 0..2 {
+            let _ = eval(&mut cdp, "readMotionProbe()");
+            let clicked = cdp.mouse_click(x, y);
+            let opened = eval(&mut cdp, "waitMotionSettled(false)");
+            let open = eval(&mut cdp, "readMotionProbe()").unwrap_or_default();
+            let pressed = cdp.key_press(&escape, 0);
+            let closed = eval(&mut cdp, "waitMotionSettled(true)");
+            let close = eval(&mut cdp, "readMotionProbe()").unwrap_or_default();
 
-        if clicked.is_err() || !settled(&opened) {
-            failed = true;
-            out.push_str(&format!("    [FAIL] {}: did not open from a click\n", target.label));
-            if !settled(&closed) {
-                break;
-            }
-        } else if pressed.is_err() || !settled(&closed) {
-            failed = true;
-            out.push_str(&format!("    [FAIL] {}: Escape did not close it; budget stopped\n", target.label));
-            break;
-        } else if open.is_null() || close.is_null() {
-            failed = true;
-            out.push_str(&format!("    [FAIL] {}: the motion probe returned no reading\n", target.label));
-        } else {
-            let (open_frame, open_task) = phase(&open);
-            let (close_frame, close_task) = phase(&close);
-            let worst = open_frame.max(open_task).max(close_frame).max(close_task);
-            let verdict = if worst > MOTION_BUDGET_MS { "FAIL" } else { "OK" };
-            if worst > MOTION_BUDGET_MS {
+            if clicked.is_err() || !settled(&opened) {
                 failed = true;
+                out.push_str(&format!("    [FAIL] {}: did not open from a click\n", target.label));
+                if !settled(&closed) {
+                    break 'targets;
+                }
+                continue 'targets;
+            } else if pressed.is_err() || !settled(&closed) {
+                failed = true;
+                out.push_str(&format!("    [FAIL] {}: Escape did not close it; budget stopped\n", target.label));
+                break 'targets;
+            } else if open.is_null() || close.is_null() {
+                failed = true;
+                out.push_str(&format!("    [FAIL] {}: the motion probe returned no reading\n", target.label));
+                continue 'targets;
             }
-            out.push_str(&format!(
-                "    [{verdict}] {}: open frame {open_frame} ms, task {open_task} ms; close frame {close_frame} ms, task {close_task} ms\n",
-                target.label
-            ));
+            let (open_f, open_t) = phase(&open);
+            let (close_f, close_t) = phase(&close);
+            open_frame = open_frame.max(open_f);
+            open_task = open_task.max(open_t);
+            close_frame = close_frame.max(close_f);
+            close_task = close_task.max(close_t);
+            // A probe that saw no frame measured nothing, and a finished surface must
+            // not leave a flight layer, a hidden node or a record behind.
+            if open["frames"].as_i64().unwrap_or(0) == 0 || close["frames"].as_i64().unwrap_or(0) == 0 {
+                problem.get_or_insert_with(|| "the probe saw no frame".to_string());
+            }
+            let leftovers = close["leftovers"].as_i64().unwrap_or(0);
+            if leftovers > 0 {
+                problem.get_or_insert_with(|| format!("{leftovers} flight node(s) or surface record(s) left after close"));
+            }
         }
+
+        let worst = open_frame.max(open_task).max(close_frame).max(close_task);
+        let over = worst > MOTION_BUDGET_MS;
+        if over || problem.is_some() {
+            failed = true;
+        }
+        let verdict = if over || problem.is_some() { "FAIL" } else { "OK" };
+        let note = problem.map(|p| format!(" ({p})")).unwrap_or_default();
+        out.push_str(&format!(
+            "    [{verdict}] {}: open frame {open_frame} ms, task {open_task} ms; close frame {close_frame} ms, task {close_task} ms{note}\n",
+            target.label
+        ));
     }
     let _ = eval(&mut cdp, "stopMotionProbe()");
     failed
@@ -3710,13 +3868,66 @@ USAGE:
   udtk autostart [status|enable|disable]
   udtk tasks [status|register [name]|unregister <name>|cleanup-old]
   udtk doc [--check]                      Open the project book; --check finds what rotted in it
-  udtk path [status|ensure]
+  udtk path [status|ensure|remove]
   udtk build [-j N] | stop | run [args...]"
         .to_string()
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_path_entry_is_matched_whole() {
+        let p = r"C:\Windows;C:\Program Files\UniDTK2\;D:\tools";
+        assert!(!super::path_has_dir(p, r"C:\Program Files\UniDTK"));
+        assert!(super::path_has_dir(p, r"c:\program files\unidtk2"));
+        assert!(super::path_has_dir(r"C:\a;C:\Program Files\UniDTK\", r"C:\Program Files\UniDTK"));
+    }
+
+    #[test]
+    fn path_without_dir_drops_only_that_entry() {
+        let p = r"C:\Windows;C:\Program Files\UniDTK\;C:\Program Files\UniDTK2;;D:\tools";
+        assert_eq!(
+            super::path_without_dir(p, r"C:\Program Files\UniDTK"),
+            r"C:\Windows;C:\Program Files\UniDTK2;D:\tools"
+        );
+        assert_eq!(super::path_without_dir(r"C:\a", r"C:\x"), r"C:\a");
+    }
+
+    #[test]
+    fn path_with_dir_appends_once_and_never_leaves_an_empty_entry() {
+        assert_eq!(super::path_with_dir("", r"C:\x"), r"C:\x");
+        assert_eq!(super::path_with_dir(r"C:\a;", r"C:\x"), r"C:\a;C:\x");
+        assert_eq!(super::path_with_dir(r"C:\a;C:\x\", r"C:\x"), r"C:\a;C:\x\");
+    }
+
+    #[test]
+    fn stop_succeeds_only_when_nothing_is_left() {
+        assert_eq!(super::stop_verdict(&[], 0).unwrap(), "stopped");
+        assert!(super::stop_verdict(&[], 2).unwrap().contains("2 process"));
+        assert!(super::stop_verdict(&[4, 8], 1).unwrap_err().contains("4, 8"));
+    }
+
+    #[test]
+    fn the_held_exe_comes_back_unless_the_build_replaced_it() {
+        let dir = std::env::temp_dir().join(format!("udtk-held-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("udtk.exe");
+        std::fs::write(&exe, b"old").unwrap();
+        {
+            let _guard = super::HeldExe::hold(&exe).unwrap();
+            assert!(!exe.exists());
+        }
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old");
+        {
+            let mut guard = super::HeldExe::hold(&exe).unwrap();
+            std::fs::write(&exe, b"new").unwrap(); // what cargo does
+            guard.release_for_new_build();
+        }
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        assert!(!dir.join("udtk.exe.held").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

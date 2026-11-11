@@ -22,7 +22,7 @@ udtk stop
 2. It then polls for processes whose executable lies under the install directory, excluding itself. The total wait is the grace period plus **2500 ms**. The poll uses PowerShell and `Win32_Process`.
 3. If processes remain after the deadline, it runs `taskkill /F` on each. Finally it runs `schtasks /end` for the elevated tasks (`UniDTKSingbox`, `UniDTKVpnStop`).
 
-It prints `stopped`. It does not check the result after the forced kill.
+It then looks at the install directory again, for up to two more seconds, because a killed process takes a moment to leave the list. If nothing is left it prints `stopped` (or `stopped (N process(es) had to be killed)`) and exits 0. If something is still running it fails with `still running after quit and kill: pid ...`, and `udtk build` and the installer's pre-install hook stop there instead of failing later with an opaque `os error 32`.
 
 ## 13.3 `udtk doc`
 

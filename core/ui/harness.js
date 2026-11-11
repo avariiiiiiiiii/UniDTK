@@ -389,6 +389,10 @@ export const UniDtkHarness = {
       worstFrameMs: Math.round(Math.max(0, ...probe.gaps)),
       longTasks: probe.tasks.length,
       longestTaskMs: Math.round(Math.max(0, ...probe.tasks)),
+      // What a finished surface must not leave behind: parts hidden for a flight,
+      // a flight layer, or a record on the stack.
+      leftovers: document.querySelectorAll("[data-flight-hidden], .surface-flight-layer").length
+        + surfaceManager.activeStack.length,
     };
     probe.gaps.length = 0;
     probe.tasks.length = 0;
