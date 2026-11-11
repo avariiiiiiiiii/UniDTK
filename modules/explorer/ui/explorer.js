@@ -177,12 +177,13 @@ class NothingExplorer {
         }
     }
 
+    // A failed search is an error the caller shows, not an empty result.
     async searchFiles(query) {
         try {
             return await invoke('search_files', { query });
         } catch (e) {
             console.error('searchFiles error:', e);
-            return [];
+            throw e;
         }
     }
 
@@ -2027,7 +2028,8 @@ class NothingExplorer {
             if (!this.isShown()) return;
             if (e.key !== 'Enter') return;
             if (e.target?.closest('input, textarea, [contenteditable]')) return;
-            const path = [...this.selectedFiles][0];
+            // The item the user clicked last, not the one that was selected first.
+            const path = this.selectedFiles.has(this.lastSelectedPath) ? this.lastSelectedPath : [...this.selectedFiles][0];
             if (!path) return;
             e.preventDefault();
             const tab = this.tabManager.getActiveTab();
@@ -2386,16 +2388,27 @@ class NothingExplorer {
             // The index covers the folder search was opened in. Rebuilt when the folder changes;
             // released by closeSearch().
             const tab = this.tabManager.getActiveTab();
-            if (tab && tab.path !== '::MY_PC::' && this._searchRoot !== tab.path) {
-                this._searchRoot = tab.path;
+            if (tab && tab.path === '::MY_PC::') {
+                // There is no folder to index here, and the index of the last folder would
+                // answer for the wrong place.
+                container.innerHTML = '<div class="search-no-results">Откройте папку, чтобы искать в ней</div>';
+                return;
+            }
+            if (tab && this._searchRoot !== tab.path) {
+                // Remembered only once the index exists: a failed build is tried again by the
+                // next query instead of being taken for a finished one.
                 await invoke('build_search_index', { root: tab.path });
                 if (this._searchToken !== searchToken) return;
+                this._searchRoot = tab.path;
             }
             const results = await this.searchFiles(query);
             if (this._searchToken !== searchToken) return;
             this.renderSearchResults(results);
         } catch (e) {
             console.error('Search error:', e);
+            if (this._searchToken === searchToken) {
+                container.innerHTML = `<div class="search-no-results">Поиск не удался: ${escapeHtml(String(e?.message || e))}</div>`;
+            }
         }
     }
 

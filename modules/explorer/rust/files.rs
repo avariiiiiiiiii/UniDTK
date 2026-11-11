@@ -170,20 +170,6 @@ pub fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Renaming onto an existing path would silently replace it, so the destination
-/// must be free. The one exception is a case-only rename of a file onto itself
-/// (`report.txt` -> `Report.txt`): both names resolve to the same volume and file
-/// index, so the rename changes only the stored case.
-fn check_rename_destination(from: &Path, to: &Path) -> Result<(), String> {
-    if !destination_exists(to) {
-        return Ok(());
-    }
-    if is_case_only_rename(from, to) {
-        return Ok(());
-    }
-    Err(format!("destination already exists: {}", to.display()))
-}
-
 fn destination_exists(to: &Path) -> bool {
     // symlink_metadata also sees dangling links, which a plain exists() misses.
     std::fs::symlink_metadata(to).is_ok()
@@ -231,10 +217,53 @@ fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
     Ok(a == b)
 }
 
+/// Renaming onto an existing path would silently replace it, so the destination
+/// must be free. The one exception is a case-only rename of a file onto itself
+/// (`report.txt` -> `Report.txt`): both names resolve to the same volume and file
+/// index, so the rename changes only the stored case.
+///
+/// Anything else goes through `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`, so a
+/// file that appears between the check and the move is refused by the system, not
+/// replaced; `MOVEFILE_COPY_ALLOWED` lets a file move to another drive.
 pub fn rename_path(from: &str, to: &str) -> Result<(), String> {
     let (from, to) = (Path::new(from), Path::new(to));
-    check_rename_destination(from, to)?;
-    std::fs::rename(from, to).map_err(|e| format!("rename: {e}"))
+    if destination_exists(to) {
+        if is_case_only_rename(from, to) {
+            return std::fs::rename(from, to).map_err(|e| format!("rename: {e}"));
+        }
+        return Err(format!("destination already exists: {}", to.display()));
+    }
+    match move_without_replacing(from, to) {
+        // A folder cannot be moved to another drive in one call: copy it, then remove
+        // the source once the copy is complete.
+        Err(code) if code == ERROR_NOT_SAME_DEVICE && from.is_dir() => {
+            copy_path(&from.to_string_lossy(), &to.to_string_lossy())?;
+            std::fs::remove_dir_all(from).map_err(|e| {
+                format!("moved a copy to {}, but cannot remove the source: {e}", to.display())
+            })
+        }
+        Err(code) => Err(format!("rename: {}", std::io::Error::from_raw_os_error(code as i32))),
+        Ok(()) => Ok(()),
+    }
+}
+
+const ERROR_NOT_SAME_DEVICE: u32 = 17;
+
+/// `Err` carries the Win32 error code.
+#[cfg(windows)]
+fn move_without_replacing(from: &Path, to: &Path) -> Result<(), u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_COPY_ALLOWED};
+    let wide = |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain(std::iter::once(0)).collect() };
+    let (from_w, to_w) = (wide(from), wide(to));
+    unsafe { MoveFileExW(PCWSTR(from_w.as_ptr()), PCWSTR(to_w.as_ptr()), MOVEFILE_COPY_ALLOWED) }
+        .map_err(|e| (e.code().0 as u32) & 0xFFFF)
+}
+
+#[cfg(not(windows))]
+fn move_without_replacing(from: &Path, to: &Path) -> Result<(), u32> {
+    std::fs::rename(from, to).map_err(|e| e.raw_os_error().unwrap_or(0) as u32)
 }
 
 pub fn copy_path(from: &str, to: &str) -> Result<(), String> {
@@ -247,6 +276,17 @@ pub fn copy_path(from: &str, to: &str) -> Result<(), String> {
     }
     if from.is_dir() {
         ensure_not_into_itself(from, to)?;
+        // Pasting a folder onto one of the same name would merge the two and stop at
+        // the first file that exists, leaving a mix: refuse, as a file is refused.
+        if destination_exists(to) {
+            return Err(format!("destination already exists: {}", to.display()));
+        }
+        // The tree is built in a place that did not exist: if any part fails, it is
+        // removed again, so there is no partial copy to find later.
+        return copy_recursive(from, to).map_err(|error| {
+            let _ = std::fs::remove_dir_all(to);
+            error
+        });
     }
     copy_recursive(from, to)
 }
@@ -319,9 +359,36 @@ fn is_filesystem_root(path: &str) -> bool {
     trimmed.is_empty() || (bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
+/// Why `path` cannot go to the Recycle Bin, if it cannot. The shell deletes an item
+/// for good, without a word, when its drive has no bin (network shares, removable
+/// drives), and this command's name promises the opposite.
+fn recycle_bin_missing(path: &str) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    // GetDriveType's answer for a local disk with a Recycle Bin (the constant sits in a
+    // windows-crate feature this crate does not otherwise need).
+    const DRIVE_FIXED: u32 = 3;
+    let text = path.trim();
+    let text = text.strip_prefix(r"\\?\").unwrap_or(text);
+    if text.starts_with(r"UNC\") || text.starts_with(r"\\") {
+        return Some(format!("{path}: network locations have no Recycle Bin, so nothing was deleted"));
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let root: Vec<u16> = format!("{}:\\", bytes[0] as char).encode_utf16().chain(std::iter::once(0)).collect();
+        if unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } != DRIVE_FIXED {
+            return Some(format!("{path}: this drive has no Recycle Bin, so nothing was deleted"));
+        }
+    }
+    None
+}
+
 pub fn delete_to_recycle_bin(path: &str) -> Result<(), String> {
     if is_filesystem_root(path) {
         return Err(format!("refusing to delete a drive root: {path:?}"));
+    }
+    if let Some(reason) = recycle_bin_missing(path) {
+        return Err(reason);
     }
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
@@ -388,6 +455,62 @@ mod tests {
         let dir = root.0.join("New Folder");
         assert!(create_directory(path_str(&dir)).is_ok());
         assert_eq!(create_directory(path_str(&dir)), Err("already exists".to_string()));
+    }
+
+    #[test]
+    fn rename_moves_to_a_free_name_and_never_replaces() {
+        let root = Scratch::new("rename-free");
+        let (from, to) = (root.0.join("a.txt"), root.0.join("b.txt"));
+        std::fs::write(&from, "payload").unwrap();
+        rename_path(path_str(&from), path_str(&to)).expect("a free name is fine");
+        assert!(!from.exists());
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "payload");
+
+        // A folder moves as well.
+        let (dir, moved) = (root.0.join("d"), root.0.join("e"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "x").unwrap();
+        rename_path(path_str(&dir), path_str(&moved)).unwrap();
+        assert!(moved.join("f.txt").exists());
+
+        // The system call itself refuses a destination that exists: no REPLACE_EXISTING.
+        std::fs::write(&from, "again").unwrap();
+        assert!(move_without_replacing(&from, &to).is_err());
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "payload");
+    }
+
+    #[test]
+    fn a_folder_is_not_merged_into_an_existing_one_and_a_failed_copy_leaves_nothing() {
+        let root = Scratch::new("copy-merge");
+        let (src, dst) = (root.0.join("src"), root.0.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("new.txt"), "n").unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("old.txt"), "o").unwrap();
+        assert!(copy_path(path_str(&src), path_str(&dst)).is_err());
+        assert!(!dst.join("new.txt").exists(), "nothing was merged in");
+        assert!(dst.join("old.txt").exists());
+
+        // A copy that fails midway is removed again: one file is held open exclusively,
+        // so copying it fails after the rest may already have been written.
+        use std::os::windows::fs::OpenOptionsExt;
+        let (src2, dst2) = (root.0.join("src2"), root.0.join("dst2"));
+        std::fs::create_dir_all(&src2).unwrap();
+        std::fs::write(src2.join("a.txt"), "a").unwrap();
+        std::fs::write(src2.join("z.txt"), "z").unwrap();
+        let _held = std::fs::OpenOptions::new().read(true).share_mode(0).open(src2.join("z.txt")).unwrap();
+        assert!(copy_path(path_str(&src2), path_str(&dst2)).is_err());
+        assert!(!dst2.exists(), "a failed copy must leave no partial tree");
+    }
+
+    #[test]
+    fn the_recycle_bin_command_refuses_places_that_have_none() {
+        let unc = r"\\no-such-host\share\file.txt";
+        assert!(recycle_bin_missing(unc).is_some());
+        assert!(recycle_bin_missing(r"\\?\UNC\no-such-host\share\file.txt").is_some());
+        assert!(recycle_bin_missing(r"C:\Users\x\file.txt").is_none());
+        let error = delete_to_recycle_bin(unc).unwrap_err();
+        assert!(error.contains("Recycle Bin"), "{error}");
     }
 
     #[test]

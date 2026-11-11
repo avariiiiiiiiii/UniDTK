@@ -2,13 +2,23 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
+    SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
 };
 use windows::Win32::UI::Shell::{DragQueryFileW, DROPFILES, HDROP};
 const CF_HDROP: u32 = 15;
+
+/// What the next program that pastes these files does with them. Explorer and most file
+/// managers read it from the "Preferred DropEffect" format: without it every paste is a copy.
+const DROPEFFECT_COPY: u32 = 1;
+const DROPEFFECT_MOVE: u32 = 2;
+
+fn drop_effect(cut: bool) -> u32 {
+    if cut { DROPEFFECT_MOVE } else { DROPEFFECT_COPY }
+}
 
 /// Attempts made on `OpenClipboard` while another process holds the clipboard.
 const OPEN_CLIPBOARD_ATTEMPTS: u32 = 10;
@@ -51,7 +61,7 @@ fn release_unless_owned<F: FnOnce()>(outcome: Result<(), String>, release: F) ->
     outcome
 }
 
-pub fn copy_files_to_clipboard(paths: &[PathBuf], _cut: bool) -> Result<(), String> {
+pub fn copy_files_to_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String> {
     if paths.is_empty() {
         return Ok(());
     }
@@ -69,16 +79,43 @@ pub fn copy_files_to_clipboard(paths: &[PathBuf], _cut: bool) -> Result<(), Stri
     unsafe {
         let h_global = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, total_bytes)
             .map_err(|e| format!("GlobalAlloc failed: {e}"))?;
-        let outcome = publish_hdrop(h_global, dropfiles_size, &buffer);
+        let h_effect = match alloc_drop_effect(drop_effect(cut)) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = GlobalFree(h_global);
+                return Err(error);
+            }
+        };
+        let outcome = publish_hdrop(h_global, dropfiles_size, &buffer, h_effect);
+        // The effect block is released by the function that failed to hand it over.
         release_unless_owned(outcome, || {
             let _ = GlobalFree(h_global);
         })
     }
 }
 
-/// Fills a DROPFILES block and hands it to the clipboard. Every failure returns
-/// before the clipboard takes ownership, so the caller frees the block.
-unsafe fn publish_hdrop(h_global: HGLOBAL, dropfiles_size: usize, buffer: &[u16]) -> Result<(), String> {
+unsafe fn alloc_drop_effect(effect: u32) -> Result<HGLOBAL, String> {
+    let handle = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 4).map_err(|e| format!("GlobalAlloc failed: {e}"))?;
+    let ptr = GlobalLock(handle);
+    if ptr.is_null() {
+        let _ = GlobalFree(handle);
+        return Err("GlobalLock failed".into());
+    }
+    *(ptr as *mut u32) = effect;
+    let _ = GlobalUnlock(handle);
+    Ok(handle)
+}
+
+/// Fills a DROPFILES block and hands it to the clipboard, with the drop effect
+/// (copy or move) beside it. Every failure returns before the clipboard takes ownership
+/// of `h_global`, so the caller frees that block; the effect block is freed here when
+/// the clipboard did not take it.
+unsafe fn publish_hdrop(
+    h_global: HGLOBAL,
+    dropfiles_size: usize,
+    buffer: &[u16],
+    h_effect: HGLOBAL,
+) -> Result<(), String> {
     let ptr = GlobalLock(h_global);
     if ptr.is_null() {
         return Err("GlobalLock failed".into());
@@ -93,14 +130,33 @@ unsafe fn publish_hdrop(h_global: HGLOBAL, dropfiles_size: usize, buffer: &[u16]
 
     let _ = GlobalUnlock(h_global);
 
-    open_clipboard()?;
-    let result = EmptyClipboard()
-        .map_err(|e| format!("EmptyClipboard failed: {e}"))
-        .and_then(|_| {
-            SetClipboardData(CF_HDROP, HANDLE(h_global.0))
-                .map(|_| ())
-                .map_err(|e| format!("SetClipboardData failed: {e}"))
-        });
+    if let Err(error) = open_clipboard() {
+        let _ = GlobalFree(h_effect);
+        return Err(error);
+    }
+    let effect_format = RegisterClipboardFormatW(windows::core::w!("Preferred DropEffect"));
+    let result = (|| -> Result<(), String> {
+        if let Err(e) = EmptyClipboard() {
+            let _ = GlobalFree(h_effect);
+            return Err(format!("EmptyClipboard failed: {e}"));
+        }
+        // The effect first: if the file list then fails, emptying the clipboard again
+        // drops it, and the caller still owns the file-list block.
+        if effect_format == 0 {
+            let _ = GlobalFree(h_effect);
+            return Err("RegisterClipboardFormat failed".to_string());
+        }
+        if let Err(e) = SetClipboardData(effect_format, HANDLE(h_effect.0)) {
+            let _ = GlobalFree(h_effect);
+            return Err(format!("SetClipboardData (drop effect) failed: {e}"));
+        }
+        SetClipboardData(CF_HDROP, HANDLE(h_global.0))
+            .map(|_| ())
+            .map_err(|e| {
+                let _ = EmptyClipboard();
+                format!("SetClipboardData failed: {e}")
+            })
+    })();
     let _ = CloseClipboard();
     result
 }
