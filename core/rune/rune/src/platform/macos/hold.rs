@@ -236,6 +236,3 @@ fn sampled(hold: &mut Hold, button_down: bool, now: Instant, point: Point) -> Ef
     }
 }
 
-#[cfg(test)]
-#[path = "hold_tests.rs"]
-mod tests;

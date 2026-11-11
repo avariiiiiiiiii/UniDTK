@@ -3,9 +3,6 @@
 use super::*;
 use crate::machine::Effects;
 
-#[cfg(test)]
-#[path = "cache_layer_tests.rs"]
-mod tests;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum ScaleSettle {

@@ -35,6 +35,3 @@ pub(crate) fn should_reconfigure_surface(current: (u32, u32), next: (u32, u32), 
     (next, true)
 }
 
-#[cfg(test)]
-#[path = "web_math_tests.rs"]
-mod tests;

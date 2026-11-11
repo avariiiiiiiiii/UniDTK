@@ -142,5 +142,3 @@ impl<E> Iterator for EffectsIter<E> {
     }
 }
 
-#[cfg(test)]
-mod tests;

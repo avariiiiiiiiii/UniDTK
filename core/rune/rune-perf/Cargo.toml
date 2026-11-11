@@ -9,8 +9,10 @@ description = "Bounded local performance recording for native apps"
 procwatch = { path = "../procwatch" }
 serde_json = "1"
 
-[dev-dependencies]
-tempfile = "3"
-
 [lints]
 workspace = true
+
+# UniDTK: Rune's tests were not imported (see core/rune/UPSTREAM.md).
+[lib]
+test = false
+doctest = false

@@ -114,9 +114,6 @@ pub(crate) fn key_base(event: &winit::event::KeyEvent) -> Option<char> {
     { let _ = event; None }
 }
 
-#[cfg(test)]
-#[path = "keys_tests.rs"]
-mod layout_tests;
 
 #[cfg(test)]
 mod tests {

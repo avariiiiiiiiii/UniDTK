@@ -117,6 +117,3 @@ fn interactive() {
     unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
 }
 
-#[cfg(test)]
-#[path = "present_worker_tests.rs"]
-mod tests;

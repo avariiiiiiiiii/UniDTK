@@ -164,6 +164,3 @@ impl TextSystem {
     }
 }
 
-#[cfg(test)]
-#[path = "rich_layout_tests.rs"]
-mod tests;

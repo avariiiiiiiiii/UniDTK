@@ -15,3 +15,8 @@ windows-registry = "0.6"
 
 [lints]
 workspace = true
+
+# UniDTK: Rune's tests were not imported (see core/rune/UPSTREAM.md).
+[lib]
+test = false
+doctest = false

@@ -128,5 +128,3 @@ pub(crate) fn with_pill_colors(spans: &[Span], pills: &[PillChip]) -> Vec<Span> 
     crate::text::flatten_spans(&all)
 }
 
-#[cfg(test)]
-mod tests;

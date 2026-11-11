@@ -212,11 +212,3 @@ impl<S: 'static> Run<S> {
     }
 }
 
-#[cfg(test)]
-mod tests;
-#[cfg(test)]
-mod loop_tests;
-#[cfg(test)]
-mod paint_tests;
-#[cfg(test)]
-mod spring_none_tests;

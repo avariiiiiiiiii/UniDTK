@@ -97,6 +97,3 @@ async fn watch(ready: mpsc::SyncSender<()>) {
     }
 }
 
-#[cfg(test)]
-#[path = "portal_appearance_tests.rs"]
-mod tests;

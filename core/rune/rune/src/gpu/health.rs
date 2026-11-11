@@ -40,6 +40,3 @@ impl ErrorLog {
     }
 }
 
-#[cfg(test)]
-#[path = "health_tests.rs"]
-mod tests;

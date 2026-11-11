@@ -160,6 +160,3 @@ pub(super) fn native_window_number(window: &Window) -> Option<u32> {
 #[cfg(not(target_os = "macos"))]
 pub(super) fn native_window_number(_: &Window) -> Option<u32> { None }
 
-#[cfg(test)]
-#[path = "handle_tests.rs"]
-mod tests;

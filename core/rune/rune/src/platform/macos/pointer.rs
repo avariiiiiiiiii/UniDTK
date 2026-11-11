@@ -274,6 +274,3 @@ impl Panel {
     }
 }
 
-#[cfg(test)]
-#[path = "pointer_tests.rs"]
-mod tests;

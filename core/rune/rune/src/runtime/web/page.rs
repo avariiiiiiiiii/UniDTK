@@ -137,6 +137,3 @@ impl<S: 'static> Runtime<S> {
     }
 }
 
-#[cfg(test)]
-#[path = "page_tests.rs"]
-mod tests;

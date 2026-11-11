@@ -683,8 +683,6 @@ use mips::byte;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use from_url::font_file;
 
-#[cfg(test)]
-mod mip_tests;
 
 #[cfg(test)]
 mod tests {

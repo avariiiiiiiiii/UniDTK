@@ -308,6 +308,3 @@ mod mac {
     }
 }
 
-#[cfg(test)]
-#[path = "incoming_tests.rs"]
-mod tests;

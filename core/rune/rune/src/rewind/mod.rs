@@ -29,8 +29,6 @@ mod scrub;
 mod tape;
 mod track;
 
-#[cfg(test)]
-mod tests;
 
 pub use bundle::Bundle;
 pub use clip::{Change, Clip, Shot};

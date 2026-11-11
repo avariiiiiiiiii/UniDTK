@@ -26,3 +26,5 @@ Not taken: `rune-kit`, `rune-mermaid`, `rune-highlights`, `rune-luau`, `rune-kno
 ## Changes made to the copy
 
 1. **Import.** Each crate's `Cargo.toml`, `src/` and embedded assets were copied unchanged. The `tests/`, `examples/` and `benches/` directories were not copied.
+2. **Workspace.** The crates are members of the UniDTK workspace. They inherit `edition`, `license` and the lint table from the root `Cargo.toml`, which repeats upstream's values; `clippy.toml` sits in this directory so that it applies to these crates only.
+3. **Tests removed.** The `[[test]]`, `[[example]]` and dev-dependency sections were removed from the manifests, every in-source test file (`*_tests.rs`, `tests.rs`, `src/**/tests/`) was deleted together with the `mod` line that declared it (178 files), and each crate sets `[lib] test = false, doctest = false`, so the inline `#[cfg(test)]` blocks that remain are never built. Many of these tests needed a real GPU adapter or fonts from upstream's `opencode` theme, which is not taken.

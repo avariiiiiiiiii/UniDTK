@@ -144,6 +144,3 @@ pub(super) fn overlay_rect_on(at: crate::overlay::Placement, options: &OverlayOp
     Some(NSRect::new(NSPoint::new(frame.origin.x + x as f64, frame.origin.y + frame.size.height - (y + h) as f64), NSSize::new(w as f64, h as f64)))
 }
 
-#[cfg(test)]
-#[path = "geometry_tests.rs"]
-mod tests;

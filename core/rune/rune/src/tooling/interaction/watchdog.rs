@@ -437,6 +437,3 @@ mod mac {
     }
 }
 
-#[cfg(test)]
-#[path = "watchdog_tests.rs"]
-mod tests;

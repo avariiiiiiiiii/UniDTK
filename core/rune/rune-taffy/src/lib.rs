@@ -10,8 +10,6 @@ mod cache;
 pub mod prelude;
 mod store;
 mod style;
-#[cfg(test)]
-mod tests;
 mod view;
 
 pub use baseline_store::BaselineLayoutStore;

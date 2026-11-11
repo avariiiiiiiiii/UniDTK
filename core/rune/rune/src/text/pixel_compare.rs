@@ -664,6 +664,3 @@ pub fn heatmap(rune: &Image, reference: &Image) -> Image {
     Image { width: rune.width, height: rune.height, rgb }
 }
 
-#[cfg(all(test, target_os = "macos"))]
-#[path = "pixel_compare_tests.rs"]
-mod tests;

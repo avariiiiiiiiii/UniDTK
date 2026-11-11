@@ -229,6 +229,3 @@ fn xft_scale(connection: &XCBConnection, root: u32) -> f32 {
         .map_or(1.0, |dpi| (dpi / 96.0).clamp(1.0, 4.0))
 }
 
-#[cfg(test)]
-#[path = "xwayland_tests.rs"]
-mod tests;

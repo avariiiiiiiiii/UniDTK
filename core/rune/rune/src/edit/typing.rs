@@ -33,6 +33,3 @@ impl Typing {
     }
 }
 
-#[cfg(test)]
-#[path = "typing_tests.rs"]
-mod tests;

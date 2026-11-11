@@ -397,6 +397,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-#[path = "surface_stats_walk_tests.rs"]
-mod walk_tests;

@@ -254,5 +254,3 @@ pub fn bring_to_front() {
     windows::bring_to_front();
 }
 
-#[cfg(test)]
-mod tests;

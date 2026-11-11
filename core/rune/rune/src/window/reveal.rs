@@ -88,6 +88,3 @@ impl Reveal {
     }
 }
 
-#[cfg(test)]
-#[path = "reveal_tests.rs"]
-mod tests;

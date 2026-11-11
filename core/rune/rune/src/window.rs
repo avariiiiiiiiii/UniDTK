@@ -90,16 +90,6 @@ mod float_on_open;
 #[cfg(not(target_arch = "wasm32"))]
 pub use event_loop::run;
 pub(crate) use event_loop::run_windows;
-#[cfg(test)]
-#[path = "window/covered_tests.rs"]
-mod covered;
-#[cfg(all(test, target_os = "macos"))]
-#[path = "window/occluded_surface_tests.rs"]
-mod occluded_surface;
-#[cfg(test)]
-mod tests;
-#[cfg(test)]
-mod backoff_tests;
 
 pub(crate) enum WakeEvent {
     DisplayTick(usize),

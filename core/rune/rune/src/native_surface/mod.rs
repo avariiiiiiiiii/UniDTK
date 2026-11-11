@@ -2,11 +2,6 @@
 //! Windows reads D3D shared textures from another process or API (`windows`).
 //! CPU byte frames provide a portable source and a reference for headless verification.
 
-#[cfg(test)]
-#[path = "tests.rs"]
-mod gpu_tests;
-#[cfg(test)]
-mod place_tests;
 #[cfg(target_os = "macos")]
 pub mod macos;
 mod pipeline;

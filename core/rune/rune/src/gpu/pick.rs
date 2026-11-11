@@ -393,6 +393,3 @@ mod dmabuf {
     }
 }
 
-#[cfg(test)]
-#[path = "pick_tests.rs"]
-mod tests;

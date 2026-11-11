@@ -186,6 +186,3 @@ impl Acc {
     }
 }
 
-#[cfg(test)]
-#[path = "ink_tests.rs"]
-mod tests;

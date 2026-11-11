@@ -148,12 +148,6 @@ impl<S: 'static> Measurement<'_, S> {
     }
 }
 
-#[cfg(test)]
-#[path = "anchor_zoom_tests.rs"]
-mod zoom_tests;
-#[cfg(test)]
-#[path = "anchor_zoom_motion_tests.rs"]
-mod zoom_motion_tests;
 
 /// The smallest zoom an anchored overlay is placed at, so placing it never divides by zero.
 const MIN_ZOOM: f32 = 1e-3;

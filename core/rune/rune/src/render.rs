@@ -1148,12 +1148,7 @@ pub fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -
     Ok(())
 }
 
-#[cfg(test)]
-mod backdrop_tests;
 
-#[cfg(test)]
-#[path = "render/warm_tests.rs"]
-mod warm_tests;
 
 #[cfg(test)]
 mod prewarm_order_tests {

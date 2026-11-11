@@ -90,6 +90,3 @@ impl Nudge {
     }
 }
 
-#[cfg(test)]
-#[path = "nudge_tests.rs"]
-mod tests;

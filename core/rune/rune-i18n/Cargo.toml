@@ -34,3 +34,8 @@ web-sys = { version = "0.3", features = ["Navigator", "Window"] }
 
 [lints]
 workspace = true
+
+# UniDTK: Rune's tests were not imported (see core/rune/UPSTREAM.md).
+[lib]
+test = false
+doctest = false

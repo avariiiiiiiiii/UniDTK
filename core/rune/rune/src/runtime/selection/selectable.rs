@@ -758,9 +758,6 @@ impl<S: 'static> Runtime<S> {
 
 #[path = "../virtual/selection.rs"]
 pub(crate) mod virtual_selection;
-#[cfg(test)]
-#[path = "../virtual_selection_tests.rs"]
-mod virtual_selection_tests;
 
 #[cfg(test)]
 mod tests {

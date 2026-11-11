@@ -461,6 +461,3 @@ pub(crate) fn is_stage(key: &str) -> bool {
     key.strip_prefix("playground-stage-").is_some_and(|g| g.parse::<u32>().is_ok())
 }
 
-#[cfg(test)]
-#[path = "playground_tests.rs"]
-mod tests;

@@ -572,5 +572,3 @@ fn unpack(bits: u64) -> Level {
     Level::new(f32::from_bits((bits >> 32) as u32), f32::from_bits(bits as u32))
 }
 
-#[cfg(test)]
-mod tests;

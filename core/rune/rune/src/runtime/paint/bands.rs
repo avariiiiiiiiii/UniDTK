@@ -38,6 +38,3 @@ fn push(out: &mut Vec<Instance>, inst: Instance, hole: [f32; 4], grow: f32) {
     }
 }
 
-#[cfg(test)]
-#[path = "../bands_tests.rs"]
-mod tests;

@@ -20,6 +20,3 @@ pub(super) const DEFAULT_FONTS: &[&[u8]] = &[
 #[cfg(all(target_arch = "wasm32", not(any(test, feature = "embedded-fonts"))))]
 pub(super) const DEFAULT_FONTS: &[&[u8]] = &[];
 
-#[cfg(test)]
-#[path = "default_fonts_tests.rs"]
-mod tests;

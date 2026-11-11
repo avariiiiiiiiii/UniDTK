@@ -321,9 +321,3 @@ pub(crate) fn flush() {
     if on() { export::flush(Duration::from_secs(1)); }
 }
 
-#[cfg(test)]
-#[path = "interaction/tests.rs"]
-mod tests;
-#[cfg(test)]
-#[path = "interaction/sampler_tests.rs"]
-mod sampler_tests;

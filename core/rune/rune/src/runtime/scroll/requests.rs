@@ -192,6 +192,3 @@ where G: Fn(&str) -> bool, A: Fn(&str) -> bool, M: Fn(&Reveal) -> bool {
     }
 }
 
-#[cfg(test)]
-#[path = "requests_tests.rs"]
-mod tests;

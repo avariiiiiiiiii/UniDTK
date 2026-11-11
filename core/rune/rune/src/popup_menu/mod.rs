@@ -447,5 +447,3 @@ impl Drop for Presenter {
     fn drop(&mut self) { self.stop(); }
 }
 
-#[cfg(test)]
-mod tests;

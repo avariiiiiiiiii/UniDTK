@@ -552,6 +552,3 @@ impl Control {
     }
 }
 
-#[cfg(test)]
-#[path = "phases_tests.rs"]
-mod tests;

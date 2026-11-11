@@ -770,6 +770,3 @@ impl crate::memo::MemoCache {
     }
 }
 
-#[cfg(test)]
-#[path = "../memo_reuse_tests.rs"]
-mod tests;

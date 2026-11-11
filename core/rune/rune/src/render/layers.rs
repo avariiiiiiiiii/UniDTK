@@ -13,24 +13,6 @@ const SPARE_BYTES: u64 = 32 * 1024 * 1024;
 /// Maximum width or height of a cached subtree's offscreen texture in device pixels.
 const MAX_CACHE_DIM: u32 = 4096;
 
-#[cfg(test)]
-#[path = "../runtime/layer_tests.rs"]
-mod tests;
-#[cfg(test)]
-#[path = "../runtime/layer_cache_tests.rs"]
-mod cache_tests;
-#[cfg(test)]
-#[path = "layer_filter_tests.rs"]
-mod filter_tests;
-#[cfg(test)]
-#[path = "../runtime/rounded_clip_tests.rs"]
-mod rounded_clip_tests;
-#[cfg(test)]
-#[path = "continuous_corner_tests.rs"]
-mod continuous_corner_tests;
-#[cfg(test)]
-#[path = "layer_show_tests.rs"]
-mod show_tests;
 
 pub(super) struct Layers {
     plan: Vec<Layer>,

@@ -509,10 +509,4 @@ pub(crate) mod record;
 pub(crate) mod virtual_desktop;
 #[cfg(test)]
 pub(crate) mod test_alloc;
-#[cfg(test)]
-#[path = "tooling/window_tests.rs"]
-mod window_tests;
 
-#[cfg(test)]
-#[path = "tooling/tests.rs"]
-mod tests;

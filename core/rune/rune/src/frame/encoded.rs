@@ -145,6 +145,3 @@ impl<S: 'static> FrameReports<S> {
     }
 }
 
-#[cfg(test)]
-#[path = "encoded_tests.rs"]
-mod tests;

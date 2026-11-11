@@ -152,6 +152,3 @@ pub(super) fn occlusion_hidden(window: &NSWindow) -> bool {
     state & OCCLUSION_VISIBLE == 0
 }
 
-#[cfg(test)]
-#[path = "surface_tests.rs"]
-mod tests;

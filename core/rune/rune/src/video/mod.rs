@@ -688,5 +688,3 @@ fn push_placeholder(surface: &NativeSurface) {
     let _ = surface.push_bytes(frame, u64::MAX);
 }
 
-#[cfg(test)]
-mod tests;

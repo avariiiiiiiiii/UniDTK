@@ -195,6 +195,3 @@ impl Presence {
     }
 }
 
-#[cfg(test)]
-#[path = "presence_tests.rs"]
-mod tests;

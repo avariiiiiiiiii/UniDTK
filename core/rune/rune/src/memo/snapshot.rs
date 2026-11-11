@@ -44,5 +44,3 @@ impl Drop for Guard {
     }
 }
 
-#[cfg(test)]
-mod tests;

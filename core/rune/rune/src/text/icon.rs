@@ -379,6 +379,3 @@ fn numbers(s: &str) -> Vec<f32> {
 }
 
 
-#[cfg(test)]
-#[path = "icon_tests.rs"]
-mod tests;

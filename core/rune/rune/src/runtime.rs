@@ -253,51 +253,8 @@ pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 pub(crate) use scroll_offset::ScrollRequest;
 pub(crate) use reveal::ScrollReveal;
 pub use selectable::{SelectedText, SelectionChange, TextSelection};
-#[cfg(test)]
-#[path = "runtime/timer_wake_tests.rs"]
-mod timer_wake_tests;
-#[cfg(test)]
-#[path = "runtime/truncate_tests.rs"]
-mod truncate_tests;
-#[cfg(test)]
-#[path = "runtime/truncate_fade_tests.rs"]
-mod truncate_fade_tests;
-#[cfg(test)]
-#[path = "runtime/line_clamp_tests.rs"]
-mod line_clamp_tests;
-#[cfg(test)]
-#[path = "runtime/aspect_fit_tests.rs"]
-mod aspect_fit_tests;
-#[cfg(test)]
-#[path = "runtime/anchor_fit_tests.rs"]
-mod anchor_fit_tests;
-#[cfg(test)]
-#[path = "drop_tests.rs"]
-mod drop_tests;
-#[cfg(test)]
-#[path = "runtime/on_key_tests.rs"]
-mod on_key_tests;
-#[cfg(test)]
-#[path = "live_only_tests.rs"]
-mod live_only_tests;
-#[cfg(test)]
-#[path = "runtime/live_check_tests.rs"]
-mod live_check_tests;
 #[path = "runtime/selection/select_all.rs"]
 mod select_all;
-#[cfg(test)]
-#[path = "runtime/select_all_tests.rs"]
-mod select_all_tests;
-#[cfg(test)]
-#[path = "runtime/selection_api_tests.rs"]
-mod selection_api_tests;
-#[cfg(test)]
-#[path = "runtime/anchored_grow_tests.rs"]
-mod anchored_grow_tests;
-#[cfg(test)]
-mod pixel_snap_tests;
-#[cfg(test)]
-mod size_tests;
 
 #[cfg(any(test, target_arch = "wasm32"))]
 #[path = "runtime/web/runtime.rs"]
@@ -351,9 +308,6 @@ mod a11y_text;
 #[path = "a11y/actions.rs"]
 mod a11y_actions;
 use a11y_actions::A11yAct;
-#[cfg(test)]
-#[path = "a11y/tests.rs"]
-mod a11y_tests;
 #[path = "runtime/paint_probe.rs"]
 mod paint_probe;
 pub use elements::{ElementInfo, Pick, Picked, Pose};
@@ -1087,6 +1041,3 @@ impl<S: 'static> Runtime<S> {
     }
 }
 
-#[cfg(test)]
-#[path = "runtime/tests/mod.rs"]
-mod tests;

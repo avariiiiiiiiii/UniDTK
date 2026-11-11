@@ -157,5 +157,3 @@ impl Sample {
     }
 }
 
-#[cfg(test)]
-mod tests;

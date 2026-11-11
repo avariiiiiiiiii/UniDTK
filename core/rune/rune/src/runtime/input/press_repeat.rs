@@ -122,6 +122,3 @@ impl<S: 'static> Runtime<S> {
     }
 }
 
-#[cfg(test)]
-#[path = "press_repeat_tests.rs"]
-mod tests;

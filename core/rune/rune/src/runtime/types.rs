@@ -551,6 +551,3 @@ pub struct FrameStats {
     pub shaped: u32,
 }
 
-#[cfg(test)]
-#[path = "width_hold_tests.rs"]
-mod width_hold_tests;

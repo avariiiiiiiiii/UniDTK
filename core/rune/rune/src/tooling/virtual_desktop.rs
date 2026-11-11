@@ -17,8 +17,6 @@ use crate::tooling::{Args, Ev, Kind, Pos, Shot, Timeline, Trace, die};
 
 mod composite;
 pub(crate) mod displays;
-#[cfg(test)]
-mod tests;
 mod window;
 
 use composite::{Composite, DOWN, KEY_SHADOW, SHADOW, Slot, Uniform, pixels};

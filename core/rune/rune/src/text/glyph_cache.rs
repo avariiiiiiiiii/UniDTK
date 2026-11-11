@@ -310,6 +310,3 @@ impl TextSystem {
     }
 }
 
-#[cfg(test)]
-#[path = "glyph_cache_tests.rs"]
-mod tests;

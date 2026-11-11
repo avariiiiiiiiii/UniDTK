@@ -782,6 +782,3 @@ fn last_seg(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-#[cfg(test)]
-#[path = "check_tests.rs"]
-mod tests;

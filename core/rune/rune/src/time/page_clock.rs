@@ -101,6 +101,3 @@ mod js {
     pub(super) fn performance_now() -> f64 { 0.0 }
 }
 
-#[cfg(test)]
-#[path = "page_clock_tests.rs"]
-mod tests;

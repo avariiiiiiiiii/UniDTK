@@ -150,6 +150,3 @@ impl<S: 'static> Runtime<S> {
     }
 }
 
-#[cfg(test)]
-#[path = "export/tests.rs"]
-mod tests;

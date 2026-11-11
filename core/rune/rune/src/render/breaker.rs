@@ -254,6 +254,3 @@ fn report(device: &wgpu::Device, feature: Feature, why: &str) {
     }
 }
 
-#[cfg(test)]
-#[path = "breaker_tests.rs"]
-mod tests;

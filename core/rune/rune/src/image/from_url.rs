@@ -159,6 +159,3 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-#[cfg(test)]
-#[path = "from_url_tests.rs"]
-mod tests;

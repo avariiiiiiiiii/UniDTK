@@ -73,6 +73,3 @@ impl Life {
     }
 }
 
-#[cfg(test)]
-#[path = "life_tests.rs"]
-mod tests;

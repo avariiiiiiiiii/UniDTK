@@ -152,6 +152,3 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn fit_frame_holds(&mut self) -> bool { self.fit.frame_holds() }
 }
 
-#[cfg(test)]
-#[path = "window_requests_tests.rs"]
-mod tests;

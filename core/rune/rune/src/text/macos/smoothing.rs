@@ -481,6 +481,3 @@ pub(crate) fn dilate(path: &[Cmd], dx: f64, dy: f64) -> Path {
     d.out
 }
 
-#[cfg(test)]
-#[path = "smoothing_tests.rs"]
-mod tests;

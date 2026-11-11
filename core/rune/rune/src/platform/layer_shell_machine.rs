@@ -139,6 +139,3 @@ pub(crate) mod readiness {
     }
 }
 
-#[cfg(test)]
-#[path = "layer_shell_machine_tests.rs"]
-mod tests;

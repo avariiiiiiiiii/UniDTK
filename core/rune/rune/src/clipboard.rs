@@ -20,8 +20,6 @@ use crate::{Runtime, Waker};
 mod content;
 mod html;
 mod secret;
-#[cfg(test)]
-mod secret_tests;
 pub(crate) mod tx;
 #[cfg(target_os = "macos")]
 mod macos;

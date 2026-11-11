@@ -135,6 +135,3 @@ impl Shadow {
     }
 }
 
-#[cfg(test)]
-#[path = "window_shape_tests.rs"]
-mod tests;

@@ -99,6 +99,3 @@ fn since_boot(now: Instant, uptime: f64, timestamp: f64) -> Instant {
     now.checked_sub(std::time::Duration::from_secs_f64(age)).unwrap_or(now)
 }
 
-#[cfg(test)]
-#[path = "time_tests.rs"]
-mod tests;

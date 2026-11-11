@@ -13,13 +13,10 @@ bytemuck = { version = "1.25", features = ["derive"] }
 [target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"] }
 
-[dev-dependencies]
-rune = { path = "../rune" }
-rune-fx = { path = "../rune-fx" }
-pollster = "1"
-# Live object counts for the bind group tests.
-wgpu = { version = "30", default-features = false, features = ["counters"] }
-winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
-
 [lints]
 workspace = true
+
+# UniDTK: Rune's tests were not imported (see core/rune/UPSTREAM.md).
+[lib]
+test = false
+doctest = false

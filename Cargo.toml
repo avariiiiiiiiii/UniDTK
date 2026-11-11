@@ -12,7 +12,40 @@ default-members = ["toolchain"]
 members = [
   "toolchain",
   "core/api",
+  # The native UI engine, copied from Rune (see core/rune/UPSTREAM.md).
+  "core/rune/rune",
+  "core/rune/rune-motion",
+  "core/rune/rune-taffy",
+  "core/rune/rune-staging",
+  "core/rune/rune-fx",
+  "core/rune/rune-light",
+  "core/rune/rune-notify",
+  "core/rune/rune-i18n",
+  "core/rune/procwatch",
+  "core/rune/rune-perf",
 ]
+
+# Inherited by the Rune crates only: each opts in with `.workspace = true`.
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+unsafe_code = "allow"
+
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+dbg_macro = "deny"
+disallowed_types = "deny"
+expect_used = "warn"
+todo = "warn"
+unwrap_used = "warn"
+undocumented_unsafe_blocks = "warn"
+let_underscore_must_use = "warn"
+disallowed_methods = "warn"
 
 # Every module lives behind the `unidtk-api` contract and is an ordinary path
 # dependency of the application package (which makes it a workspace member

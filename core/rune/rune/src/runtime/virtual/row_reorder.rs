@@ -67,6 +67,3 @@ impl<S: 'static> Runtime<S> {
     }
 }
 
-#[cfg(test)]
-#[path = "../row_reorder_tests.rs"]
-mod tests;

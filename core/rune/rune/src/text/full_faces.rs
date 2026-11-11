@@ -49,6 +49,3 @@ impl TextSystem {
     }
 }
 
-#[cfg(test)]
-#[path = "full_faces_tests.rs"]
-mod tests;

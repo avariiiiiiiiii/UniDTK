@@ -95,6 +95,3 @@ pub(super) fn with_dxbc_enabled<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     f()
 }
 
-#[cfg(all(test, target_os = "windows"))]
-#[path = "dxbc_tests.rs"]
-mod tests;

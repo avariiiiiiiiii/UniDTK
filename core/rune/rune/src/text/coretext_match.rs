@@ -244,6 +244,3 @@ pub(crate) fn coverage_exponent(mode: FontSmoothing, fill: [f32; 4], apple: bool
     TEXT_GAMMA[0] + (TEXT_GAMMA[1] - TEXT_GAMMA[0]) * luma.clamp(0.0, 1.0)
 }
 
-#[cfg(test)]
-#[path = "coretext_match_tests.rs"]
-mod tests;

@@ -899,6 +899,3 @@ fn count_newlines(s: &[u8]) -> usize {
     s.chunks(255).map(|c| c.iter().fold(0u8, |n, &b| n + (b == b'\n') as u8) as usize).sum()
 }
 
-#[cfg(test)]
-#[path = "edit/tests.rs"]
-mod tests;

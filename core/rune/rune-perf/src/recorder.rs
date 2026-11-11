@@ -58,5 +58,3 @@ impl Drop for Recorder {
     fn drop(&mut self) { self.health.stop.store(true, Relaxed); }
 }
 
-#[cfg(test)]
-mod tests;

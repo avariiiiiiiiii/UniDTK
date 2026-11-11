@@ -11,3 +11,8 @@ wgpu = { version = "30", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
+
+# UniDTK: Rune's tests were not imported (see core/rune/UPSTREAM.md).
+[lib]
+test = false
+doctest = false

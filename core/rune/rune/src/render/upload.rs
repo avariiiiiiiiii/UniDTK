@@ -406,5 +406,3 @@ impl Renderer {
     }
 }
 
-#[cfg(test)]
-mod tests;

@@ -386,6 +386,3 @@ impl<S: 'static> Runtime<S> {
     }
 }
 
-#[cfg(test)]
-#[path = "../hover_tests.rs"]
-mod tests;

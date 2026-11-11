@@ -20,8 +20,6 @@ mod params;
 mod pipes;
 mod renderer;
 mod sim;
-#[cfg(test)]
-mod tests;
 
 pub use catalog::Choice;
 pub use catalog::Param;

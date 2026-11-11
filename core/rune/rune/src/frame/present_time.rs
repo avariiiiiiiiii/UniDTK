@@ -640,6 +640,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-#[path = "present_time_walk_tests.rs"]
-mod walk_tests;

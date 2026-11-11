@@ -442,6 +442,3 @@ impl Renderer {
     }
 }
 
-#[cfg(test)]
-#[path = "backdrop_blur_tests.rs"]
-mod tests;

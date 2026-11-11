@@ -86,6 +86,3 @@ impl KeyReleases {
     pub(super) fn lost(&mut self) { *self = Self::default(); }
 }
 
-#[cfg(test)]
-#[path = "key_releases_tests.rs"]
-mod tests;

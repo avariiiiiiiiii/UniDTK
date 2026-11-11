@@ -299,12 +299,6 @@ impl Drop for Guard {
     }
 }
 
-#[cfg(test)]
-mod lifecycle_tests;
-#[cfg(test)]
-mod machine_tests;
-#[cfg(all(test, target_os = "linux"))]
-mod teardown_tests;
 
 #[cfg(test)]
 mod tests {

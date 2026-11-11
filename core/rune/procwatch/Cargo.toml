@@ -14,8 +14,10 @@ release-gauges = []
 [dependencies]
 libc = "0.2"
 
-[dev-dependencies]
-serde_json = "1"
-
 [lints]
 workspace = true
+
+# UniDTK: Rune's tests were not imported (see core/rune/UPSTREAM.md).
+[lib]
+test = false
+doctest = false
