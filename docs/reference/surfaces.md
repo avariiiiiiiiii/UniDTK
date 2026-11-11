@@ -103,8 +103,10 @@ r[motion.shared-flight]
 A surface that grows out of an object (a desk tile, the clock) is a transformation of that object, not a second surface that fades in beside it. The option `morph: "container"` makes `openSurface()` do three things:
 
 1. **The surface is opaque from the first frame.** `openOpacity` and `closeOpacity` default to 1. At `t = 0` the visible area is the origin rectangle, painted with the object's own look (the card keeps its dock body colour while it is expanded).
-2. **The surface colour is washed in.** `_startTransition()` calls `syncSurfaceWash()` with the transition's duration and easing, so the card's `::after` layer fades from the object's colour to the surface colour with the clip, in both directions.
+2. **The surface colour is washed in.** `_startTransition()` calls `syncSurfaceWash()`, so the card's `::after` layer fades from the object's colour to the surface colour. The tile body is a little translucent (the glass opacity) and the wash is what makes the card opaque, so the wash is quick where it matters: on open it finishes in the first 30% of the morph, and on close it waits for the first half and fades in the second. A fade spread over the whole morph left the card see-through for most of it, and a card growing over a neighbour showed that neighbour.
 3. **Named parts fly.** The parts that exist on both sides of the morph (the tile's icon, the clock faces) travel from their place in the object to their place in the surface.
+
+**Corner radii are clamped to what the box draws** (`effectiveRadius`). CSS draws a radius larger than half of the box as half of it (the Telegram dock is `999px`, a pill), but the clip-path animation interpolates the number that was written: from 999px to 30px the visible corner stayed a pill for most of the open and changed at the very end. The origin and target radii are therefore clamped to half of the shorter side of their boxes before they are animated.
 
 The caller supplies the facts that only it can know, before it changes anything:
 

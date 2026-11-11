@@ -33,6 +33,22 @@ function parseInsetValues(clipPath) {
   return values.slice(0, 4);
 }
 
+/**
+ * A corner radius as the box really draws it. CSS draws a radius larger than half of
+ * the box as half of it (a pill is written `999px`), but the clip-path animation
+ * interpolates the number that was written: from 999px down to 30px the visible corner
+ * would stay a pill for most of the morph and change at the very end. Clamping the number
+ * to what the box shows makes the interpolation visible from the first frame.
+ * Only a single `Npx` value is clamped; anything else is left as written.
+ */
+function effectiveRadius(value, rect) {
+  const text = typeof value === "number" ? `${value}px` : String(value ?? "");
+  const match = text.match(/^\s*(-?\d*\.?\d+)px\s*$/);
+  if (!match || !rect) return value;
+  const half = Math.min(rect.width, rect.height) / 2;
+  return `${Math.max(0, Math.min(Number(match[1]), half))}px`;
+}
+
 class SurfaceManager {
   constructor() {
     /** @type {Array<SurfaceRecord>} */
@@ -263,9 +279,9 @@ class SurfaceManager {
     const originR = record.insets?.originR || "16px";
     const computedRadius = getComputedStyle(element).borderRadius;
     const hasExplicitTargetRadius = record.options?.targetRadius != null;
-    const targetR = hasExplicitTargetRadius
+    const targetR = effectiveRadius(hasExplicitTargetRadius
       ? (record.insets?.targetR || "16px")
-      : ((computedRadius && computedRadius !== "0px") ? computedRadius : (record.insets?.targetR || "16px"));
+      : ((computedRadius && computedRadius !== "0px") ? computedRadius : (record.insets?.targetR || "16px")), surfaceRect);
     record.surfaceRect = surfaceRect;
     record.insets = { topInset, rightInset, bottomInset, leftInset, originR, targetR };
     return record.insets;
@@ -702,6 +718,7 @@ class SurfaceManager {
       const computedOriginRadius = getComputedStyle(originElement).borderRadius;
       originR = computedOriginRadius && computedOriginRadius !== "0px" ? computedOriginRadius : "24px";
     }
+    originR = effectiveRadius(originR, originRect);
     let targetR = opts.targetRadius;
     if (!targetR) {
       const themeR = getComputedStyle(document.documentElement).getPropertyValue("--theme-radius-surface").trim();
@@ -709,6 +726,7 @@ class SurfaceManager {
     } else if (typeof targetR === "number") {
       targetR = `${targetR}px`;
     }
+    targetR = effectiveRadius(targetR, surfaceRect);
 
     // Relative insets from the surface boundaries into the origin hitbox. Unrounded,
     // like the ones _refreshInsets measures for every later transition, so the first
@@ -956,6 +974,7 @@ class SurfaceManager {
       // from the stand-ins now, still under the hidden surface.
       record.flight?.release();
       element.style.removeProperty("--wash-dur");
+      element.style.removeProperty("--wash-delay");
       element.style.removeProperty("--wash-ease");
       if (previousOpacity.value) {
         element.style.setProperty("opacity", previousOpacity.value, previousOpacity.priority);
@@ -1076,11 +1095,18 @@ export async function morphLayerReveal(viewport, origin, renderFn, options = {})
 
 /**
  * Drives a card's colour wash (jelly ::after layer) in step with an open/close morph.
- * Call from onTransitionStart: the fade gets the morph's own duration and the same
- * easing the clip-path timeline uses (expoOut on open, surfaceExit on close).
+ * Call from onTransitionStart: the fade uses the easing the clip-path timeline uses
+ * (expoOut on open, surfaceExit on close).
+ *
+ * The tile's own body is a little translucent (the glass opacity), and the wash is what
+ * makes the surface opaque. A fade spread over the whole morph leaves the card see-through
+ * for most of it, and a card growing over a neighbour shows that neighbour. So the wash is
+ * quick where it matters: on open it finishes in the first 30% of the morph, and on close it
+ * waits for the first half and fades in the second, so the card is opaque for nearly all of both.
  */
 export function syncSurfaceWash(element, open, duration) {
-  element.style.setProperty("--wash-dur", `${duration}ms`);
+  element.style.setProperty("--wash-dur", `${Math.round(duration * (open ? 0.3 : 0.5))}ms`);
+  element.style.setProperty("--wash-delay", `${open ? 0 : Math.round(duration * 0.5)}ms`);
   element.style.setProperty("--wash-ease", open ? "var(--ease-expo-out)" : "var(--ease-surface-exit)");
   element.classList.toggle("surface-washed", open);
 }

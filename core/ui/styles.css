@@ -442,7 +442,7 @@ body.no-widgets .debug-message {
     linear-gradient(to bottom, rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-rim) * 0.9)) 0 1.5px, rgba(var(--jelly-hi-rgb), 0) 1.5px),
     radial-gradient(120% 70% at 15% 0%, rgba(var(--jelly-hi-rgb), calc(var(--theme-glass-sheen) * 0.55)) 0%, rgba(var(--jelly-hi-rgb), 0) 60%);
   opacity: 0;
-  transition: opacity var(--wash-dur, var(--dur-motion)) var(--wash-ease, var(--ease-standard));
+  transition: opacity var(--wash-dur, var(--dur-motion)) var(--wash-ease, var(--ease-standard)) var(--wash-delay, 0ms);
 }
 :root[data-material="jelly"] .widget-card.surface-washed:not(.music-widget, .glyph-bar-widget, .micrographics-card)::after {
   opacity: 1;
