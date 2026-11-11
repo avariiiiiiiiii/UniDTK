@@ -101,7 +101,7 @@ The project implements its own native command-line tool (binary `udtk`, source `
 * `udtk invoke <cmd> [json-args]` — direct call of a core or module command by its name from the manifest (`player_status`, `vpn_status`, `telegram_status`, `log_stats`, …).
   **`invoke` is a socket door, and it is read-only by design.** Commands declared in the contract as `write` (writing to the log, volume, future VPN/Telegram/explorer operations) are **not** served through it. A refusal with the reason "changes state, and write commands stay on the UI door" is the norm, not a fault. Writes go only through the interface door (Tauri or an authenticated WebSocket); from the CLI they are checked indirectly, via `udtk gui js:…` or by their effects (`udtk logs`). Full list — `udtk help --json`.
 * `udtk logs [--limit N] [--since ID] [--level LEVEL] [--source SOURCE]` — selects records of the core and frontend system log from the `redb` database.
-* `udtk path [status|ensure]` — checks and registers `udtk.exe` in the user's Windows `PATH`.
+* `udtk path [status|ensure|remove]` — checks, registers or removes `udtk.exe` in the user's Windows `PATH`.
 * `udtk doc` — renders the book (the pages in `docs/SUMMARY.md`) to HTML in the cache and opens it, as `rustup doc` opens the Rust documentation.
 * `udtk doc --check` — from a checkout: broken links and anchors, pages missing from `SUMMARY.md`, unknown commands and rule identifiers, and code comments that name a missing document.
 
@@ -146,7 +146,7 @@ The rules live in [the reference](docs/reference/README.md), each under a stable
 | IPC | `ipc.one-contract`, `ipc.socket-read-only`, `ipc.cdp-always-on` | [ipc.md](docs/reference/ipc.md) |
 | Install | `install.program-files-read-only`, `install.data-in-localappdata`, `install.paths-in-one-place`, `install.no-absolute-paths`, `install.one-build-command`, `install.native-tasks`, `install.embed-or-bundle` | [install.md](docs/reference/install.md) |
 | Desk and themes | `desk.positions`, `desk.relayout-not-reset`, `desk.folders`, `desk.no-blocking-dialogs`, `desk.nesting`, `theme.tokens-only`, `theme.module-contracts`, `theme.contrast`, `theme.per-theme-colors` | [desk.md](docs/reference/desk.md) |
-| Motion | `motion.canonical-tokens`, `motion.reduced-motion`, `motion.no-hardcoded-ms`, `motion.clip-morph`, `motion.reversal`, `motion.lifo-stack`, `motion.widget-integrity` | [motion.md](docs/reference/motion.md) |
+| Motion | `motion.canonical-tokens`, `motion.reduced-motion`, `motion.no-hardcoded-ms`, `motion.clip-morph`, `motion.reversal`, `motion.lifo-stack`, `motion.widget-integrity`, `motion.shared-flight` | [motion.md](docs/reference/motion.md) |
 | Documentation | `docs.english-low-level`, `docs.one-place` | [README.md](docs/reference/README.md) |
 
 ## 5. Documentation

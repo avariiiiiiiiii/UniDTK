@@ -207,7 +207,7 @@ function relayoutWidgets() {
 
 Four events reach it through `handleDisplayOrResizeChange`: the kernel's `display-changed`, the window `resize`, the visual viewport resize, and the screen change. That handler waits 150 milliseconds, so a burst of events causes one relayout. A change in the widget list goes through `syncWidgets` instead, which removes the cards no longer wanted, builds the missing ones, and then calls `relayoutWidgets`. The menu calls it when a module is shown or hidden.
 
-Warning: `disposeWidgetCard` runs when a card is removed, and it cleans up a fixed list of things: the clock's morph, the geometry controller, and the music player's loops. It knows nothing about a timer that a new module starts. A module's timer must stop itself, by checking `card.isConnected` on each tick.
+Warning: `disposeWidgetCard` runs when a card is removed, and it cleans up a fixed list of things: the flight of a surface that is still open, the geometry controller, and the music player's loops. It knows nothing about a timer that a new module starts. A module's timer must stop itself, by checking `card.isConnected` on each tick.
 
 ## 6.8 Calling the kernel: the bridge
 

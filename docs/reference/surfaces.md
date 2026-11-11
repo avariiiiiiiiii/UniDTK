@@ -25,10 +25,10 @@ This is why the morph is cheap: during the animation the main thread is idle, an
 
 ```js
 // Filename: core/ui/surface-manager.js (openSurface, abridged)
-const topInset = opts.axis === "x" ? 0 : Math.max(0, Math.round(originRect.top - surfaceRect.top));
-const leftInset = Math.max(0, Math.round(originRect.left - surfaceRect.left));
-const rightInset = Math.max(0, Math.round(surfaceRect.right - (originRect.left + originRect.width)));
-const bottomInset = opts.axis === "x" ? 0 : Math.max(0, Math.round(surfaceRect.bottom - (originRect.top + originRect.height)));
+const topInset = opts.axis === "x" ? 0 : Math.max(0, originRect.top - surfaceRect.top);
+const leftInset = Math.max(0, originRect.left - surfaceRect.left);
+const rightInset = Math.max(0, surfaceRect.right - (originRect.left + originRect.width));
+const bottomInset = opts.axis === "x" ? 0 : Math.max(0, surfaceRect.bottom - (originRect.top + originRect.height));
 ```
 
 3. It creates a `record` with the state `closed`, pushes it onto `activeStack`, and sets `zIndex` when `elevation` is given.
@@ -95,6 +95,43 @@ When the timeline finishes, `_finalizeOpen()` runs:
 - It adds the class `surface-open` and removes `surface-closing`. The class `surface-active` was already added when the transition started.
 - It calls the caller's `onOpened` callback. The player uses it to release a deferred render.
 - It releases the shadow layer and gives the box-shadow back to the element.
+
+### 7.7 Container Transform and Shared-Element Flight
+
+r[motion.shared-flight]
+
+A surface that grows out of an object (a desk tile, the clock) is a transformation of that object, not a second surface that fades in beside it. The option `morph: "container"` makes `openSurface()` do three things:
+
+1. **The surface is opaque from the first frame.** `openOpacity` and `closeOpacity` default to 1. At `t = 0` the visible area is the origin rectangle, painted with the object's own look (the card keeps its dock body colour while it is expanded).
+2. **The surface colour is washed in.** `_startTransition()` calls `syncSurfaceWash()` with the transition's duration and easing, so the card's `::after` layer fades from the object's colour to the surface colour with the clip, in both directions.
+3. **Named parts fly.** The parts that exist on both sides of the morph (the tile's icon, the clock faces) travel from their place in the object to their place in the surface.
+
+The caller supplies the facts that only it can know, before it changes anything:
+
+```js
+// Filename: core/ui/unidtk-core.js (toggleWidget, abridged)
+const snapshot = surfaceManager.captureOrigin(card, {
+  shared: [{ source: headerIcon, scale: "uniform" }],   // plus module parts, e.g. clockSharedElements()
+});
+// ... the card is resized and gets the class `expanded` ...
+surfaceManager.openSurface(card, { snapshot, getOrigin, morph: "container", onClosed });
+```
+
+`captureOrigin()` reads only: the origin box, its corner radius, and for each part its rectangle and its computed layout styles. `snapshot` supplies `origin` and `originRadius`. `getOrigin()` is asked at the start of every transition, so a close lands on the object even if it moved.
+
+**The flight** is in `core/ui/shared-flight.js` (`SharedFlight`). It does not move the real nodes. At the start of each transition it creates a copy of each part in a layer inside the surface (`.surface-flight-layer`), frozen to the look the part had in the object, and adds a `transform` track for each copy to the same `MotionTimeline` as the clip. The copies therefore share the clip's duration, easing, reversal and reduced-motion path. Meanwhile the real source and target nodes carry `data-flight-hidden` (`visibility: hidden`).
+
+- `scale: "uniform"` keeps the aspect ratio (an icon glyph). `scale: "free"` scales each axis (a clock face, which is one object drawn at two sizes).
+- The destination is measured from the real target at the start of the transition, after layout. The origin side comes from the snapshot, shifted by how far `getOrigin()` says the object has moved.
+- A reversal samples the copy's rendered transform and starts from it, like the clip.
+- When the transition settles (`_finalizeOpen`, or `_finalizeClose` after the owner's `onClosed` has put the object back), `release()` removes the layer and shows the real nodes in the same task, with their transitions switched off for that moment so a node that changed while hidden does not start a second fade.
+- Because the copies live inside the surface, a surface that is unmounted takes them with it; `_cleanupDeadNodes()` only gives back the nodes hidden outside it.
+
+The one read after a write in a transition is the position of each new copy, which depends on the positioned ancestors of its stand-in chain. It happens once, when the copies are first created.
+
+The body of a surface that is still opening is not live (`.surface-opening`): the mask reveals it, but a click on a shortcut under a half-open mask would launch something the user cannot see yet.
+
+**Who uses it.** Desk cards (folders, VPN, the clock) go through `toggleWidget()`. Other callers (the Telegram dock, the explorer's morphs, the settings menu, popups) still run their own morph code and move onto this mechanism one at a time (section 12).
 
 ---
 
@@ -232,6 +269,7 @@ These are the places where the code and this standard differ. They are listed he
 3. **Coordinates (Rule 2.5).** `relayoutWidgets()` can reach `syncWidgets()`, which clears `widgetsCanvas`.
 4. **Player popup duration.** The code uses `"motion"`, not `"layout"`.
 5. **Escape chain.** The settings menu and "Collapse widgets" are desktop steps, not stack entries (section 9). A menu opened over a closable surface is not on the stack, so Escape closes that surface first.
-6. **Not re-checked for this rewrite.** The Telegram modals and context menus named in [section 1 of Motion](motion.md#1-two-kinds-of-objects), the numeric values in [the motion backlog](../history/rfcs/motion-plan.md), and the performance claims elsewhere in the older text.
+6. **The container transform is not universal yet.** Desk cards, including the clock, use it. The Telegram dock still flies its avatars with its own code (`flyTelegramAvatars`), the explorer has its own morphs (`morphToDirectory`, `morphToThisPc`, `playTabTransition`), the settings menu slides with CSS, and popups use the plain reveal. The classic material has no colour wash, so a card there changes its colour in one step. Tracked in issue 535.
+7. **Not re-checked for this rewrite.** The Telegram modals and context menus named in [section 1 of Motion](motion.md#1-two-kinds-of-objects), the numeric values in [the motion backlog](../history/rfcs/motion-plan.md), and the performance claims elsewhere in the older text.
 
 ---

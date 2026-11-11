@@ -419,16 +419,18 @@ body.no-widgets .debug-message {
   backdrop-filter: none;
   transition: transform var(--dur-motion) var(--ease-standard);
 }
-/* Clock and Telegram cards: the wash is a layer of its own, faded by the morph.
-   The card body keeps its dock colour (--jelly-body) while expanded and during the
-   morph; ::after (z -2, under the grain) carries the expanded wash and fades in on
-   syncSurfaceWash() with the morph's duration and easing. No colour transition on
-   the card itself, so the morph never re-rasters the body. */
-:root[data-material="jelly"] .widget-card.expanded:is(.clock-widget, .telegram-widget) {
+/* Cards that grow out of a tile (folders, clock, VPN, Telegram): the wash is a layer
+   of its own, faded by the morph. The card body keeps its dock colour (--jelly-body)
+   while expanded and during the morph, which is what keeps the object recognisable
+   as it grows; ::after (z -2, under the grain) carries the expanded wash and fades
+   in on syncSurfaceWash() with the morph's duration and easing. No colour transition
+   on the card itself, so the morph never re-rasters the body. The player and the
+   glyph bar keep one body colour and have no wash. */
+:root[data-material="jelly"] .widget-card.expanded:not(.music-widget, .glyph-bar-widget, .micrographics-card) {
   background-color: var(--jelly-body) !important;
   background-image: var(--jelly-sheen), var(--jelly-depth) !important;
 }
-:root[data-material="jelly"] .widget-card:is(.clock-widget, .telegram-widget)::after {
+:root[data-material="jelly"] .widget-card:not(.music-widget, .glyph-bar-widget, .micrographics-card)::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -442,8 +444,21 @@ body.no-widgets .debug-message {
   opacity: 0;
   transition: opacity var(--wash-dur, var(--dur-motion)) var(--wash-ease, var(--ease-standard));
 }
-:root[data-material="jelly"] .widget-card.surface-washed:is(.clock-widget, .telegram-widget)::after {
+:root[data-material="jelly"] .widget-card.surface-washed:not(.music-widget, .glyph-bar-widget, .micrographics-card)::after {
   opacity: 1;
+}
+
+/* Shared-element flight (r[motion.shared-flight]): while a part flies, its real node
+   is hidden and a frozen copy in the surface's flight layer carries it. */
+[data-flight-hidden] {
+  visibility: hidden !important;
+}
+
+/* The body of a surface that is still opening is revealed by the mask but not live:
+   a click on a shortcut under a half-open mask would launch what the user cannot
+   see yet. The header stays live, so a second click still reverses the open. */
+.widget-card.expanded.surface-opening .widget-body {
+  pointer-events: none;
 }
 
 /* Tint comes from the nearest owner: widget card, tagged portal, or the

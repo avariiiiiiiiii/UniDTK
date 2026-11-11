@@ -1,10 +1,10 @@
 import { convertFileSrc, invoke, listen, openPath } from "@unidtk/bridge";
 import { getWidgets, getWidgetShortcuts, getWidgetConfig, saveWidgetConfig, getDisabledModules } from "./widgets-api.js";
-import { initMotionSystem, animate, spring, staggerEnter, fadeTransition, setMotionScale, getDuration, EASINGS, DURATIONS, motionTimeline } from "./motion.js";
+import { initMotionSystem, animate, spring, staggerEnter, fadeTransition, setMotionScale, getDuration, EASINGS, DURATIONS } from "./motion.js";
 import { initThemeSystem, applyTheme, getActiveTheme, getAllPresets, syncThemeIntoConfig, resolvePresetSize, registerThemeContracts, tintVarKey } from "./theme.js";
 import { canNest, effectiveNested, moveNested } from "./nesting.js";
 import { showToast } from "./toast.js";
-import { surfaceManager, syncSurfaceWash } from "./surface-manager.js";
+import { surfaceManager } from "./surface-manager.js";
 import { initMenu, openMenu, closeMenu, handleMenuEscape } from "./menu.js";
 import { renderFolderBody } from "./folder-body.js";
 
@@ -675,7 +675,7 @@ function buildWidgetCard(w, layout) {
 // Releases what a card holds outside its own subtree (morph state, geometry
 // controller, player timers) so it can leave the desktop without a rebuild.
 function disposeWidgetCard(card) {
-  disposeClockMorph(card);
+  surfaceManager.getRecord(card)?.flight?.release();
   card._geometryController?.dispose();
   const players = card.matches(".music-widget") ? [card] : [...card.querySelectorAll(".music-widget")];
   if (players.length) {
@@ -782,7 +782,6 @@ async function loadWidgets() {
   if (!widgets) return;
 
   // ─── Arrange widgets ───
-  disposeClockMorphs();
   widgetsCanvas.querySelectorAll('.micrographics-card').forEach((card) => card._geometryController?.dispose());
   _dockResizeObserver?.disconnect();
   _dockGeometry.clear();
@@ -901,11 +900,6 @@ function collapseSingleWidget(card) {
   card.style.width = (pos.w || 340) + "px";
   card.style.height = (pos.h || 64) + "px";
 
-  // No surface record left to drive onClosed, so the morph handoff would never
-  // run: finish it here or the stand-in stays on <body> and the dock clock keeps
-  // its visibility: hidden override.
-  finishClockMorph(card, true);
-
   const dur = getDuration("motion");
   if (card._collapseTimer) clearTimeout(card._collapseTimer);
   card._collapseTimer = setTimeout(() => {
@@ -936,224 +930,6 @@ function collapseActiveDesktopWidget(excludeCard = null) {
   return any;
 }
 
-function rectSnapshot(rect) {
-  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-}
-
-function clockMorphTransform(baseRect, destination) {
-  const sx = baseRect.width > 0 ? destination.width / baseRect.width : 1;
-  const sy = baseRect.height > 0 ? destination.height / baseRect.height : 1;
-  return `translate(${destination.left - baseRect.left}px, ${destination.top - baseRect.top}px) scale(${sx}, ${sy})`;
-}
-
-function saveInlineProperty(element, property) {
-  return {
-    value: element.style.getPropertyValue(property),
-    priority: element.style.getPropertyPriority(property),
-  };
-}
-
-function restoreInlineProperty(element, property, saved) {
-  if (saved?.value) element.style.setProperty(property, saved.value, saved.priority);
-  else element.style.removeProperty(property);
-}
-
-function hideClockMorphNode(state, element, key) {
-  if (!element) return;
-  if (!state[`${key}Visibility`]) state[`${key}Visibility`] = saveInlineProperty(element, "visibility");
-  element.style.setProperty("visibility", "hidden", "important");
-}
-
-function clockMorphFaces(container) {
-  // Gooey's date and SVG have different dashboard sizes. They need separate
-  // endpoints; grid-second likewise has two independently laid-out faces.
-  const gooey = container?.querySelector(":scope > .gooey-clock-face");
-  return Array.from((gooey || container)?.children || []);
-}
-
-function clockMorphLayoutNodes(face) {
-  // SVG ink can change its tree (e.g. Gooey 0 has a circle, 1 does not).
-  // Freeze layout boxes, never path data or styles indexed through that ink.
-  return [face, ...face.querySelectorAll("*")].filter((node) =>
-    !(node instanceof SVGElement) || node.localName === "svg");
-}
-
-function captureClockMorphFaces(source) {
-  return clockMorphFaces(source).map((face) => ({
-    rect: rectSnapshot(face.getBoundingClientRect()),
-    styles: clockMorphLayoutNodes(face).map((node) => {
-      const computed = getComputedStyle(node);
-      return Array.from(computed)
-        .filter((property) => !/^(animation|transition)(-|$)/.test(property)
-          && !["transform", "visibility", "opacity", "d"].includes(property))
-        .map((property) => [property, computed.getPropertyValue(property)]);
-    }),
-  }));
-}
-
-function createClockMorphClone(state, target, open) {
-  const sourceFaces = clockMorphFaces(state.source);
-  const targetRects = clockMorphFaces(target).map((face) => rectSnapshot(face.getBoundingClientRect()));
-  if (sourceFaces.length !== state.faces.length || targetRects.length !== state.faces.length
-    || [...state.faces.map((face) => face.rect), ...targetRects].some((rect) => rect.width <= 0 || rect.height <= 0)) return;
-
-  const clone = document.createElement("div");
-  clone.className = `${state.source.className} clock-morph-clone`;
-  clone.setAttribute("aria-hidden", "true");
-  clone.style.cssText = "position:fixed;inset:0;padding:0;min-height:0;pointer-events:none;z-index:2501;visibility:hidden;transition:none!important;opacity:1";
-  const faceParent = state.source.querySelector(":scope > .gooey-clock-face")
-    ? clone.appendChild(document.createElement("div")) : clone;
-  if (faceParent !== clone) faceParent.className = "gooey-clock-face";
-  state.planes = sourceFaces.map((face, index) => {
-    // Freeze the dock's logical layout before portaling. Scaling the wrapper
-    // alone stretched fixed-size rings and lost inherited/contextual styles.
-    // Clone current content so a long-open dashboard never returns stale digits.
-    const plane = face.cloneNode(true);
-    const snapshot = state.faces[index];
-    clockMorphLayoutNodes(plane).forEach((node, nodeIndex) => {
-      for (const [property, value] of snapshot.styles[nodeIndex] || []) node.style.setProperty(property, value);
-    });
-    [plane, ...plane.querySelectorAll("*")].forEach((node) => {
-      node.style.setProperty("animation", "none", "important");
-      node.style.setProperty("transition", "none", "important");
-    });
-    Object.assign(plane.style, {
-      position: "absolute", left: `${snapshot.rect.left}px`, top: `${snapshot.rect.top}px`,
-      right: "auto", bottom: "auto", margin: "0", flex: "none",
-      transform: "none", transformOrigin: "top left", visibility: "visible",
-    });
-    faceParent.appendChild(plane);
-    return { element: plane, sourceRect: snapshot.rect, targetRect: targetRects[index] };
-  });
-  document.body.appendChild(clone);
-  for (const plane of state.planes) plane.baseRect = rectSnapshot(plane.element.getBoundingClientRect());
-  for (const plane of state.planes) {
-    plane.element.style.transform = clockMorphTransform(plane.baseRect, open ? plane.sourceRect : plane.targetRect);
-  }
-  clone._clockMorphOwner = state.source.closest(".widget-card");
-  clone.style.visibility = "visible";
-  state.clone = clone;
-}
-
-function animateClockMorph(card, body, open, duration, seed = null) {
-  const target = body?.querySelector(".dash-clock");
-  let state = card._clockMorph;
-  if (!state && open && seed?.source && seed.originRect) {
-    state = {
-      source: seed.source,
-      originRect: seed.originRect,
-      sourceOpacity: seed.sourceOpacity,
-      faces: seed.faces,
-      planes: [],
-      target: null,
-      clone: null,
-      timeline: null,
-      generation: 0,
-    };
-    card._clockMorph = state;
-  }
-  if (!state || !state.source || !target) return;
-  state.target = target;
-
-  if (!state.clone?.isConnected) createClockMorphClone(state, target, open);
-  if (!state.clone?.isConnected) return;
-
-  // Both ends of the handoff stay hidden for as long as the stand-in exists.
-  // Re-entering with a live clone (a reopen inside the crossfade window) used
-  // to skip this, painting the fresh .dash-clock next to the stand-in.
-  hideClockMorphNode(state, state.source, "source");
-  hideClockMorphNode(state, target, "target");
-
-  const fromTransforms = state.planes.map((plane) => getComputedStyle(plane.element).transform);
-  state.generation += 1;
-  const generation = state.generation;
-  if (state.timeline) {
-    state.timeline.cleanup({ commitStyles: true });
-    state.timeline = null;
-  }
-  if (open) {
-    hideClockMorphNode(state, state.source, "source");
-    state.source.style.setProperty("opacity", "0", "important");
-  }
-  const timeline = motionTimeline({
-    duration,
-    durationIsScaled: true,
-    easing: open ? EASINGS.expoOut : EASINGS.surfaceExit,
-    onFinish: (timeline) => {
-      if (state.generation !== generation || state.timeline !== timeline) return;
-      // The stand-in rests on the frame this animation commits: dropping the
-      // filled last frame would snap it back to its static box (the expanded
-      // dashboard) before finishClockMorph hands it over to the dock clock.
-      timeline.cleanup({ commitStyles: true });
-      state.timeline = null;
-    },
-  });
-  state.planes.forEach((plane, index) => timeline.add(plane.element, [
-    { transform: fromTransforms[index] },
-    { transform: clockMorphTransform(plane.baseRect, open ? plane.targetRect : plane.sourceRect) },
-  ]));
-  state.timeline = timeline.play();
-}
-
-function finishClockMorph(card, closed = false) {
-  const state = card?._clockMorph;
-  if (!state) return;
-  state.generation += 1;
-  if (state.timeline) {
-    state.timeline.cleanup({ commitStyles: true });
-    state.timeline = null;
-  }
-  if (state.target) restoreInlineProperty(state.target, "visibility", state.targetVisibility);
-  if (closed) {
-    if (state.source) {
-      // One opaque face owns each paint. The clone already has the dock's ink
-      // geometry, so exchanging it atomically avoids both the alpha dip of a
-      // crossfade and brightening translucent ink by drawing two faces.
-      const transition = saveInlineProperty(state.source, "transition");
-      state.source.style.setProperty("transition", "none", "important");
-      restoreInlineProperty(state.source, "opacity", state.sourceOpacity);
-      restoreInlineProperty(state.source, "visibility", state.sourceVisibility);
-      // Resolve the restored opacity while transitions are disabled, before
-      // restoring CSS ownership; otherwise the dock starts a second fade.
-      getComputedStyle(state.source).opacity;
-      restoreInlineProperty(state.source, "transition", transition);
-    }
-    state.clone?.remove();
-    card._clockMorph = null;
-  } else {
-    state.clone?.remove();
-    state.clone = null;
-    state.timeline = null;
-  }
-}
-
-/**
- * Drop every live clock morph without animating it. A widget rebuild unmounts
- * the cards, and the stand-in lives on <body> rather than inside the card, so
- * without this it survives the rebuild as a permanent ghost over the desktop.
- */
-function disposeClockMorph(card) {
-  const state = card._clockMorph;
-  if (!state) return;
-  state.generation += 1;
-  if (state.timeline) {
-    state.timeline.cleanup();
-    state.timeline = null;
-  }
-  if (state.target) restoreInlineProperty(state.target, "visibility", state.targetVisibility);
-  if (state.source) {
-    restoreInlineProperty(state.source, "visibility", state.sourceVisibility);
-    restoreInlineProperty(state.source, "opacity", state.sourceOpacity);
-  }
-  state.clone?.remove();
-  card._clockMorph = null;
-}
-
-function disposeClockMorphs() {
-  document.querySelectorAll(".widget-card").forEach(disposeClockMorph);
-  document.querySelectorAll(".clock-morph-clone").forEach((clone) => clone.remove());
-}
-
 async function toggleWidget(card, body, widgetId, specialType, widgetType = widgetId) {
   const surface = surfaceManager.getRecord(card);
   if (surface?.state === "closing") {
@@ -1161,10 +937,13 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
       clearTimeout(card._collapseTimer);
       card._collapseTimer = null;
     }
+    // A click that reopens a closing card is a new expand: an older one still
+    // waiting for its animation frame must not start a second surface.
+    expandSequence++;
     activeExpandedWidgetId = widgetId;
     const position = config.positions[widgetId] || (config.positions[widgetId] = {});
     position.expanded = true;
-    card.classList.add("expanded", "surface-washed");
+    card.classList.add("expanded");
     surfaceManager.openSurface(card);
     notifyGeometryChanged("expand");
     return;
@@ -1189,7 +968,17 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
   card._dockGeometryFrozen = true;
   expandSequence++;
   const currentSeq = expandSequence;
-  let clockMorphSeed = null;
+  // The tile, frozen before anything is rendered or resized: its box, its corner
+  // radius, and the parts that fly into the surface (r[motion.clip-morph],
+  // r[motion.shared-flight]). After the body is rendered or the card is resized the
+  // tile no longer exists to be measured.
+  let snapshot = null;
+  const freezeTile = (moduleShared = []) => {
+    const headerIcon = card.querySelector(":scope > .widget-header .widget-icon");
+    snapshot = surfaceManager.captureOrigin(card, {
+      shared: [...(headerIcon ? [{ source: headerIcon, scale: "uniform", freeze: "visual" }] : []), ...moduleShared],
+    });
+  };
   activeExpandedWidgetId = widgetId;
   collapseActiveDesktopWidget(card);
 
@@ -1204,20 +993,12 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
       if (!card.classList.contains("expanded") && !surfaceManager.getRecord(card)) card._dockGeometryFrozen = false;
       return;
     }
-    const source = Array.from(card.children).find((child) => child.classList.contains("clock-container") && !child.classList.contains("dash-clock"));
-    if (source) {
-      clockMorphSeed = {
-        source,
-        originRect: rectSnapshot(source.getBoundingClientRect()),
-        sourceOpacity: card._clockMorph?.source === source
-          ? card._clockMorph.sourceOpacity
-          : saveInlineProperty(source, "opacity"),
-        faces: card._clockMorph?.faces || captureClockMorphFaces(source),
-      };
-    }
+    // Rendering the dashboard moves the dock clock, so the faces are frozen first.
+    freezeTile(m.clockSharedElements(card, body));
     m.renderClockDashboard(body, widgetId);
     card._afterBodyRender(body);
   } else if (specialType === "vpn") {
+    freezeTile();
     const m = await import("../modules/vpn/vpn-panel.js");
     if (currentSeq !== expandSequence) {
       if (!card.classList.contains("expanded") && !surfaceManager.getRecord(card)) card._dockGeometryFrozen = false;
@@ -1225,6 +1006,7 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
     }
     m.renderVpnPanel(body);
   } else if (specialType === "mp3-player") {
+    freezeTile();
     const m = card._widgetModule || await card._widgetModulePromise || await import("../modules/mp3-player/widget.js");
     if (currentSeq !== expandSequence) {
       if (!card.classList.contains("expanded") && !surfaceManager.getRecord(card)) card._dockGeometryFrozen = false;
@@ -1232,6 +1014,7 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
     }
     m.renderMusicDashboard(body, widgetId);
   } else {
+    freezeTile();
     if (!Array.isArray(card._shortcutItems)) {
       card._shortcutItems = await getWidgetShortcuts(widgetType).catch(() => []);
       card._folderId = widgetType;
@@ -1251,7 +1034,25 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
     }
       const rect = card.getBoundingClientRect();
       const canvasRect = widgetsCanvas.getBoundingClientRect();
-      const originRect = { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+      const originRect = snapshot.rect;
+      // Where the tile is now, as a shift from where it was at click (hover scale,
+      // device pixel rounding), so a close lands on the tile if it was relocated.
+      const dockPoint = () => {
+        const pos = config.positions[widgetId] || {};
+        const at = placeOnCanvas({ x: 28, y: 28, ...pos });
+        const canvas = widgetsCanvas.getBoundingClientRect();
+        return { left: canvas.left + at.x, top: canvas.top + at.y };
+      };
+      const dockAtOpen = dockPoint();
+      const getOrigin = () => {
+        const now = dockPoint();
+        return {
+          left: originRect.left + (now.left - dockAtOpen.left),
+          top: originRect.top + (now.top - dockAtOpen.top),
+          width: originRect.width,
+          height: originRect.height,
+        };
+      };
       const savedCardTransition = card.style.transition;
       const savedBodyTransition = body.style.transition;
       
@@ -1290,11 +1091,18 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
       if (viewCenterY - targetH / 2 < margin) centerY += (margin - (viewCenterY - targetH / 2));
       else if (viewCenterY + targetH / 2 > window.innerHeight - margin) centerY -= ((viewCenterY + targetH / 2) - (window.innerHeight - margin));
       
+      // Whatever the clamp above did, the tile it grows from stays inside the box,
+      // or the first frames would show the surface cut off beside the tile.
+      const tileLeft = rect.left - canvasRect.left;
+      const tileTop = rect.top - canvasRect.top;
+      const boxLeft = Math.max(tileLeft + rect.width - targetW, Math.min(centerX - targetW / 2, tileLeft));
+      const boxTop = Math.max(tileTop + rect.height - targetH, Math.min(centerY - targetH / 2, tileTop));
+
       card.style.zIndex = "100";
       card.style.transition = "none";
       body.style.transition = "none";
-      card.style.left = (centerX - targetW / 2) + "px";
-      card.style.top = (centerY - targetH / 2) + "px";
+      card.style.left = boxLeft + "px";
+      card.style.top = boxTop + "px";
       card.style.width = targetW + "px";
       card.style.height = targetH + "px";
       
@@ -1333,28 +1141,18 @@ async function toggleWidget(card, body, widgetId, specialType, widgetType = widg
         restoreTransitions();
       };
 
+      // The tile becomes the surface (morph: "container"): it stays opaque with its
+      // own look, the surface colour washes in over it, and the icon (or the clock
+      // face) flies from the tile into its place in the surface.
       surfaceManager.openSurface(card, {
-        origin: originRect,
+        snapshot,
+        getOrigin,
+        morph: "container",
         closeOnOutsideClick: true,
         closeOnEscape: true,
         suppressContentAnimation: true,
-        // The clock face morphs on its own clone; the card body must stay solid
-        // through the last frame, or it fades out and pops back as the dock.
-        ...(specialType === "clock" ? { openOpacity: 1, closeOpacity: 1 } : {}),
-        onTransitionStart: ({ open, duration }) => {
-          if (specialType === "clock") {
-            syncSurfaceWash(card, open, duration);
-            animateClockMorph(card, body, open, duration, clockMorphSeed);
-          }
-        },
-        onOpened: () => {
-          if (specialType === "clock") finishClockMorph(card);
-          restoreTransitions();
-        },
-        onClosed: () => {
-          restoreCollapsedLayout();
-          if (specialType === "clock") finishClockMorph(card, true);
-        },
+        onOpened: restoreTransitions,
+        onClosed: restoreCollapsedLayout,
       });
     });
 }
@@ -2313,7 +2111,8 @@ function openExplorer(path, triggerOrigin = null) {
     surfaceManager.openSurface(explorerContainer, {
       backdrop: explorerOverlay,
       origin: triggerOrigin || null,
-      originRadius: "16px",
+      // The clicked element's own radius; a fixed one only when there is no element (Win+E).
+      originRadius: triggerOrigin instanceof HTMLElement ? getComputedStyle(triggerOrigin).borderRadius : "16px",
       content: explorerEl && explorerEl !== explorerContainer ? [explorerEl] : [],
       elevation: "var(--z-surface-overlay, 2000)",
       onOpen: () => {

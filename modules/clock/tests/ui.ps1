@@ -6,22 +6,20 @@ function Invoke-ClockJs([string]$expression) {
     if ($LASTEXITCODE -ne 0 -or ($result -join "`n") -match '\[1\] js\s+(error|FAIL)') { throw ($result -join "`n") }
     return $result
 }
-$clockCore = [IO.File]::ReadAllText((Join-Path $clockRepo 'core/ui/unidtk-core.js'))
-$clockStart = $clockCore.IndexOf('function rectSnapshot(')
-$clockEnd = $clockCore.IndexOf('async function toggleWidget(', $clockStart)
-$clockFixture = 'const {motionTimeline,EASINGS}=deps.motion;' + $clockCore.Substring($clockStart, $clockEnd - $clockStart)
-$clockFixture += "`n" + [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'ui.js'))
+$clockFixture = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'ui.js'))
+# Quote-free transport: Windows PowerShell 5.1 splits an argument at the double quotes inside it.
 Invoke-ClockJs "window.__clockFixtureSource='';true" | Out-Null
-for ($offset = 0; $offset -lt $clockFixture.Length; $offset += 8000) {
-    $chunk = $clockFixture.Substring($offset, [Math]::Min(8000, $clockFixture.Length - $offset)) | ConvertTo-Json -Compress
-    Invoke-ClockJs "window.__clockFixtureSource+=$chunk;true" | Out-Null
+for ($offset = 0; $offset -lt $clockFixture.Length; $offset += 6000) {
+    $chunk = [Convert]::ToBase64String($clockFixture, $offset, [Math]::Min(6000, $clockFixture.Length - $offset))
+    Invoke-ClockJs "window.__clockFixtureBytes=(window.__clockFixtureBytes||[]).concat(Array.from(atob('$chunk'),c=>c.charCodeAt(0)));true" | Out-Null
 }
+Invoke-ClockJs "window.__clockFixtureSource=new TextDecoder().decode(Uint8Array.from(window.__clockFixtureBytes));delete window.__clockFixtureBytes;true" | Out-Null
 $clockOutput = Invoke-ClockJs @'
 (async()=>{
   try {
     const execute=new (Object.getPrototypeOf(async()=>{}).constructor)('deps',window.__clockFixtureSource);
-    const [clock,motion]=await Promise.all([import('http://tauri.localhost/modules/clock/widget.js'),import('http://tauri.localhost/motion.js')]);
-    return await execute({clock,motion});
+    const [clock,motion,surface]=await Promise.all([import('http://tauri.localhost/modules/clock/widget.js'),import('http://tauri.localhost/motion.js'),import('http://tauri.localhost/surface-manager.js')]);
+    return await execute({clock,motion,sm:surface.surfaceManager});
   } finally {delete window.__clockFixtureSource;}
 })()
 '@

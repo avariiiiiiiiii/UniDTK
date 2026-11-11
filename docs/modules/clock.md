@@ -24,7 +24,7 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 | [modules/clock/tests/runtime.js](../../modules/clock/tests/runtime.js) and [runtime.ps1](../../modules/clock/tests/runtime.ps1) | Live checks of the expand and collapse animation in the installed app. |
 | [modules/clock/tests/ui.js](../../modules/clock/tests/ui.js) and [ui.ps1](../../modules/clock/tests/ui.ps1) | The same checks, run against a fixture built from the core's `unidtk-core.js`. |
 
-The core loads the module into the page. [core/ui/index.html](../../core/ui/index.html) links the two stylesheets, and [core/ui/unidtk-core.js](../../core/ui/unidtk-core.js) imports `widget.js` when a clock card is built. The expand animation that moves a clock into its dashboard is not in this module: `animateClockMorph` and `finishClockMorph` are in `unidtk-core.js`.
+The core loads the module into the page. [core/ui/index.html](../../core/ui/index.html) links the two stylesheets, and [core/ui/unidtk-core.js](../../core/ui/unidtk-core.js) imports `widget.js` when a clock card is built. The expand animation that moves a clock into its dashboard is not in this module either: it is the core's container transform (`morph: "container"` in [surfaces](../reference/surfaces.md#r-motion.shared-flight)). This module only names the parts that fly: `clockSharedElements(card, body)` returns one entry per face of the dock clock, with the matching face of the dashboard as its target. The surface manager and `core/ui/shared-flight.js` do the rest.
 
 The module is a vertical slice, so everything it draws lives under `modules/clock/` ([modules.vertical-slice](../reference/modules.md#r-modules.vertical-slice)). It has no backend, so its only state is the desk configuration ([modules.states](../reference/modules.md#r-modules.states)).
 
@@ -226,9 +226,9 @@ The module has no network, no disk and no backend of its own, so this table cove
 
 ## Step 9: Tests
 
-The test folders check the expand and collapse animation, not the time display. [runtime.ps1](../../modules/clock/tests/runtime.ps1) passes `runtime.js` to `udtk gui js:` through `target/release/udtk.exe`, so it runs inside the installed app. The script opens and closes a real clock card for seven styles, and checks that the morph clone hands over to the source with matching geometry. It restores the saved style when it finishes.
+The test folders check the expand and collapse animation, not the time display. [runtime.ps1](../../modules/clock/tests/runtime.ps1) passes `runtime.js` to `udtk gui js:` through `target/release/udtk.exe`, so it runs inside the installed app. The script opens and closes a real clock card for seven styles, and checks that the flight's planes stay opaque, that exactly one owner is visible on every closing frame, and that the real clock is shown again with nothing left behind. It restores the saved style when it finishes.
 
-[ui.ps1](../../modules/clock/tests/ui.ps1) runs the same checks against a fixture. It reads the section of `unidtk-core.js` from `rectSnapshot(` to `toggleWidget(`, prepends a line that takes `motionTimeline` and `EASINGS` from `deps`, and runs the result in the page with the module and motion modules passed in. Both scripts print `passed` and `total`, and fail unless the two numbers are equal.
+[ui.ps1](../../modules/clock/tests/ui.ps1) runs checks against a fixture card that goes through the real surface manager and the real flight engine, at two scales of the host (1 and 1.5). It covers the setup time, the hidden endpoints, the planes' exact position on the dock's ink in the last frame of a close, a reversal that reuses the planes, an unmount in flight, the gooey ink staying in step, and zero motion. The page imports the module, the motion module and the surface manager and passes them in as `deps`. Both scripts print `passed` and `total`, and fail unless the two numbers are equal.
 
 ---
 

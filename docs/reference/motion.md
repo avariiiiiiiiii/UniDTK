@@ -78,7 +78,7 @@ Because the term is a logarithm, the duration rises quickly for small changes an
 
 r[motion.clip-morph]
 
-- **Scaling content (`scale`) is forbidden:** window content (text, Ndot/Inter fonts, icons, covers) must **never be scaled with `transform: scale()`**. Scaling fonts blurs DirectWrite subpixel rendering in WebView2.
+- **Scaling content (`scale`) is forbidden:** window content (text, Ndot/Inter fonts, icons, covers) must **never be scaled with `transform: scale()`**. Scaling fonts blurs DirectWrite subpixel rendering in WebView2. The one exception is a stand-in that travels between an object and its surface ([`motion.shared-flight`](surfaces.md#r-motion.shared-flight)): a copy of an icon glyph scaled uniformly, or of a clock face scaled per axis. The real content in the surface is never scaled, and body text is never a flight.
 - **Morphing the border:** The window is mounted immediately at its final pixel size (one layout pass, no reflow during the animation). The container's border is expanded on the GPU through `clip-path: inset(top right bottom left round radius)`:
   - $t = 0$: the mask is compressed to the exact coordinates and corner radius of the trigger button or hitbox. For example, it matches the `zone-top` sector of the player with a radius of $R=75\text{px}$, following the vinyl circle exactly.
   - $t = 1$: the mask expands exponentially to `inset(0 0 0 0 round 24px)`.

@@ -9,6 +9,9 @@
  *   - Unified LIFO stack (activeStack) for strictly ordered dismissal.
  *   - Global Escape capture: Esc closes ONLY the topmost surface.
  *   - GPU origin-based clip-path morphing (zero content zoom/blur).
+ *   - Container transform (`morph: "container"`): the object the surface grows out of
+ *     keeps its own look and identity; named parts of it fly into the surface
+ *     (shared-flight.js) and the surface colour washes in over it.
  *   - Seamless animation reversal via Web Animations API (animation.reverse()).
  *   - Dynamic logarithmic physical timing (calculateDuration).
  *   - Full working-set safety and 0 DOM resets of widgets canvas.
@@ -16,6 +19,7 @@
  */
 
 import { calculateDuration, getDuration, EASINGS, motionTimeline } from "./motion.js";
+import { SharedFlight, captureSharedItems, rectSnapshot } from "./shared-flight.js";
 
 function parseInsetValues(clipPath) {
   const match = String(clipPath || "").match(/inset\(\s*([^)]*)\)/i);
@@ -49,13 +53,9 @@ class SurfaceManager {
         if (rec.backdrop && rec.backdrop.isConnected && rec.options.removeBackdropOnClose) {
           rec.backdrop.remove();
         }
-        // Morph stand-ins are portaled to <body>, so they outlive the card that
-        // owns them. Unmounting the owner would strand one on screen forever.
-        if (rec.element) {
-          for (const clone of document.querySelectorAll(".clock-morph-clone")) {
-            if (clone._clockMorphOwner === rec.element) clone.remove();
-          }
-        }
+        // The flight's stand-ins live inside the surface and leave with it; this
+        // gives back the real nodes that are hidden outside it, if any.
+        rec.flight?.release();
         return false;
       }
       return true;
@@ -226,7 +226,34 @@ class SurfaceManager {
     return Array.from(record.element.children || []);
   }
 
+  // Where the origin is at the start of this transition. An owner whose origin can
+  // move while the surface is open (a desk tile that was relocated) says where it is
+  // now; without it, the rectangle captured at open is used.
+  _refreshOrigin(record) {
+    const getOrigin = record.options?.getOrigin;
+    if (typeof getOrigin !== "function") return;
+    let next = null;
+    try { next = getOrigin(); } catch (error) { console.error("Surface getOrigin failed:", error); }
+    if (!next || ![next.left, next.top, next.width, next.height].every(Number.isFinite)) return;
+    record.originRect = {
+      left: next.left,
+      top: next.top,
+      right: next.left + next.width,
+      bottom: next.top + next.height,
+      width: next.width,
+      height: next.height,
+    };
+  }
+
+  // How far the origin has moved since the flight's parts were captured.
+  _originShift(record) {
+    const captured = record.options?.snapshot?.rect;
+    if (!captured || !record.originRect) return { x: 0, y: 0 };
+    return { x: record.originRect.left - captured.left, y: record.originRect.top - captured.top };
+  }
+
   _refreshInsets(record) {
+    this._refreshOrigin(record);
     const { element, originRect } = record;
     const surfaceRect = element.getBoundingClientRect();
     const topInset = record.options?.axis === "x" ? 0 : (originRect ? Math.max(0, originRect.top - surfaceRect.top) : (record.insets?.topInset || 0));
@@ -264,6 +291,7 @@ class SurfaceManager {
     const shadowFrom = this._sampleShadow(record);
     const insets = this._refreshInsets(record);
     const shadowMeasure = this._measureShadow(record);
+    const flightMeasure = record.flight ? record.flight.measure() : null;
     const contentTargets = this._getContentTargets(record);
     const contentFrom = contentTargets.map((target, index) => {
       const sampledOpacity = from.contentOpacities?.[index];
@@ -288,7 +316,7 @@ class SurfaceManager {
 
     if (open) {
       record.state = "opening";
-      record.element.classList.add("surface-active");
+      record.element.classList.add("surface-active", "surface-opening");
       record.element.classList.remove("surface-closing", "surface-pointer-live");
       record.element.style.pointerEvents = "";
       record.element.style.willChange = "clip-path, opacity";
@@ -296,6 +324,7 @@ class SurfaceManager {
     } else {
       record.state = "closing";
       record.element.classList.add("surface-closing");
+      record.element.classList.remove("surface-opening");
       record.element.classList.toggle("surface-pointer-live", !!record.options?.keepPointerOnClose);
       record.element.style.pointerEvents = record.options?.keepPointerOnClose ? "" : "none";
       record.element.style.willChange = "clip-path, opacity";
@@ -311,6 +340,10 @@ class SurfaceManager {
       const remainingRatio = fullDistance > 0 ? Math.max(0, Math.min(1, remainingDistance / fullDistance)) : 1;
       transitionDuration = Math.round(duration * 0.65 * Math.sqrt(remainingRatio));
     }
+
+    // A container morph keeps the object's own look until the surface settles and
+    // fades the surface's colour in over it (the card's ::after wash).
+    if (record.options?.morph === "container") syncSurfaceWash(record.element, open, transitionDuration);
 
     if (typeof record.options?.onTransitionStart === "function") {
       try { record.options.onTransitionStart({ open, duration: transitionDuration, record }); }
@@ -353,6 +386,17 @@ class SurfaceManager {
     const shadowTrack = this._shadowTrack(record, open, shadowFrom, shadowMeasure);
     if (shadowTrack) tracks.push(shadowTrack);
     tracks.push({ element: record.element, keyframes: boundaryKeyframes });
+
+    if (record.flight && flightMeasure) {
+      // A flight that cannot be built leaves the clip morph alone: the parts then
+      // simply appear in place as the clip reaches them.
+      try {
+        tracks.push(...record.flight.start(open, flightMeasure, this._originShift(record)));
+      } catch (error) {
+        console.error("Shared flight failed:", error);
+        record.flight.release();
+      }
+    }
 
     for (const [index, target] of contentTargets.entries()) {
       tracks.push({
@@ -511,6 +555,24 @@ class SurfaceManager {
   }
 
   /**
+   * Freeze what a surface will grow out of: the origin's box, its corner radius and
+   * the named parts that fly into the surface. Reads only. Call it BEFORE the owner
+   * resizes or restyles the element, because afterwards the origin no longer exists
+   * to be measured. Pass the result to `openSurface` as `snapshot`.
+   *
+   * @param {HTMLElement} element - the object that becomes the surface (usually the surface itself)
+   * @param {Object} [options]
+   * @param {Array<Object>} [options.shared] - parts that fly, see `captureSharedItems` in shared-flight.js
+   */
+  captureOrigin(element, options = {}) {
+    return {
+      rect: rectSnapshot(element.getBoundingClientRect()),
+      radius: getComputedStyle(element).borderRadius,
+      shared: captureSharedItems(options.shared),
+    };
+  }
+
+  /**
    * Open a surface element using GPU clip-path morphing from trigger hitbox.
    *
    * @param {HTMLElement} element - The surface container element
@@ -518,6 +580,9 @@ class SurfaceManager {
    * @param {HTMLElement|DOMRect|{left:number,top:number,width:number,height:number}|MouseEvent} [options.origin]
    * @param {string|number} [options.originRadius] - Border radius of hitbox (auto-resolved from origin if omitted)
    * @param {string|number} [options.targetRadius] - Border radius of open surface (defaults to computed CSS radius)
+   * @param {ReturnType<SurfaceManager["captureOrigin"]>} [options.snapshot] - Origin frozen before the owner resized the element; supplies `origin` and `originRadius` and the parts that fly
+   * @param {"container"} [options.morph] - Transform the origin object into the surface: the surface stays opaque from the first frame (`openOpacity`/`closeOpacity` default to 1), the object's own look is kept and the surface colour is washed in, and the snapshot's parts fly
+   * @param {() => ({left:number,top:number,width:number,height:number}|null)} [options.getOrigin] - Where the origin is now; asked at the start of every transition so a close lands on the object even if it moved
    * @param {string|HTMLElement|Array<HTMLElement>} [options.content] - Selector or elements to delay-fade
    * @param {HTMLElement} [options.backdrop] - Background overlay element to fade in
    * @param {boolean} [options.closeOnOutsideClick=true]
@@ -564,6 +629,15 @@ class SurfaceManager {
       closeOnEscape: true,
       ...options,
     };
+    // A frozen origin speaks for the object that no longer looks like itself.
+    if (opts.snapshot) {
+      opts.origin ??= opts.snapshot.rect;
+      opts.originRadius ??= opts.snapshot.radius;
+    }
+    if (opts.morph === "container") {
+      opts.openOpacity ??= 1;
+      opts.closeOpacity ??= 1;
+    }
 
     // Ensure surface is ready in layout to measure bounding box
     const prevVisibility = element.style.visibility;
@@ -636,11 +710,13 @@ class SurfaceManager {
       targetR = `${targetR}px`;
     }
 
-    // Compute relative insets from surface boundaries into origin hitbox
-    const topInset = opts.axis === "x" ? 0 : Math.max(0, Math.round(originRect.top - surfaceRect.top));
-    const leftInset = Math.max(0, Math.round(originRect.left - surfaceRect.left));
-    const rightInset = Math.max(0, Math.round(surfaceRect.right - (originRect.left + originRect.width)));
-    const bottomInset = opts.axis === "x" ? 0 : Math.max(0, Math.round(surfaceRect.bottom - (originRect.top + originRect.height)));
+    // Relative insets from the surface boundaries into the origin hitbox. Unrounded,
+    // like the ones _refreshInsets measures for every later transition, so the first
+    // frame does not sit half a pixel off the rest of the animation.
+    const topInset = opts.axis === "x" ? 0 : Math.max(0, originRect.top - surfaceRect.top);
+    const leftInset = Math.max(0, originRect.left - surfaceRect.left);
+    const rightInset = Math.max(0, surfaceRect.right - (originRect.left + originRect.width));
+    const bottomInset = opts.axis === "x" ? 0 : Math.max(0, surfaceRect.bottom - (originRect.top + originRect.height));
 
     // Dynamic duration calculation via logarithmic physical formula (r[motion.no-hardcoded-ms])
     // Respects explicit opts.duration token or millisecond override if specified
@@ -687,9 +763,40 @@ class SurfaceManager {
       insets: { topInset, rightInset, bottomInset, leftInset, originR, targetR },
       duration,
       durationSpec: opts.duration,
+      flight: opts.snapshot?.shared?.length ? new SharedFlight(element, opts.snapshot.shared) : null,
     };
 
     this.activeStack.push(record);
+    try {
+      this._beginOpen(record, opts, { topInset, rightInset, bottomInset, leftInset, originR });
+    } catch (error) {
+      // A throw here would leave the element hidden, half set up and on the stack.
+      // Unwind to the closed state through the normal path so the owner's onClosed
+      // runs too, and report instead of rejecting a promise nobody awaits.
+      console.error("Surface open failed:", error);
+      element.style.visibility = prevVisibility;
+      record.state = "closing";
+      try { this._finalizeClose(record); } catch (inner) { console.error("Surface unwind failed:", inner); }
+      return;
+    }
+    // Keep the newly displayed element hidden through measurement, callbacks,
+    // and WAAPI setup. The first visible paint must already have its clip.
+    element.style.visibility = prevVisibility;
+
+    return new Promise((resolve) => {
+      record.pendingTransitionResolve = resolve;
+      record.motionGroup?.finished.then(() => {
+        if (record.pendingTransitionResolve === resolve) {
+          record.pendingTransitionResolve = null;
+          resolve();
+        }
+      });
+    });
+  }
+
+  // The part of openSurface that can throw: callbacks, content lookup, the first transition.
+  _beginOpen(record, opts, { topInset, rightInset, bottomInset, leftInset, originR }) {
+    const { element } = record;
     if (typeof opts.onOpen === "function") opts.onOpen();
 
     // Elevation
@@ -730,19 +837,6 @@ class SurfaceManager {
       opacity: opts.openOpacity ?? 0,
       contentOpacities: contentTargets.map(() => 0),
       backdropOpacity: 0,
-    });
-    // Keep the newly displayed element hidden through measurement, callbacks,
-    // and WAAPI setup. The first visible paint must already have its clip.
-    element.style.visibility = prevVisibility;
-
-    return new Promise((resolve) => {
-      record.pendingTransitionResolve = resolve;
-      record.motionGroup?.finished.then(() => {
-        if (record.pendingTransitionResolve === resolve) {
-          record.pendingTransitionResolve = null;
-          resolve();
-        }
-      });
     });
   }
 
@@ -792,7 +886,9 @@ class SurfaceManager {
     record.element.style.clipPath = "";
     record.element.style.willChange = "";
     record.element.classList.add("surface-open");
-    record.element.classList.remove("surface-closing");
+    record.element.classList.remove("surface-closing", "surface-opening");
+    // The parts have landed on their real nodes: swap, in this same task.
+    record.flight?.release();
 
     for (const target of animatedContentTargets) target.style.opacity = "1";
     record.activeContentTargets = [];
@@ -825,7 +921,7 @@ class SurfaceManager {
     this._cancelRecordAnimations(record);
     record.activeContentTargets = [];
 
-    element.classList.remove("surface-active", "surface-open", "surface-closing", "surface-pointer-live");
+    element.classList.remove("surface-active", "surface-open", "surface-opening", "surface-closing", "surface-pointer-live");
     element.style.clipPath = "";
     element.style.pointerEvents = "";
     element.style.willChange = "";
@@ -856,6 +952,11 @@ class SurfaceManager {
     } catch (error) {
       console.error("Surface close callback failed:", error);
     } finally {
+      // The owner has put the object back (onClosed): its real parts take over
+      // from the stand-ins now, still under the hidden surface.
+      record.flight?.release();
+      element.style.removeProperty("--wash-dur");
+      element.style.removeProperty("--wash-ease");
       if (previousOpacity.value) {
         element.style.setProperty("opacity", previousOpacity.value, previousOpacity.priority);
       } else {

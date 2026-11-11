@@ -296,4 +296,35 @@ async function renderClockDashboard(body, widgetId) {
   updateClockFace(container, version);
 }
 
-export { renderClock, updateClockFace, updateClockTime, startClockInterval, renderClockDashboard };
+// The parts of a face that are drawn, one by one. Gooey's date and SVG have
+// different dashboard sizes, and grid-second has two independently laid-out
+// faces, so each needs its own endpoints.
+function clockFaces(container) {
+  const gooey = container?.querySelector(":scope > .gooey-clock-face");
+  return Array.from((gooey || container)?.children || []);
+}
+
+/**
+ * The faces that fly when the card opens into the dashboard: each face of the dock
+ * clock to the matching face of the dashboard clock. The clock is one object drawn
+ * at two sizes, so the faces scale on each axis (`free`) instead of keeping an
+ * aspect ratio. Call it BEFORE the dashboard is rendered into the body: rendering
+ * it moves the dock clock, and the faces are frozen where the user sees them now.
+ * The dashboard is looked up again when the flight starts, once it exists.
+ */
+function clockSharedElements(card, body) {
+  const source = Array.from(card.children).find((child) =>
+    child.classList.contains("clock-container") && !child.classList.contains("dash-clock"));
+  const sourceFaces = clockFaces(source);
+  if (!source || !sourceFaces.length) return [];
+  const dashboard = () => body?.querySelector(".dash-clock");
+  return sourceFaces.map((face, index) => ({
+    source: face,
+    target: () => clockFaces(dashboard())[index] ?? null,
+    scale: "free",
+    context: source,
+    hide: [source, dashboard],
+  }));
+}
+
+export { renderClock, updateClockFace, updateClockTime, startClockInterval, renderClockDashboard, clockSharedElements };
