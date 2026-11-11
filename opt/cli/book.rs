@@ -7,9 +7,12 @@ use std::path::{Path, PathBuf};
 const REPOSITORY: &str = "https://github.com/avariiiiiiiiii/UniDTK/blob/main";
 /// One file of the reference must stay readable in a single tool call.
 const REFERENCE_LINE_LIMIT: usize = 350;
-const CODE_DIRS: [&str; 6] = ["core", "modules", "hosts", "opt/cli", "toolchain", ".cargo"];
+const CODE_DIRS: [&str; 5] = ["core", "modules", "opt/cli", "toolchain", ".cargo"];
 const CODE_EXTENSIONS: [&str; 7] = ["rs", "js", "css", "html", "toml", "nsh", "json"];
 const SKIPPED_DIRS: [&str; 4] = ["target", "dist", "gen", "node_modules"];
+/// Code copied from another project keeps its own comments, which cite that
+/// project's documents (see `core/rune/UPSTREAM.md`).
+const IMPORTED_DIRS: [&str; 1] = ["core/rune/"];
 /// The checker itself: its tests spell out the very mistakes it looks for.
 const SELF: &str = "opt/cli/book.rs";
 
@@ -469,7 +472,7 @@ fn check_code(root: &Path, rules: &[String], problems: &mut Vec<String>) {
     for file in files {
         let Ok(text) = std::fs::read_to_string(&file) else { continue };
         let name = file.strip_prefix(root).unwrap_or(&file).to_string_lossy().replace('\\', "/");
-        if name == SELF {
+        if name == SELF || IMPORTED_DIRS.iter().any(|dir| name.starts_with(dir)) {
             continue;
         }
         for (at, line) in text.lines().enumerate() {
@@ -718,6 +721,23 @@ mod tests {
         assert!(only(&case("cite", &[("docs/a.md", "# A\n\nSee r[no.such] here.\n")]), "unknown rule"));
         assert!(only(&case("code", &[("docs/a.md", "# A\n"), ("core/x.rs", "// docs/gone.md\n")]), "core/x.rs"));
         assert!(only(&case("sect", &[("docs/a.md", "# A\n"), ("core/x.rs", "// docs/a.md §5\n")]), "cite a rule"));
+    }
+
+    #[test]
+    fn check_leaves_imported_code_alone() {
+        let problems = check(
+            &repo(
+                "imported",
+                &[
+                    ("README.md", "# S\n"),
+                    ("AGENTS.md", "# A\n"),
+                    ("docs/SUMMARY.md", "[S](../README.md)\n"),
+                    ("core/rune/rune-motion/src/lib.rs", "//! (PLAN.md §3) docs/gone.md r[no.such]\n"),
+                ],
+            ),
+            &pages(&["doc"]),
+        );
+        assert_eq!(problems, Vec::<String>::new());
     }
 
     #[test]
