@@ -44,6 +44,9 @@ pub struct MigrationReport {
     pub tracks: usize,
     pub playlists: usize,
     pub links: usize,
+    /// Playlist link rows whose keys do not have the `<playlist>_<position>` shape.
+    /// They are not migrated, and while there are any the old tables stay in the file.
+    pub skipped_links: usize,
 }
 
 struct Legacy {
@@ -51,6 +54,8 @@ struct Legacy {
     playlists: Vec<(String, Vec<u8>)>,
     /// Keys already in slice format: `pt/<playlist_id>/<pos>`.
     links: Vec<(String, Vec<u8>)>,
+    /// Legacy link rows whose key could not be parsed.
+    skipped_links: usize,
 }
 
 /// Safety copy of `shell.redb` made before the first launch with module-kv.
@@ -91,12 +96,17 @@ pub fn migrate_if_needed(db: &Arc<Database>) -> Result<Option<MigrationReport>, 
     let legacy = read_legacy(db)?;
     write_slice(db, &scope, &legacy)?;
     verify_slice(db, &scope, &legacy)?;
-    drop_legacy_tables(db)?;
+    // A row that could not be moved is the only copy of that link: the old tables
+    // stay (and the safety copy of the file exists) until someone has looked at it.
+    if legacy.skipped_links == 0 {
+        drop_legacy_tables(db)?;
+    }
 
     Ok(Some(MigrationReport {
         tracks: legacy.tracks.len(),
         playlists: legacy.playlists.len(),
         links: legacy.links.len(),
+        skipped_links: legacy.skipped_links,
     }))
 }
 
@@ -134,18 +144,21 @@ fn read_legacy(db: &Arc<Database>) -> Result<Legacy, String> {
     }
 
     let mut links = Vec::new();
+    let mut skipped_links = 0usize;
     if let Ok(table) = txn.open_table(LEGACY_PLAYLIST_TRACKS) {
         for entry in table.iter().map_err(|e| e.to_string())? {
             let (key, value) = entry.map_err(|e| e.to_string())?;
             // Legacy key: `<playlist_id>_<pos:08>`; the position is always after
             // the last underscore.
-            if let Some((playlist_id, position)) = key.value().rsplit_once('_') {
-                if position.len() >= 8 && position.bytes().all(|b| b.is_ascii_digit()) {
-                    links.push((
-                        format!("{LINK_PREFIX}{playlist_id}/{position}"),
-                        value.value().to_vec(),
-                    ));
-                }
+            let parsed = key.value().rsplit_once('_').filter(|(_, position)| {
+                position.len() >= 8 && position.bytes().all(|b| b.is_ascii_digit())
+            });
+            match parsed {
+                Some((playlist_id, position)) => links.push((
+                    format!("{LINK_PREFIX}{playlist_id}/{position}"),
+                    value.value().to_vec(),
+                )),
+                None => skipped_links += 1,
             }
         }
     }
@@ -154,6 +167,7 @@ fn read_legacy(db: &Arc<Database>) -> Result<Legacy, String> {
         tracks,
         playlists,
         links,
+        skipped_links,
     })
 }
 
@@ -307,6 +321,28 @@ mod tests {
         // A repeated launch does not repeat the migration.
         assert!(migrate_if_needed(&db).unwrap().is_none());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_link_row_that_cannot_be_moved_keeps_the_old_tables() {
+        let (db, dir) = scratch_db("badlink");
+        seed_legacy(&db);
+        let txn = db.begin_write().unwrap();
+        {
+            let mut links = txn.open_table(LEGACY_PLAYLIST_TRACKS).unwrap();
+            links.insert("no-underscore-position", b"t1".as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+
+        let report = migrate_if_needed(&db).unwrap().expect("migration expected");
+        assert_eq!(report.links, 2);
+        assert_eq!(report.skipped_links, 1);
+        let txn = db.begin_read().unwrap();
+        let old = txn.open_table(LEGACY_PLAYLIST_TRACKS).unwrap();
+        assert!(old.get("no-underscore-position").unwrap().is_some());
+        drop(old);
+        drop(txn);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

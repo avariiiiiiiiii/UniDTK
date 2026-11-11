@@ -19,6 +19,9 @@ use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 // --- Widgets ---
+/// Key in `widget_settings` that records the one-time import of the legacy folder directory.
+const LEGACY_FOLDERS_MARKER: &str = "legacy_folders_imported";
+
 const WIDGET_SETTINGS: TableDefinition<&str, &[u8]> = TableDefinition::new("widget_settings");
 const EXPLORER_TABS: TableDefinition<&str, &[u8]> = TableDefinition::new("explorer_tabs");
 const FOLDERS: TableDefinition<&str, &[u8]> = TableDefinition::new("folders");
@@ -189,6 +192,24 @@ impl UniDtkDatabase {
         }
     }
 
+    /// The stored list, or an empty one when the stored value is damaged (it cannot be
+    /// decoded). `report` is told why. A damaged value must not make every later toggle
+    /// fail: the next `set_disabled_modules` replaces it. A database error is still an error.
+    pub fn get_disabled_modules_or_reset(&self, report: impl FnOnce(&str)) -> Result<Vec<String>, String> {
+        let txn = self.db.begin_read().map_err(|e| e.to_string())?;
+        let table = txn.open_table(WIDGET_SETTINGS).map_err(|e| e.to_string())?;
+        match table.get("disabled_modules").map_err(|e| e.to_string())? {
+            Some(value) => match bincode::deserialize::<Vec<String>>(value.value()) {
+                Ok(list) => Ok(list),
+                Err(error) => {
+                    report(&error.to_string());
+                    Ok(Vec::new())
+                }
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub fn set_disabled_modules(&self, ids: &[String]) -> Result<(), String> {
         let txn = self.db.begin_write().map_err(|e| e.to_string())?;
         {
@@ -258,13 +279,33 @@ impl UniDtkDatabase {
         Ok(existed)
     }
 
-    /// Auto-migrate legacy folders from a directory on disk if redb `folders` table is empty.
+    fn legacy_folders_imported(&self) -> Result<bool, String> {
+        let txn = self.db.begin_read().map_err(|e| e.to_string())?;
+        let table = txn.open_table(WIDGET_SETTINGS).map_err(|e| e.to_string())?;
+        Ok(table.get(LEGACY_FOLDERS_MARKER).map_err(|e| e.to_string())?.is_some())
+    }
+
+    fn mark_legacy_folders_imported(&self) -> Result<(), String> {
+        let txn = self.db.begin_write().map_err(|e| e.to_string())?;
+        {
+            let mut table = txn.open_table(WIDGET_SETTINGS).map_err(|e| e.to_string())?;
+            table.insert(LEGACY_FOLDERS_MARKER, b"1".as_slice()).map_err(|e| e.to_string())?;
+        }
+        txn.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Import the legacy folders from a directory on disk, once: the first time the
+    /// `folders` table is empty and the directory exists. It is remembered (also when the
+    /// table already has folders), so deleting every folder later does not bring the
+    /// old ones back at the next start.
     pub fn auto_migrate_disk_folders(&self, folders_dir: &Path) -> Result<usize, String> {
-        if !folders_dir.is_dir() {
+        if !folders_dir.is_dir() || self.legacy_folders_imported()? {
             return Ok(0);
         }
         let current = self.list_folders()?;
         if !current.is_empty() {
+            self.mark_legacy_folders_imported()?;
             return Ok(0);
         }
 
@@ -348,6 +389,7 @@ impl UniDtkDatabase {
             count += 1;
         }
 
+        self.mark_legacy_folders_imported()?;
         Ok(count)
     }
 }
@@ -385,7 +427,38 @@ mod tests {
         let second = db.auto_migrate_disk_folders(&disk_folders).unwrap();
         assert_eq!(second, 0);
 
+        // Deleting every folder does not bring the legacy ones back.
+        assert!(db.delete_folder("my_apps").unwrap());
+        assert_eq!(db.auto_migrate_disk_folders(&disk_folders).unwrap(), 0);
+        assert!(db.list_folders().unwrap().is_empty());
+
         let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn a_damaged_disabled_list_is_replaced_not_fatal() {
+        let dir = std::env::temp_dir().join(format!("test_unidtk_db_disabled_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = UniDtkDatabase::open(dir.join("test.redb")).unwrap();
+
+        // Not a decodable list: a length that promises more bytes than there are.
+        let txn = db.db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(WIDGET_SETTINGS).unwrap();
+            table.insert("disabled_modules", [0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 1].as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+
+        assert!(db.get_disabled_modules().is_err());
+        let mut reported = None;
+        let list = db.get_disabled_modules_or_reset(|why| reported = Some(why.to_string())).unwrap();
+        assert!(list.is_empty());
+        assert!(reported.is_some());
+
+        db.set_disabled_modules(&["vpn".to_string()]).unwrap();
+        assert_eq!(db.get_disabled_modules().unwrap(), vec!["vpn".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

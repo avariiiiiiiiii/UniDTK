@@ -33,6 +33,13 @@ const BATCH_MAX: usize = 2048;
 static LOG_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Entries dropped because the queue was saturated (INFO/DEBUG only).
 static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Entries accepted by the queue, and entries that have reached both sinks. The
+/// flusher takes entries out of the channel before it writes them, so an empty
+/// channel does not mean everything is written: `flush` compares these two.
+static ENQUEUED: AtomicU64 = AtomicU64::new(0);
+static WRITTEN: AtomicU64 = AtomicU64::new(0);
+/// The longest `flush` waits for a batch the flusher is still writing.
+const FLUSH_WAIT: Duration = Duration::from_millis(1000);
 
 struct Queue {
     tx: Sender<LogEntry>,
@@ -179,6 +186,7 @@ pub fn flush() {
     let Some(queue) = QUEUE.get() else {
         return;
     };
+    let target = ENQUEUED.load(Ordering::SeqCst);
     let mut batch = Vec::new();
     while batch.len() < QUEUE_CAPACITY * 2 {
         match queue.rx.try_recv() {
@@ -189,6 +197,21 @@ pub fn flush() {
     if !batch.is_empty() {
         write_batch(&batch);
     }
+    // A batch the flusher took before this call may still be on its way to disk:
+    // wait for it, but not for ever (the flusher may be gone).
+    wait_until_written(&WRITTEN, target, FLUSH_WAIT);
+}
+
+/// Wait until `written` reaches `target`; false if `timeout` ran out first.
+fn wait_until_written(written: &AtomicU64, target: u64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while written.load(Ordering::SeqCst) < target {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    true
 }
 
 // ── internals ────────────────────────────────────────────────────────────────
@@ -204,9 +227,19 @@ fn enqueue(entry: LogEntry) {
     let critical = matches!(entry.level.as_str(), "WARN" | "ERROR");
     if critical {
         // Blocking send: critical lines survive even a saturated queue.
-        let _ = queue.tx.send(entry);
-    } else if let Err(TrySendError::Full(_)) = queue.tx.try_send(entry) {
-        DROPPED.fetch_add(1, Ordering::Relaxed);
+        if queue.tx.send(entry).is_ok() {
+            ENQUEUED.fetch_add(1, Ordering::SeqCst);
+        }
+    } else {
+        match queue.tx.try_send(entry) {
+            Ok(()) => {
+                ENQUEUED.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(TrySendError::Full(_)) => {
+                DROPPED.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(TrySendError::Disconnected(_)) => {}
+        }
     }
 }
 
@@ -245,6 +278,7 @@ fn write_batch(batch: &[LogEntry]) {
         }
     }
     append_file(batch);
+    WRITTEN.fetch_add(batch.len() as u64, Ordering::SeqCst);
 }
 
 fn init_file(path: Option<PathBuf>) {
@@ -326,7 +360,25 @@ fn normalize_level(level: Option<&str>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_message, normalize_level, single_line};
+    use super::{clamp_message, normalize_level, single_line, wait_until_written};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn flush_waits_for_a_batch_that_is_still_being_written() {
+        let written = Arc::new(AtomicU64::new(3));
+        let late = Arc::clone(&written);
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            late.store(5, Ordering::SeqCst);
+        });
+        assert!(wait_until_written(&written, 5, Duration::from_secs(2)));
+        writer.join().unwrap();
+        // Nobody writes any more: the wait ends, it does not hang the exit.
+        assert!(!wait_until_written(&written, 6, Duration::from_millis(30)));
+        assert!(wait_until_written(&written, 5, Duration::ZERO));
+    }
 
     #[test]
     fn an_oversized_message_is_cut_on_a_character_and_says_so() {

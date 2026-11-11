@@ -165,11 +165,12 @@ export function openMenu() {
   panel.querySelector(`#tab-${currentView}`)?.focus();
 }
 
-/** Open "Folders" with the Start list of one folder already unfolded. */
+/** Open the desk tab (widgets and folders share it) with the Start list of one folder already unfolded. */
 export function openFoldersFor(folderId) {
   startPickerFor = folderId;
-  currentView = "folders";
-  if (isMenuOpen()) showView("folders");
+  // "folders" is not a view any more: showView hides every pane for a name it does not know.
+  currentView = "desk";
+  if (isMenuOpen()) showView("desk");
   else openMenu();
 }
 

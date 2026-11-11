@@ -223,7 +223,17 @@ fn module_context(app: &tauri::AppHandle, id: &str, enabled: bool) -> unidtk_api
 /// If redb failed to open, all modules are treated as enabled (the previous behavior, no panic).
 fn disabled_module_set(app: &tauri::AppHandle) -> std::collections::HashSet<String> {
     match app.try_state::<Arc<UniDtkDatabase>>() {
-        Some(state) => state.inner().get_disabled_modules().unwrap_or_default().into_iter().collect(),
+        Some(state) => state
+            .inner()
+            .get_disabled_modules_or_reset(|why| {
+                log_line(format!("setup: disabled_modules is damaged ({why}); every module starts enabled"));
+            })
+            .unwrap_or_else(|error| {
+                log_line(format!("setup: disabled_modules cannot be read ({error}); every module starts enabled"));
+                Vec::new()
+            })
+            .into_iter()
+            .collect(),
         None => std::collections::HashSet::new(),
     }
 }
@@ -590,6 +600,11 @@ fn switch_module<M: unidtk_api::Module + 'static>(app: &tauri::AppHandle, id: &s
 /// they were.
 pub(crate) fn apply_module_enabled(app: &tauri::AppHandle, db: &UniDtkDatabase, id: &str, enabled: bool) -> Result<(), String> {
     let _switch = MODULE_SWITCH.lock().map_err(|_| "module switch lock poisoned".to_string())?;
+    // Read the stored list before the module changes: a read that fails afterwards
+    // would leave the module switched and the choice not saved.
+    let mut disabled = db.get_disabled_modules_or_reset(|why| {
+        log_line(format!("module {id}: the stored disabled list is damaged ({why}); starting a new one"));
+    })?;
     match id {
         "glyph-bar" => switch_module::<glyph_bar::GlyphBarModule>(app, id, enabled)?,
         "vpn" => switch_module::<vpn::VpnModule>(app, id, enabled)?,
@@ -600,7 +615,6 @@ pub(crate) fn apply_module_enabled(app: &tauri::AppHandle, db: &UniDtkDatabase, 
         "mp3-player" => switch_module::<commands::Mp3PlayerModule>(app, id, enabled)?,
         _ => return Err(format!("unknown module: {id}")),
     }
-    let mut disabled = db.get_disabled_modules()?;
     disabled.retain(|m| m != id);
     if !enabled {
         disabled.push(id.to_string());
@@ -2084,10 +2098,18 @@ fn main() {
         let result = UniDtkDatabase::open(&path).map(Arc::new);
         if let Ok(db) = &result {
             match library_migration::migrate_if_needed(&db.raw_db()) {
-                Ok(Some(report)) => log_line(format!(
-                    "library: migrated {} tracks / {} playlists / {} links into mods/mp3_player",
-                    report.tracks, report.playlists, report.links
-                )),
+                Ok(Some(report)) => {
+                    log_line(format!(
+                        "library: migrated {} tracks / {} playlists / {} links into mods/mp3_player",
+                        report.tracks, report.playlists, report.links
+                    ));
+                    if report.skipped_links > 0 {
+                        log_line(format!(
+                            "library: {} playlist link row(s) have keys of an unknown shape and were not migrated; the old tables stay in the file",
+                            report.skipped_links
+                        ));
+                    }
+                }
                 Ok(None) => {},
                 Err(error) => log_line(format!("library: module-kv migration failed: {error}")),
             }
