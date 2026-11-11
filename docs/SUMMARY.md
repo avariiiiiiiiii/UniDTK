@@ -30,7 +30,6 @@
 - [The desk, the menu, and themes](reference/desk.md)
 - [Motion](reference/motion.md)
 - [Surfaces](reference/surfaces.md)
-- [The GPUI host](reference/gpui-host.md)
 
 # The udtk Book
 
@@ -78,13 +77,14 @@
 - [Architecture kanban](dev/architecture-kanban.md)
 - [Customization menu audit](dev/menu-audit.md)
 - [Audit register, 2026-11-09](dev/audit-2026-11-09.md)
+- [Plan: a kernel that knows no module](dev/plan-kernel-cleanup.md)
+- [Plan: the native desktop host on Rune](dev/plan-rune-host.md)
 
 # History
 
 - [About the history](history/README.md)
 - [Session log](sessions.md)
 - [Architecture notes](history/architecture-notes.md)
-- [GPUI: completed gates](history/gpui-gates.md)
 - [RFC: core audit](history/rfcs/core-audit.md)
 - [RFC: agent end-to-end testing and IPC](history/rfcs/agent-e2e-and-ipc.md)
 - [RFC: shell interception](history/rfcs/shell-interception.md)

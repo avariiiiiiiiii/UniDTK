@@ -4,28 +4,26 @@ This is the first file an agent reads. It says what is true today and where to r
 
 ## Current state
 
-- **Focus:** migration from WebView2 to the native GPUI host, on the branch `feature/gpui-desktop`. See [the GPUI host](reference/gpui-host.md).
-- **GPUI gates:** Gate 0 (transparent window on WorkerW) and Gate 1 (design system, `clock` and `glyph-bar`) are complete.
+- **Focus:** a kernel that knows no module ([plan](dev/plan-kernel-cleanup.md)) and the native desktop host on Rune source code ([plan](dev/plan-rune-host.md)), on the branch `rune-transition`.
 - **Production:** `C:\Program Files\UniDTK` (Tauri v2 + WebView2), built by `udtk build`.
 
 | Subsystem / Metric | Value / Status | Technology stack | Primary document |
 | :--- | :---: | :--- | :--- |
-| **Active branch** | `main` (current checkout; GPUI migration work lives on `feature/gpui-desktop`) | Git | [GPUI host](reference/gpui-host.md) |
+| **Active branch** | `main`; the kernel cleanup and the Rune host live on `rune-transition` | Git | [Rune host plan](dev/plan-rune-host.md) |
 | **Design tokens / themes** | 🟢 Two built-in presets: Classic (flat) + Sea Glass (jelly), schema v4: colors, fonts, geometry, material, palette + tintMap, optics | CSS custom properties, `data-material`, `unidtk-theme-changed`, OKLCH ink, pre-paint from the `paint` cache | [desk.md](reference/desk.md), session 125 |
 | **Core (kernel)** | 🟢 Stable | Headless Rust, `unidtk-api`, TCP IPC `127.0.0.1:26540` | [kernel.md](reference/kernel.md) |
 | **Storage (DB)** | 🟢 Stable | Clean `redb` transactions (`unidtk.redb`, `unidtk_logs.redb`) | [storage.md](reference/storage.md) |
 | **CLI bridge (`udtk`)** | 🟢 Stable | Rust CLI, CDP WebSocket, TCP IPC; `doctor -simulate` measures a motion budget (real click/Escape, frame and task ≤ 50 ms) | [udtk book](udtk/ch11-doctor-the-diagnostic-loop.md), session 136 |
 | **Production GUI** | 🟢 Stable | Tauri v2, WebView2 (Working Set of the process tree: 571 MB after a test run, session 136) | [the page](book/ch06-the-page.md) |
 | **Motion** | 🟡 Telegram over budget (#536); surfaces grow out of their object (container morph, session 137) | Worst frame on a quiet machine (session 137): menu/folder/clock 17–34 ms; Telegram open 88–450 ms (task 91–438 ms), over the 50 ms budget. Folders, the clock and the Telegram dock avatars go through one engine ([shared-flight.js](../core/ui/shared-flight.js)); the explorer morphs, the menu slide and popups do not yet (#535). Earlier (session 136): Telegram open click 68 → 25 ms. A history change during the open patches only the changed rows (session 136 follow-up; fixture-proven, not yet seen live). Open: `doctor -simulate` budget is flaky under machine load, Telegram long tasks of 60–137 ms in some runs are unexplained | [surfaces](reference/surfaces.md), sessions 136, 137 |
-| **Experimental GUI** | 🟡 Gate 1 ready | GPUI, DirectX 11, DirectComposition (RAM: **59.7 MB**, CPU: **0.39%**) | [GPUI host](reference/gpui-host.md) |
-| **Module: Clock** | 🟢 Ready (GPUI) | GPUI, Nothing Ndot 55 typography, on-demand timer (1 Hz) | [GPUI host](reference/gpui-host.md) |
-| **Module: Glyph Bar** | 🟢 Ready (GPUI) | GPUI, 10 LED segments, WASAPI master volume | [GPUI host](reference/gpui-host.md) |
+| **Module: Clock** | 🟢 Stable | WebView2, Nothing Ndot 55 typography, on-demand timer (1 Hz) | [clock](modules/clock.md) |
+| **Module: Glyph Bar** | 🟢 Stable | 10 LED segments, WASAPI master volume | [glyph-bar](modules/glyph-bar.md) |
 | **Build / Release** | 🟢 `udtk build` ~11.5 min | cargo thin-LTO `jobs=3`, NSIS `zlib`, installer **126 MB** (models → AppData) | [build](udtk/ch14-build-step-by-step.md), session 116 |
-| **Module: MP3 Player** | 🔵 GPUI queue | libmpv FFI raw-dylib, WASAPI loopback, AI DJ, arcs; model weights in `%LOCALAPPDATA%\UniDTK\models` (downloaded, session 116; default source: the published ONNX export on Hugging Face, pinned to a commit, session 134) | [mp3-player](modules/mp3-player.md) |
-| **Module: Micrographics** | 🔵 GPUI queue | WinRT geolocation, adaptive precipitation/weather grid; place name via BDC→Nominatim chain (session 116, `b08fbae`) | [micrographics](modules/micrographics.md) |
-| **Module: Telegram** | 🔵 GPUI queue | TDLib C FFI, ByeDPI socks5, reactions, forum threads; pinned messages in groups — 15 s budget + cooldown (session 115, `5ab1e7a`) | [telegram](modules/telegram.md) |
-| **Module: VPN** | 🔵 GPUI queue | Sing-box TUN, native `vpn-helper.exe` (GUI subsystem) | [vpn](modules/vpn.md) |
-| **Module: Explorer** | 🔵 GPUI queue | Tabs, Win32 Shell API, cross-view sorting | [explorer](modules/explorer.md) |
+| **Module: MP3 Player** | 🟢 Stable | libmpv FFI raw-dylib, WASAPI loopback, AI DJ, arcs; model weights in `%LOCALAPPDATA%\UniDTK\models` (downloaded, session 116; default source: the published ONNX export on Hugging Face, pinned to a commit, session 134) | [mp3-player](modules/mp3-player.md) |
+| **Module: Micrographics** | 🟢 Stable | WinRT geolocation, adaptive precipitation/weather grid; place name via BDC→Nominatim chain (session 116, `b08fbae`) | [micrographics](modules/micrographics.md) |
+| **Module: Telegram** | 🟢 Stable | TDLib C FFI, ByeDPI socks5, reactions, forum threads; pinned messages in groups — 15 s budget + cooldown (session 115, `5ab1e7a`) | [telegram](modules/telegram.md) |
+| **Module: VPN** | 🟢 Stable | Sing-box TUN, native `vpn-helper.exe` (GUI subsystem) | [vpn](modules/vpn.md) |
+| **Module: Explorer** | 🟢 Stable | Tabs, Win32 Shell API, cross-view sorting | [explorer](modules/explorer.md) |
 
 ## Where to read
 
@@ -39,7 +37,7 @@ Load only what the task needs. The whole book is listed in [SUMMARY.md](SUMMARY.
 | Use or extend the CLI | [the `udtk` book](udtk/README.md) |
 | Work inside a module | [modules/](modules/README.md) |
 | Build, test, internals of logging and storage | [dev/](dev/README.md) |
-| Port a widget to GPUI | [the GPUI host](reference/gpui-host.md) |
+| Port a widget to the native host | [the Rune host plan](dev/plan-rune-host.md) |
 | Why something was decided, a past failure | [sessions.md](sessions.md), [history/](history/README.md) |
 
 ## Codebase map
@@ -50,9 +48,6 @@ UniDTK Repository
 │   ├── api/                    # unidtk-api: stable contract (Module trait, ModuleDb, StoreSpec)
 │   ├── kernel/                 # unidtk: microkernel, IPC (26540), tray, redb stores, WorkerW attachment
 │   └── ui/                     # WebView2 frontend: menu.js, surface-manager.js, motion.js, styles.css
-│
-├── hosts/                      # Graphical shell hosts
-│   └── gpui/                   # unidtk-gpui: native GPU host on Zed GPUI (DirectX 11 + DirectComposition)
 │
 ├── modules/                    # Vertical feature slices (can be turned off)
 │   ├── clock/                  # Clock: ui/ (WebView2) + tests/

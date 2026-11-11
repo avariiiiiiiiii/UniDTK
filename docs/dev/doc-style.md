@@ -19,7 +19,7 @@ A fact lives in one place. A rule's text is in `reference/`; everything else lin
 
 - Start with one paragraph that says what the chapter covers and what the reader will be able to do after it.
 - Follow the mechanism in the order the machine runs it: which function is called, on which thread, what it writes, what it returns, how it fails.
-- Name real files and functions, for example `attach_to_desktop()` in `hosts/gpui/src/main.rs`. Do not describe code that does not exist; read it first.
+- Name real files and functions, for example `resolve_desktop_host()` in `core/kernel/wallpaper.rs`. Do not describe code that does not exist; read it first.
 - Short code listings are welcome. Put a caption line before a listing: `Filename: core/kernel/wallpaper.rs`. Abridge with `// ...` and say that it is abridged.
 - Explain why, not only what. A rule without its reason is not finished.
 - Use a "Note:" paragraph for a side remark and a "Warning:" paragraph for a trap.

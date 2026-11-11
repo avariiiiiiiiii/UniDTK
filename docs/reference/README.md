@@ -25,7 +25,6 @@ A rule's text lives in exactly one place, here. Other documents link to it, for 
 - [Install and runtime layout](install.md): Program Files, AppData, scheduled tasks, external binaries.
 - [The desk, the menu, and themes](desk.md): positions, folders, nesting, tokens, and contrast.
 - [Motion](motion.md) and [Surfaces](surfaces.md): animation tokens and the morph.
-- [The GPUI host](gpui-host.md): the native window that replaces WebView2.
 
 ## The documentation principle
 
