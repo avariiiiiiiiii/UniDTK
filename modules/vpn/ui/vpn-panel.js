@@ -387,6 +387,9 @@ function formatSelectedVpnServer(status) {
   if (status.connected && status.ipUnverified) {
     line = `${line} · IP: ?`;
   }
+  if (status.skippedServers > 0) {
+    line = `${line} · пропущено в подписке: ${status.skippedServers}`;
+  }
   return line;
 }
 

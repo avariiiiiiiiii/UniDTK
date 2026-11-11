@@ -287,7 +287,15 @@ pub fn set_auto_connect(enabled: bool) -> VpnSettingsStatus {
 
 pub fn set_subscription_url(url: String) -> Result<VpnSettingsStatus, String> {
     let mut settings = load_settings();
-    settings.subscription_url = url.trim().to_string();
+    let url = url.trim().to_string();
+    if url != settings.subscription_url {
+        // The list in memory and the cache on disk belong to the old subscription.
+        // Dropping them makes the next list or connect read the new one, and a
+        // failure to read it is an error instead of the old servers.
+        save_servers_cache(&[]);
+        SERVERS_STALE.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    settings.subscription_url = url;
     save_settings(&settings);
     unidtk_api::log("vpn: subscription_url updated in redb");
     Ok(settings_status(settings))
@@ -350,6 +358,9 @@ pub struct VpnStatus {
     pub ip_unverified: bool,
     pub error: Option<String>,
     pub auto_connect: bool,
+    /// Subscription entries that are not VLESS or Trojan, or do not parse.
+    #[serde(rename = "skippedServers")]
+    pub skipped_servers: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -380,6 +391,8 @@ struct RuntimeInner {
     connected: bool,
     connecting: bool,
     last_error: Option<String>,
+    /// Entries of the last subscription this module could not use.
+    skipped_servers: usize,
 }
 
 // ─── Subscription parsing ───
@@ -526,7 +539,7 @@ fn decode_subscription(raw: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn fetch_servers(subscription_url: &str) -> Result<Vec<VpnServer>, String> {
+fn fetch_servers(subscription_url: &str) -> Result<(Vec<VpnServer>, usize), String> {
     let response = ureq::get(subscription_url)
         .set("User-Agent", "v2box/1.0")
         .timeout(Duration::from_secs(15))
@@ -539,25 +552,66 @@ fn fetch_servers(subscription_url: &str) -> Result<Vec<VpnServer>, String> {
 
     let decoded = decode_subscription(&raw)?;
 
-    let servers: Vec<VpnServer> = decoded
-        .lines()
-        .map(str::trim)
-        .filter_map(|l| {
-            if l.starts_with("vless://") {
-                parse_vless_line(l)
-            } else if l.starts_with("trojan://") {
-                parse_trojan_line(l)
-            } else {
-                None
-            }
-        })
-        .collect();
-
+    let (servers, skipped) = parse_subscription(&decoded);
     if servers.is_empty() {
         return Err("no usable VLESS/Trojan servers found in subscription".into());
     }
+    Ok((servers, skipped))
+}
 
-    Ok(servers)
+/// The servers of a decoded subscription that this module can use, and how many
+/// entries it had to leave out (other schemes such as ss:// or vmess://, and
+/// links of a supported scheme that do not parse). Blank lines and comments do not count.
+fn parse_subscription(decoded: &str) -> (Vec<VpnServer>, usize) {
+    let mut servers = Vec::new();
+    let mut skipped = 0;
+    for line in decoded
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let parsed = if line.starts_with("vless://") {
+            parse_vless_line(line)
+        } else if line.starts_with("trojan://") {
+            parse_trojan_line(line)
+        } else {
+            None
+        };
+        match parsed {
+            Some(server) => servers.push(server),
+            None => skipped += 1,
+        }
+    }
+    (servers, skipped)
+}
+
+/// Which server a connect request means. A request that names a tag the
+/// subscription does not have is an error: connecting somewhere else without a word
+/// would hand the user a different exit. A remembered tag that is gone falls back to
+/// the first server, and the flag says so, so the caller can report it.
+fn pick_server(
+    servers: &[VpnServer],
+    requested: Option<&str>,
+    remembered: Option<&str>,
+) -> Result<(VpnServer, bool), String> {
+    if let Some(tag) = requested.filter(|t| !t.is_empty()) {
+        return servers
+            .iter()
+            .find(|s| s.tag == tag)
+            .cloned()
+            .map(|s| (s, false))
+            .ok_or_else(|| format!("server '{tag}' is not in the subscription"));
+    }
+    if let Some(tag) = remembered.filter(|t| !t.is_empty()) {
+        if let Some(server) = servers.iter().find(|s| s.tag == tag) {
+            return Ok((server.clone(), false));
+        }
+    }
+    servers
+        .first()
+        .cloned()
+        .map(|s| (s, true))
+        .ok_or_else(|| "no servers available".to_string())
 }
 
 // ─── Config builders ───
@@ -1684,8 +1738,14 @@ pub fn ping_all(runtime: &VpnRuntime) -> Result<Vec<VpnPingResult>, String> {
 
 // ─── Public API used by Tauri commands ───
 
+/// Set when the subscription URL changed: the servers in memory are the old ones.
+static SERVERS_STALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn list_servers(runtime: &VpnRuntime) -> Result<Vec<VpnServer>, String> {
     let mut inner = runtime.inner.lock().unwrap();
+    if SERVERS_STALE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        inner.servers.clear();
+    }
     if inner.servers.is_empty() {
         refresh_servers_locked(&mut inner)?;
     }
@@ -1704,10 +1764,11 @@ fn refresh_servers_locked(inner: &mut RuntimeInner) -> Result<(), String> {
         return Err("VPN subscription URL is not configured".into());
     }
     match fetch_servers(&settings.subscription_url) {
-        Ok(servers) => {
-            unidtk_api::log(format!("vpn: fetched {} servers", servers.len()));
+        Ok((servers, skipped)) => {
+            unidtk_api::log(format!("vpn: fetched {} servers, {skipped} entries skipped", servers.len()));
             save_servers_cache(&servers);
             inner.servers = servers;
+            inner.skipped_servers = skipped;
             Ok(())
         }
         Err(e) => {
@@ -1756,6 +1817,23 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
         // event via the contract, and its handler may lock its own mutex.
         drop(inner);
         publish_vpn_state();
+        // A core that died can leave its TUN adapter and strict-route filters
+        // behind: the UI says Off while the network stays cut. Clean up through
+        // the elevated stop, unless a new connect has started in the meantime.
+        let runtime_for_cleanup = runtime.clone();
+        std::thread::spawn(move || {
+            let busy = {
+                let inner = runtime_for_cleanup.inner.lock().unwrap();
+                inner.connecting || inner.connected
+            };
+            if busy {
+                return;
+            }
+            let nonce = perform_stop();
+            if !wait_until_stopped(Duration::from_secs(10), nonce.as_deref()) {
+                unidtk_api::log("vpn: cleanup after a crashed core did not finish");
+            }
+        });
         let inner = runtime.inner.lock().unwrap();
         return VpnStatus {
             connected: inner.connected,
@@ -1766,6 +1844,7 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
             ip_unverified: inner.ip_unverified,
             error: inner.last_error.clone(),
             auto_connect: load_settings().auto_connect,
+            skipped_servers: inner.skipped_servers,
         };
     }
     // NOTE (proxy health mid-session): this watchdog only checks the local
@@ -1788,6 +1867,7 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
         ip_unverified: inner.ip_unverified,
         error: inner.last_error.clone(),
         auto_connect: load_settings().auto_connect,
+        skipped_servers: inner.skipped_servers,
     }
 }
 
@@ -1803,32 +1883,28 @@ pub fn connect(runtime: &VpnRuntime, tag: Option<String>) -> Result<(), String> 
             unidtk_api::log("vpn: connect ignored: already connecting");
             return Err("VPN connection is already in progress".into());
         }
+        if SERVERS_STALE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            inner.servers.clear();
+        }
         if inner.servers.is_empty() {
             refresh_servers_locked(&mut inner)?;
         }
         let settings = load_settings();
-        let target = tag
-            .or_else(|| inner.selected_tag.clone())
+        let remembered = inner
+            .selected_tag
+            .clone()
             .or(settings.last_tag.clone())
             .filter(|t| !t.is_empty())
-            .or_else(|| Some(settings.default_tag.clone()))
-            .ok_or_else(|| "no server selected".to_string())?;
-        let server = inner
-            .servers
-            .iter()
-            .find(|s| s.tag == target)
-            .cloned()
-            .or_else(|| {
-                // Target tag not in the current subscription (it may have been
-                // renamed/removed server-side). Fall back to the first server
-                // instead of failing the whole connect.
-                unidtk_api::log(format!(
-                    "vpn: server '{}' not in subscription; falling back to first server",
-                    target
-                ));
-                inner.servers.first().cloned()
-            })
-            .ok_or_else(|| "no servers available".to_string())?;
+            .or_else(|| Some(settings.default_tag.clone()));
+        let (server, fell_back) = pick_server(&inner.servers, tag.as_deref(), remembered.as_deref())?;
+        if fell_back {
+            // The panel shows `selected_tag` after the connect, which is then the
+            // server that is really in use; the log says why it differs.
+            unidtk_api::log(format!(
+                "vpn: remembered server {remembered:?} not in subscription; connecting to '{}' instead",
+                server.tag
+            ));
+        }
         // Commands must be safe to repeat: asking for the server the tunnel already
         // uses must not tear the running core down and start it again.
         if inner.connected && inner.selected_tag.as_deref() == Some(server.tag.as_str()) {
@@ -2023,8 +2099,12 @@ pub fn shutdown(runtime: &VpnRuntime) {
 /// when no TUN/SOCKS is up the stop task is not even fired.
 pub fn shutdown_and_wait(runtime: &VpnRuntime, budget: Duration) -> bool {
     unidtk_api::log("vpn: shutdown requested");
+    let in_flight;
     {
         let mut inner = runtime.inner.lock().unwrap();
+        // A connect that is still bringing the cores up has already asked the
+        // elevated helper to start sing-box, before the SOCKS port or the TUN exist.
+        in_flight = inner.connecting || inner.connected;
         inner.connected = false;
         inner.connecting = false;
         inner.proxy_latency_ms = None;
@@ -2036,8 +2116,9 @@ pub fn shutdown_and_wait(runtime: &VpnRuntime, budget: Duration) -> bool {
     publish_vpn_state();
 
     // Nothing is up: no task round-trip on an ordinary exit (VPN was off).
-    let nothing_up =
-        !port_is_open(SOCKS_PORT) && !interface_is_connected(TUN_NAME).unwrap_or(false);
+    let nothing_up = !in_flight
+        && !port_is_open(SOCKS_PORT)
+        && !interface_is_connected(TUN_NAME).unwrap_or(false);
     if nothing_up {
         return true;
     }
@@ -2224,7 +2305,7 @@ impl unidtk_api::Module for VpnModule {
 
 #[cfg(test)]
 mod subscription_tests {
-    use super::decode_subscription;
+    use super::{decode_subscription, parse_subscription, parse_vless_line, pick_server, VpnServer};
     use base64::Engine;
 
     #[test]
@@ -2237,6 +2318,37 @@ mod subscription_tests {
     fn base64_subscription_is_decoded() {
         let body = base64::engine::general_purpose::STANDARD.encode("vless://a@h:1#x");
         assert_eq!(decode_subscription(&body).unwrap(), "vless://a@h:1#x");
+    }
+
+    fn server(tag: &str) -> VpnServer {
+        parse_vless_line(&format!("vless://id@{tag}.example:443?security=tls&sni={tag}.example#{tag}")).unwrap()
+    }
+
+    #[test]
+    fn a_subscription_counts_what_it_cannot_use() {
+        let body = "vless://id@a.example:443#a\nss://abcdef@b.example:1#b\n\n# comment\n\
+                    vmess://xyz\ntrojan://pw@c.example:443#c\nvless://broken";
+        let (servers, skipped) = parse_subscription(body);
+        assert_eq!(servers.iter().map(|s| s.tag.as_str()).collect::<Vec<_>>(), ["a", "c"]);
+        assert_eq!(skipped, 3); // ss://, vmess://, and the vless link that does not parse
+    }
+
+    #[test]
+    fn a_requested_tag_that_is_gone_is_an_error_not_another_server() {
+        let servers = [server("a"), server("b")];
+        assert!(pick_server(&servers, Some("gone"), Some("a")).is_err());
+        let (picked, fell_back) = pick_server(&servers, Some("b"), Some("a")).unwrap();
+        assert_eq!((picked.tag.as_str(), fell_back), ("b", false));
+    }
+
+    #[test]
+    fn a_remembered_tag_that_is_gone_falls_back_and_says_so() {
+        let servers = [server("a"), server("b")];
+        let (picked, fell_back) = pick_server(&servers, None, Some("gone")).unwrap();
+        assert_eq!((picked.tag.as_str(), fell_back), ("a", true));
+        let (picked, fell_back) = pick_server(&servers, None, Some("b")).unwrap();
+        assert_eq!((picked.tag.as_str(), fell_back), ("b", false));
+        assert!(pick_server(&[], None, Some("a")).is_err());
     }
 
     #[test]
