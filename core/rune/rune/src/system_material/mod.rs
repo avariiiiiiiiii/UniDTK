@@ -4,8 +4,6 @@
 //! so the material, Rune's shadow and the content on top present together. Everywhere else,
 //! in opaque windows and in headless renders, the element's fill (or a neutral tint) stands in.
 
-#[cfg(target_os = "macos")]
-pub(crate) mod macos;
 
 use crate::Color;
 use rune_motion::NodeId;

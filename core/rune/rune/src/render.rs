@@ -28,8 +28,6 @@ pub(crate) mod surface_alpha;
 pub(crate) mod translucency;
 mod upload;
 mod variant;
-#[cfg(target_os = "macos")]
-mod windfoil_metallib;
 pub use backdrop_blur::MAX_BACKDROP_BLURS;
 pub use first_use::precompiled_misses;
 pub use layers::LayerStats;
@@ -558,7 +556,7 @@ impl Gpu {
     /// 40 ms on a Mac's first launch after an install or update). Indirect draws a compositor
     /// records on Rune's device still work; wgpu just doesn't check their argument buffers.
     pub fn instance() -> wgpu::Instance {
-        #[cfg(all(target_vendor = "apple", feature = "metal-backend"))]
+        #[cfg(all(target_vendor = "apple", any()))]
         if crate::gpu::metal::enabled() { return crate::gpu::metal::instance(); }
         Self::wgpu_instance()
     }
@@ -699,7 +697,7 @@ fn choose_then_start(backend: crate::GpuBackend, choose: impl FnOnce(crate::GpuB
 }
 
 /// Starts `prewarm_gpu`'s thread over if it's working, for a backend chosen after it started.
-#[cfg(all(target_os = "macos", feature = "metal-backend"))]
+#[cfg(all(target_os = "macos", any()))]
 pub(crate) fn restart_prewarm() {
     prewarm::restart();
 }
@@ -710,8 +708,6 @@ pub(crate) fn discard_prewarm() {
     prewarm::discard();
 }
 
-#[cfg(target_os = "macos")]
-mod prewarm;
 
 #[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
 #[path = "render/warm.rs"]
@@ -1188,9 +1184,9 @@ mod prewarm_tests {
         };
         let Some(renderer) = renderer else { return eprintln!("skipped: no GPU for the prewarm thread") };
         // Rune's Metal backend loads its metallib without advertising passthrough.
-        #[cfg(feature = "metal-backend")]
+        #[cfg(any())]
         let native = crate::gpu::metal::raw_device(&gpu.device).is_some();
-        #[cfg(not(feature = "metal-backend"))]
+        #[cfg(not(any()))]
         let native = false;
         assert!(native || gpu.device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS));
         assert_eq!(renderer.format, wgpu::TextureFormat::Bgra8Unorm);
@@ -1247,7 +1243,7 @@ mod prewarm_tests {
 
     /// A compositor wanting a feature the native Metal backend lacks gets wgpu's device, when
     /// Metal is only the default, with the prewarmed native GPU dropped before any surface.
-    #[cfg(feature = "metal-backend")]
+    #[cfg(any())]
     #[test]
     fn a_compositor_wanting_what_the_native_backend_lacks_draws_with_wgpu() {
         if !crate::gpu::metal::enabled() || std::env::var_os("RUNE_GPU_BACKEND").is_some() {
@@ -1274,7 +1270,7 @@ mod prewarm_tests {
 
     /// A compositor wanting immediates keeps the native backend and the prewarmed device, which
     /// has them whether or not anything asked, with the adapter's immediate size.
-    #[cfg(feature = "metal-backend")]
+    #[cfg(any())]
     #[test]
     fn a_compositor_wanting_immediates_keeps_the_native_backend_and_the_prewarmed_gpu() {
         if !crate::gpu::metal::enabled() || std::env::var_os("RUNE_GPU_BACKEND").is_some() {

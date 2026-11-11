@@ -256,9 +256,6 @@ pub use selectable::{SelectedText, SelectionChange, TextSelection};
 #[path = "runtime/selection/select_all.rs"]
 mod select_all;
 
-#[cfg(any(test, target_arch = "wasm32"))]
-#[path = "runtime/web/runtime.rs"]
-pub(crate) mod web_runtime;
 #[path = "runtime/web/a11y.rs"]
 pub(crate) mod web_a11y;
 #[path = "runtime/web/page.rs"]

@@ -21,12 +21,8 @@ mod content;
 mod html;
 mod secret;
 pub(crate) mod tx;
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
-#[cfg(target_arch = "wasm32")]
-mod web;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::tiff_to_png;
 pub use content::{ClipboardContent, ClipboardImage, MAX_IMAGE_BYTES};

@@ -122,9 +122,6 @@ pub(crate) fn make_pending(event_loop: &ActiveEventLoop) {
     let _ = event_loop;
 }
 
-#[cfg(target_arch = "wasm32")]
-#[path = "web.rs"]
-mod images;
 
 #[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
 mod images {

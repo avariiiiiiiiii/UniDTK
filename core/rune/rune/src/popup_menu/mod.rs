@@ -23,8 +23,6 @@ use crate::runtime::Waker;
 use crate::{PointerPress, Runtime, Shortcut, Tx};
 
 #[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
 use macos as host;
 #[cfg(target_os = "windows")]
 mod win32;

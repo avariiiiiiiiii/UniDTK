@@ -7,16 +7,10 @@ use std::sync::{Arc, Mutex, Weak};
 use crate::machine::{Attempt, Seq};
 use crate::{App, AppHandle, Shortcut, Tx, app::Shared};
 
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-mod default_macos;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod key_equivalent;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod standard;
-#[cfg(target_os = "macos")]
-mod standard_macos;
 #[cfg(target_os = "macos")]
 pub(crate) use default_macos::{ensure as ensure_default_menu, promote as promote_default_menu, set_layout_direction};
 #[cfg(target_os = "macos")]

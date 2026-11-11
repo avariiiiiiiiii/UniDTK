@@ -19,10 +19,6 @@ use crate::Tx;
 use crate::runtime::Waker;
 
 #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
-mod portal;
-#[cfg(any(all(feature = "native-file-dialog", target_os = "linux"), all(test, unix)))]
-mod portal_format;
-#[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
 pub(crate) use portal::window_focus;
 #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
 use portal::show as native;

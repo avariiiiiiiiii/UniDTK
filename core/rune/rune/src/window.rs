@@ -26,8 +26,6 @@ use crate::tooling::{AppSpec, Args, Chrome, runtime_for};
 use crate::windows::{AnyWindowSpec, Display, WindowOptions, WindowSpec};
 
 #[cfg(target_os = "macos")]
-mod launch_drawables;
-#[cfg(target_os = "macos")]
 use launch_drawables::LaunchDrawables;
 mod chrome;
 use chrome::{frame_chrome, place_chrome, sync_chrome, titlebar_double_click};
@@ -69,8 +67,6 @@ pub(crate) use sight::{Cover, Sight};
 mod lifecycle;
 mod reveal;
 use reveal::{Found, Reveal, RevealEffect};
-#[cfg(target_os = "macos")]
-mod mac;
 mod pacing;
 pub(crate) use pacing::{
     HiddenPace, Missed, TimerFrame, OCCLUDED_MAX, OCCLUDED_RETRY, TIMEOUT_RETRY, TIMER_FRAME,
@@ -85,8 +81,6 @@ pub(crate) use backoff::{Backoff, BackoffEvent, BackoffEffect};
 mod stepping;
 pub mod spec;
 pub(crate) mod titlebar;
-#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-mod float_on_open;
 #[cfg(not(target_arch = "wasm32"))]
 pub use event_loop::run;
 pub(crate) use event_loop::run_windows;

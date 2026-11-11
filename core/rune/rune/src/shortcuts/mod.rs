@@ -2,23 +2,13 @@
 //! Nothing connects to the desktop until the first registration.
 mod parse;
 mod keys;
-#[cfg(target_os = "macos")]
-mod layout_macos;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use layout_macos::force as force_layout;
 pub use keys::{PhysicalKeyCode, modifier_keycaps};
 pub(crate) use keys::{capital, us_char};
 mod service;
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
-#[cfg(target_os = "linux")]
-mod x11;
-#[cfg(any(target_os = "linux", test))]
-mod x11_repeat;
-#[cfg(all(target_os = "linux", feature = "dbus"))]
-mod wayland;
 
 pub use parse::Shortcut;
 pub(crate) use service::{Hub, Guard};
@@ -76,9 +66,9 @@ fn backend(wayland: bool, sink: Sink) -> Result<NativeBackend, ShortcutError> {
     return Ok(Box::new(windows::Native::new(sink)?));
     #[cfg(target_os = "linux")]
     return if wayland {
-        #[cfg(feature = "dbus")]
+        #[cfg(any())]
         { Ok(Box::new(wayland::Native::new(sink)?)) }
-        #[cfg(not(feature = "dbus"))]
+        #[cfg(not(any()))]
         { Err(ShortcutError::Unsupported) }
     } else { Ok(Box::new(x11::Native::new(sink)?)) };
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

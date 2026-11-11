@@ -32,7 +32,7 @@ impl Renderer {
 /// lacked them; `None` on any other backend.
 #[doc(hidden)]
 pub fn precompiled_misses(device: &wgpu::Device) -> Option<usize> {
-    #[cfg(all(target_vendor = "apple", feature = "metal-backend"))]
+    #[cfg(all(target_vendor = "apple", any()))]
     if crate::gpu::metal::raw_device(device).is_some() {
         return Some(crate::gpu::metal::builtin_misses());
     }

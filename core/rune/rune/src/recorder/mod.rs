@@ -14,8 +14,6 @@ mod control;
 mod fake;
 mod meter;
 #[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
 use macos as backend;
 #[cfg(not(target_os = "macos"))]
 mod unsupported;

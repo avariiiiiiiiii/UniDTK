@@ -17,9 +17,6 @@ pub(crate) mod pause;
 #[cfg(target_os = "windows")]
 #[path = "spell/windows.rs"]
 mod platform;
-#[cfg(target_os = "macos")]
-#[path = "spell/macos.rs"]
-mod platform;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod platform {
     pub(super) fn misspelled(_: &str) -> Vec<(usize, usize)> { Vec::new() }

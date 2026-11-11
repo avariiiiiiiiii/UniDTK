@@ -15,8 +15,6 @@
 
 use std::sync::Mutex;
 
-#[cfg(target_os = "macos")]
-mod mac;
 pub(crate) mod relaunch;
 #[cfg(target_os = "windows")]
 mod win32;

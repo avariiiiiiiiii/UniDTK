@@ -12,9 +12,6 @@ pub use std::time::{SystemTime, UNIX_EPOCH};
 pub use web_time::{SystemTime, UNIX_EPOCH};
 
 mod local;
-#[cfg(any(test, target_arch = "wasm32"))]
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-mod page_clock;
 
 pub use local::LocalTime;
 

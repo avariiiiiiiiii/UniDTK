@@ -22,8 +22,6 @@
 use crate::color::{Color, srgb_decode, srgb_encode};
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "macos")]
-mod macos;
 
 /// Whether this platform's windows start OS drag sessions.
 pub(crate) const SUPPORTED: bool = cfg!(target_os = "macos");

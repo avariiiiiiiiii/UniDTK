@@ -4,8 +4,6 @@
 
 pub(crate) mod backend;
 pub(crate) mod health;
-#[cfg(all(target_vendor = "apple", feature = "metal-backend"))]
-pub(crate) mod metal;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod pick;
 pub mod springs;
@@ -24,7 +22,7 @@ pub(crate) fn with_layer<R>(surface: &wgpu::Surface<'_>, f: impl FnOnce(&AnyObje
         // than ours, the object is the same.
         return Some(f(unsafe { &*objc2_video::rc::Retained::as_ptr(&*layer).cast::<AnyObject>() }));
     }
-    #[cfg(feature = "metal-backend")]
+    #[cfg(any())]
     if let Some(layer) = metal::layer(surface) {
         return Some(f(layer));
     }
@@ -35,9 +33,9 @@ pub(crate) fn with_layer<R>(surface: &wgpu::Surface<'_>, f: impl FnOnce(&AnyObje
 /// one command buffer, too cheap to hand to a present thread.
 #[cfg(target_os = "macos")]
 pub(crate) fn native(queue: &wgpu::Queue) -> bool {
-    #[cfg(feature = "metal-backend")]
+    #[cfg(any())]
     return metal::owns(queue);
-    #[cfg(not(feature = "metal-backend"))]
+    #[cfg(not(any()))]
     {
         let _ = queue;
         false

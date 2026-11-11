@@ -28,21 +28,12 @@
 //!
 //! Other platforms report [`PlayerState::Failed`] and draw a neutral placeholder for video.
 
-#[cfg(all(target_os = "macos", feature = "ogg-audio"))]
-mod foreign;
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod phases;
 #[cfg(target_os = "macos")]
 use macos as backend;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::test_frames;
-#[cfg(any(target_os = "macos", test))]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-mod turn;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-mod unsupported;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use unsupported as backend;
 #[cfg(target_os = "windows")]

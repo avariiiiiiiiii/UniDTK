@@ -507,6 +507,4 @@ pub(crate) mod interaction;
 pub(crate) mod perf_warn;
 pub(crate) mod record;
 pub(crate) mod virtual_desktop;
-#[cfg(test)]
-pub(crate) mod test_alloc;
 

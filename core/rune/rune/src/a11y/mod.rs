@@ -14,10 +14,6 @@ use crate::runtime::Runtime;
 pub(crate) mod dump;
 pub(crate) mod roles;
 
-#[cfg(all(feature = "accessibility", target_os = "macos"))]
-mod macos;
-#[cfg(all(feature = "accessibility", target_os = "linux"))]
-mod unix;
 #[cfg(all(feature = "accessibility", target_os = "windows"))]
 mod windows;
 

@@ -12,8 +12,6 @@ use std::ops::ControlFlow;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-#[cfg(target_arch = "wasm32")]
-mod web;
 
 /// Runs `work` off the UI thread: a thread named `name`, or a task after the current event on
 /// the web. Fails only when the system has no thread left to give.
