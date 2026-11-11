@@ -115,15 +115,60 @@ pub(crate) fn log_line(message: impl AsRef<str>) {
 /// Without the guard a tray quit raced ExitRequested into two VPN stops with
 /// two different nonces, so the first waiter timed out on a marker that the
 /// second stop had already replaced.
-static SHUTDOWN_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SHUTDOWN: ShutdownLatch = ShutdownLatch::new();
+
+/// How long a second exit route waits for the first one: four module stops of
+/// 1.5 s, the 2 s VPN stop, and the log flush.
+const SECOND_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
+
+/// Who runs the shutdown, and when it is finished. A second exit route must not
+/// return while the first is still stopping the VPN: a session end that returns
+/// from `WM_ENDSESSION` early lets Windows end the process with the TUN up.
+struct ShutdownLatch {
+    started: std::sync::atomic::AtomicBool,
+    done: Mutex<bool>,
+    finished: std::sync::Condvar,
+}
+
+impl ShutdownLatch {
+    const fn new() -> Self {
+        Self { started: std::sync::atomic::AtomicBool::new(false), done: Mutex::new(false), finished: std::sync::Condvar::new() }
+    }
+
+    /// True for the first caller only; that caller must call `finish`.
+    fn begin(&self) -> bool {
+        !self.started.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn is_started(&self) -> bool {
+        self.started.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn finish(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *done = true;
+        self.finished.notify_all();
+    }
+
+    /// Waits until the first caller finished; false when the budget ran out.
+    fn wait(&self, budget: Duration) -> bool {
+        let done = self.done.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (done, _) = self.finished.wait_timeout_while(done, budget, |done| !*done)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *done
+    }
+}
 
 /// Stop every subsystem exactly once. `wait_for_vpn` blocks (bounded) until the
 /// elevated helper has actually killed sing-box — pass `true` only from threads
 /// where sleeping is acceptable (async command, session-end listener), never
-/// from the main event loop.
+/// from the main event loop. A second call with `wait_for_vpn` waits for the
+/// first to finish; without it, it returns at once.
 pub(crate) fn app_shutdown(app: &tauri::AppHandle, wait_for_vpn: bool) {
-    use std::sync::atomic::Ordering;
-    if SHUTDOWN_DONE.swap(true, Ordering::SeqCst) {
+    if !SHUTDOWN.begin() {
+        if wait_for_vpn && !SHUTDOWN.wait(SECOND_SHUTDOWN_BUDGET) {
+            log_line("shutdown: the first exit route did not finish within the budget");
+        }
         return;
     }
     log_line("shutdown: begin");
@@ -163,11 +208,12 @@ pub(crate) fn app_shutdown(app: &tauri::AppHandle, wait_for_vpn: bool) {
     // Drain queued log lines into unidtk_logs.redb / unidtk.log.
     crate::logging::flush();
     log_line("shutdown: done");
+    SHUTDOWN.finish();
 }
 
 /// True once the exit path has started (see `app_shutdown`).
 pub(crate) fn is_shutting_down() -> bool {
-    SHUTDOWN_DONE.load(std::sync::atomic::Ordering::SeqCst)
+    SHUTDOWN.is_started()
 }
 
 /// Module context: its own database slice + AppHandle as host state.
@@ -1838,6 +1884,34 @@ fn session_info() -> serde_json::Value {
         "wsPort": ws::port(),
         "token": ws::token(),
     })
+}
+
+#[cfg(test)]
+mod shutdown_latch_tests {
+    use super::ShutdownLatch;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_second_exit_route_waits_for_the_first() {
+        static LATCH: ShutdownLatch = ShutdownLatch::new();
+        assert!(LATCH.begin(), "the first caller runs the shutdown");
+        assert!(!LATCH.begin(), "only once");
+        let first = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(200));
+            LATCH.finish();
+        });
+        let started = Instant::now();
+        assert!(LATCH.wait(Duration::from_secs(5)), "the second caller saw the end");
+        assert!(started.elapsed() >= Duration::from_millis(150), "returned before the first finished");
+        first.join().unwrap();
+    }
+
+    #[test]
+    fn the_wait_is_bounded() {
+        static LATCH: ShutdownLatch = ShutdownLatch::new();
+        assert!(LATCH.begin());
+        assert!(!LATCH.wait(Duration::from_millis(50)), "a stuck first caller does not hold the second forever");
+    }
 }
 
 #[cfg(test)]
