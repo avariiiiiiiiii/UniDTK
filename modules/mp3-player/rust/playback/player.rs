@@ -75,6 +75,15 @@ struct PlayerClock {
     last_tick: Option<Instant>,
     /// Last time we polled `eof-reached` (rate-limit the auto-advance probe).
     last_auto_advance_check: Option<Instant>,
+    /// Set when an AI DJ auto-advance failed: the same call is not repeated before it.
+    auto_advance_backoff_until: Option<Instant>,
+}
+
+/// How long a failed AI DJ auto-advance is left alone before the next try.
+const AUTO_ADVANCE_BACKOFF: Duration = Duration::from_secs(30);
+
+fn backoff_active(until: Option<Instant>, now: Instant) -> bool {
+    until.is_some_and(|until| now < until)
 }
 
 #[derive(Clone)]
@@ -97,6 +106,7 @@ impl PlayerManager {
             clock: Arc::new(Mutex::new(PlayerClock {
                 last_tick: None,
                 last_auto_advance_check: None,
+                auto_advance_backoff_until: None,
             })),
             config,
             db,
@@ -728,6 +738,9 @@ impl PlayerManager {
                 }
             }
             clock.last_auto_advance_check = Some(now);
+            if backoff_active(clock.auto_advance_backoff_until, now) {
+                return;
+            }
         }
 
         // Snapshot running/paused/current to decide if we should probe.
@@ -747,6 +760,10 @@ impl PlayerManager {
             }
         };
         if !eof {
+            // A track is playing again (the user moved on): a past failure is forgotten.
+            if let Ok(mut clock) = self.clock.lock() {
+                clock.auto_advance_backoff_until = None;
+            }
             return;
         }
         // Don't loop on a single-track queue or at the end of the list.
@@ -775,9 +792,13 @@ impl PlayerManager {
                     return;
                 }
                 Err(e) => {
-                    unidtk_api::log(
-                        format!("player: AI DJ auto-advance failed: {e}"),
-                    );
+                    unidtk_api::log(format!(
+                        "player: AI DJ auto-advance failed: {e}; next try in {} s",
+                        AUTO_ADVANCE_BACKOFF.as_secs()
+                    ));
+                    if let Ok(mut clock) = self.clock.lock() {
+                        clock.auto_advance_backoff_until = Some(Instant::now() + AUTO_ADVANCE_BACKOFF);
+                    }
                     return;
                 }
             }

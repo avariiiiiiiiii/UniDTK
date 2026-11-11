@@ -727,6 +727,18 @@ fn download_attempt(
                     message: "сервер ответил 206 без Content-Range".to_string(),
                     reset_offset: true,
                 })?;
+            // The body is appended to the .part file as it is, so it has to start at the
+            // byte the .part file ends on; a server that answers from elsewhere would
+            // corrupt the file in a way only the final hash check would find.
+            let start = response.header("content-range").and_then(content_range_start);
+            if start != Some(offset) {
+                return Err(AttemptFail::Retryable {
+                    message: format!(
+                        "сервер начал ответ с байта {start:?}, а .part заканчивается на {offset}"
+                    ),
+                    reset_offset: true,
+                });
+            }
             if full <= offset {
                 return Err(AttemptFail::Retryable {
                     message: format!(
@@ -922,6 +934,19 @@ fn is_sha256_hex(candidate: &str) -> bool {
 }
 
 /// `bytes 0-0/347471872` → 347471872 (full file size).
+/// The first byte of a `Content-Range: bytes <start>-<end>/<total>` answer.
+fn content_range_start(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .strip_prefix("bytes")?
+        .trim()
+        .split_once('-')?
+        .0
+        .trim()
+        .parse()
+        .ok()
+}
+
 fn parse_content_range(value: &str) -> Option<u64> {
     let tail = value.trim().rsplit('/').next()?;
     tail.trim().parse::<u64>().ok().filter(|t| *t > 0)
@@ -1263,6 +1288,10 @@ mod tests {
 
     #[test]
     fn content_range_full_size_is_parsed() {
+        assert_eq!(content_range_start("bytes 123-456/1543"), Some(123));
+        assert_eq!(content_range_start("bytes 0-0/9"), Some(0));
+        assert_eq!(content_range_start("bytes */9"), None);
+        assert_eq!(content_range_start("garbage"), None);
         assert_eq!(parse_content_range("bytes 0-0/347471872"), Some(347471872));
         assert_eq!(parse_content_range("bytes 123-456/1543"), Some(1543));
         assert_eq!(parse_content_range("bytes 5-9/*"), None);

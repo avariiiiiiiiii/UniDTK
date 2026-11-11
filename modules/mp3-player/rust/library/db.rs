@@ -98,10 +98,17 @@ impl Database {
 
     fn all<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>, String> {
         let mut out = Vec::new();
+        let mut undecodable = 0usize;
         for (_, bytes) in self.db.kv_list(prefix)? {
-            if let Ok(value) = bincode::deserialize::<T>(&bytes) {
-                out.push(value);
+            match bincode::deserialize::<T>(&bytes) {
+                Ok(value) => out.push(value),
+                Err(_) => undecodable += 1,
             }
+        }
+        if undecodable > 0 {
+            unidtk_api::log(format!(
+                "library: {undecodable} record(s) under '{prefix}' cannot be decoded and are not shown"
+            ));
         }
         Ok(out)
     }
@@ -167,8 +174,13 @@ impl Database {
 
         let mut tracks = Vec::new();
         for (_, track_id) in ordered {
-            if let Some(track) = self.get::<Track>(&Self::track_key(&track_id))? {
-                tracks.push(track);
+            // One record that cannot be decoded must not take the whole playlist with it.
+            match self.get::<Track>(&Self::track_key(&track_id)) {
+                Ok(Some(track)) => tracks.push(track),
+                Ok(None) => {}
+                Err(error) => unidtk_api::log(format!(
+                    "library: track '{track_id}' of playlist '{playlist_id}' cannot be read and is skipped: {error}"
+                )),
             }
         }
 

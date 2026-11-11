@@ -619,25 +619,23 @@ impl AiDj {
         self.embeddings.contains_key(track_id)
     }
 
-    /// Clear all embeddings and analyses from memory and from the store.
-    pub fn clear(&mut self) {
-        self.embeddings.clear();
-        self.analyses.clear();
+    /// Clear all embeddings and analyses from the store, then from memory. If the store
+    /// refuses, memory is left as it was: clearing it anyway would show an empty library
+    /// that comes back with the old embeddings after a restart.
+    pub fn clear(&mut self) -> Result<(), String> {
         // One transaction: deleting entries one by one would commit once per track.
         let mut ops = Vec::new();
-        if let Ok(list) = self.store.kv_list(EMB) {
-            for (key, _) in list {
+        for prefix in [EMB, ANA] {
+            for (key, _) in self.store.kv_list(prefix)? {
                 ops.push(DbOp::Remove { key });
             }
         }
-        if let Ok(list) = self.store.kv_list(ANA) {
-            for (key, _) in list {
-                ops.push(DbOp::Remove { key });
-            }
-        }
-        let _ = self.store.kv_batch(ops);
+        self.store.kv_batch(ops)?;
+        self.embeddings.clear();
+        self.analyses.clear();
         // The analysis has been erased, so the similarity-graph cache is invalidated.
         bump_analysis_revision();
+        Ok(())
     }
 
     /// Get analysis history as structured data.
@@ -1236,6 +1234,52 @@ fn run_onnx_inference(mel_spec: &[Vec<f32>]) -> Result<Vec<f32>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// A store that holds data but refuses every batch.
+    struct RefusesBatches(unidtk_api::InMemoryModuleDb);
+
+    impl unidtk_api::ModuleDb for RefusesBatches {
+        fn kv_get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+            self.0.kv_get(key)
+        }
+        fn kv_set(&self, key: &str, value: &[u8]) -> Result<(), String> {
+            self.0.kv_set(key, value)
+        }
+        fn kv_remove(&self, key: &str) -> Result<(), String> {
+            self.0.kv_remove(key)
+        }
+        fn kv_list(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+            self.0.kv_list(prefix)
+        }
+        fn kv_batch(&self, _ops: Vec<unidtk_api::DbOp>) -> Result<(), String> {
+            Err("store is read-only".to_string())
+        }
+    }
+
+    #[test]
+    fn clear_leaves_memory_alone_when_the_store_refuses() {
+        use unidtk_api::ModuleDb;
+        let store = RefusesBatches(unidtk_api::InMemoryModuleDb::new());
+        store.kv_set("emb:t1", &[0u8; 4]).unwrap();
+        let mut dj = AiDj::new(std::sync::Arc::new(store));
+        dj.embeddings.insert("t1".to_string(), vec![0.0]);
+        assert!(dj.clear().is_err());
+        assert!(dj.has_track("t1"), "memory must still agree with the store");
+    }
+
+    #[test]
+    fn clear_empties_store_and_memory_together() {
+        use unidtk_api::ModuleDb;
+        let store = std::sync::Arc::new(unidtk_api::InMemoryModuleDb::new());
+        store.kv_set("emb:t1", &[0u8; 4]).unwrap();
+        store.kv_set("ana:t1", b"{}").unwrap();
+        let mut dj = AiDj::new(store.clone());
+        dj.embeddings.insert("t1".to_string(), vec![0.0]);
+        dj.clear().unwrap();
+        assert!(!dj.has_track("t1"));
+        assert!(store.kv_list("emb:").unwrap().is_empty());
+        assert!(store.kv_list("ana:").unwrap().is_empty());
+    }
+
     #[test]
     fn camelot_compatible_never_panics_on_odd_keys() {
         assert!(!camelot_compatible("", "8A"));

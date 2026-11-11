@@ -1178,7 +1178,9 @@ async function renderMusicMenu(body, musicId) {
       if (!rect.width || !rect.height) return;
 
       const zoomFactor = delta > 0 ? 1.15 : 0.87;
-      const newZoom = Math.max(0.25, Math.min(5.0, zoom * zoomFactor));
+      // The fit may set a zoom down to 0.10; a wheel floor above it would turn a
+      // zoom-out on a fitted graph into a zoom-in.
+      const newZoom = Math.max(0.10, Math.min(5.0, zoom * zoomFactor));
       if (newZoom === zoom) return;
 
       const mx = cursorX - rect.left - rect.width / 2;

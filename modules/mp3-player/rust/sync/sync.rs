@@ -46,6 +46,51 @@ pub struct SyncManager {
 struct YtDlpRun {
     downloaded: i64,
     warning: Option<String>,
+    /// True when yt-dlp failed for some entries that are not merely unavailable at the
+    /// source: the playlist is not complete, and must not be marked as synced.
+    incomplete: bool,
+}
+
+/// How a finished yt-dlp run is shown, and whether the playlist counts as synced.
+/// Returns (status, message, mark_synced).
+fn run_outcome(run: &YtDlpRun) -> (&'static str, String, bool) {
+    match (&run.warning, run.incomplete) {
+        (Some(warning), true) => (
+            "error",
+            format!(
+                "Partial sync: {} track(s) downloaded; the rest failed and will be retried: {warning}",
+                run.downloaded
+            ),
+            false,
+        ),
+        (Some(warning), false) if run.downloaded == 0 => {
+            ("done", format!("No new downloads; yt-dlp warning: {warning}"), true)
+        }
+        (Some(warning), false) => (
+            "done",
+            format!("Downloaded {} track(s); yt-dlp warning: {warning}", run.downloaded),
+            true,
+        ),
+        (None, _) if run.downloaded == 0 => ("done", "No new downloads; archive is up to date".to_string(), true),
+        (None, _) => ("done", format!("Downloaded {} track(s)", run.downloaded), true),
+    }
+}
+
+/// The longest a metadata scan or a yt-dlp self-update may run before it is killed.
+const YT_DLP_SCAN_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Run `command` to completion, or kill it and fail when `limit` passes. A stalled
+/// network call would otherwise hold the sync task, or the updater, for ever.
+async fn output_within(
+    command: &mut Command,
+    limit: Duration,
+    what: &str,
+) -> Result<std::process::Output, String> {
+    command.kill_on_drop(true);
+    match tokio::time::timeout(limit, command.output()).await {
+        Ok(output) => output.map_err(|e| format!("{what}: {e}")),
+        Err(_) => Err(format!("{what} timed out after {} s and was stopped", limit.as_secs())),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -189,33 +234,23 @@ impl SyncManager {
         let result = self.run_yt_dlp(&task).await;
         match result {
             Ok(run) => {
-                if let Err(error) = self.db.mark_playlist_synced(&task.playlist_id) {
-                    self.update(&task_id, |task| {
-                        task.status = "error".to_string();
-                        task.message = Some(error);
-                        task.finished_at = Some(now_ts());
-                    });
-                    return;
+                let (status, message, mark_synced) = run_outcome(&run);
+                if mark_synced {
+                    if let Err(error) = self.db.mark_playlist_synced(&task.playlist_id) {
+                        self.update(&task_id, |task| {
+                            task.status = "error".to_string();
+                            task.message = Some(error);
+                            task.finished_at = Some(now_ts());
+                        });
+                        return;
+                    }
                 }
                 self.update(&task_id, |task| {
-                    task.status = "done".to_string();
+                    task.status = status.to_string();
                     task.progress_pct = Some(100.0);
                     task.current = None;
                     task.downloaded = run.downloaded;
-                    task.message = Some(if let Some(warning) = run.warning {
-                        if run.downloaded == 0 {
-                            format!("No new downloads; yt-dlp warning: {warning}")
-                        } else {
-                            format!(
-                                "Downloaded {} track(s); yt-dlp warning: {warning}",
-                                run.downloaded
-                            )
-                        }
-                    } else if run.downloaded == 0 {
-                        "No new downloads; archive is up to date".to_string()
-                    } else {
-                        format!("Downloaded {} track(s)", run.downloaded)
-                    });
+                    task.message = Some(message);
                     task.finished_at = Some(now_ts());
                 });
             }
@@ -377,6 +412,7 @@ impl SyncManager {
             return Ok(YtDlpRun {
                 downloaded: recovered,
                 warning: None,
+                incomplete: false,
             });
         }
 
@@ -402,6 +438,7 @@ impl SyncManager {
             Ok(run) => Ok(YtDlpRun {
                 downloaded: recovered + run.downloaded,
                 warning: run.warning,
+                incomplete: run.incomplete,
             }),
             Err(detail) if recovered > 0 => Ok(YtDlpRun {
                 downloaded: recovered,
@@ -409,6 +446,7 @@ impl SyncManager {
                     "{} track(s) linked; missing tracks failed: {detail}",
                     recovered
                 )),
+                incomplete: true,
             }),
             Err(detail) => Err(detail),
         }
@@ -512,6 +550,7 @@ impl SyncManager {
         let mut downloaded = 0_i64;
         let mut position = 0_i64;
         let mut lines = BufReader::new(stdout).lines();
+        let read: Result<(), String> = async {
         while let Some(line) = lines
             .next_line()
             .await
@@ -551,6 +590,17 @@ impl SyncManager {
                 });
             }
         }
+        Ok(())
+        }
+        .await;
+        if let Err(error) = read {
+            // The task is about to be reported as failed: yt-dlp must not keep
+            // writing into the library behind that report.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            stderr_reader.abort();
+            return Err(error);
+        }
 
         let status = child
             .wait()
@@ -563,6 +613,7 @@ impl SyncManager {
                 return Ok(YtDlpRun {
                     downloaded,
                     warning: Some(detail),
+                    incomplete: true,
                 });
             }
             // Some entries are unavailable at the source (deleted/private/region-locked):
@@ -575,6 +626,7 @@ impl SyncManager {
                     warning: Some(format!(
                         "{unavailable} unavailable video(s) in the source were skipped"
                     )),
+                    incomplete: false,
                 });
             }
             return Err(detail);
@@ -583,6 +635,7 @@ impl SyncManager {
         Ok(YtDlpRun {
             downloaded,
             warning: None,
+            incomplete: false,
         })
     }
 
@@ -590,7 +643,7 @@ impl SyncManager {
         let config = self.config.get();
         let mut command = Command::new(self.config.resolve_yt_dlp());
         apply_headless_flags(&mut command);
-        let output = command
+        command
             .arg("--cookies-from-browser")
             .arg(config.cookies_browser)
             .arg("--extractor-args")
@@ -602,10 +655,13 @@ impl SyncManager {
             .arg(source_url)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| format!("Failed to scan playlist metadata with yt-dlp: {e}"))?;
+            .stderr(Stdio::piped());
+        let output = output_within(
+            &mut command,
+            YT_DLP_SCAN_TIMEOUT,
+            "Scanning playlist metadata with yt-dlp",
+        )
+        .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -803,14 +859,12 @@ fn apply_headless_flags(command: &mut Command) {
 pub async fn update_yt_dlp(config: ConfigStore) -> Result<String, String> {
     let mut command = Command::new(config.resolve_yt_dlp());
     apply_headless_flags(&mut command);
-    let output = command
+    command
         .arg("-U")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run yt-dlp -U: {e}"))?;
+        .stderr(Stdio::piped());
+    let output = output_within(&mut command, YT_DLP_SCAN_TIMEOUT, "yt-dlp -U").await?;
     let mut text = String::new();
     text.push_str(&String::from_utf8_lossy(&output.stdout));
     text.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -1112,6 +1166,58 @@ fn short_source_label(url: &str) -> String {
         url.to_string()
     } else {
         format!("{}...", url.chars().take(54).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::{output_within, run_outcome, YtDlpRun};
+    use std::time::Duration;
+
+    fn run(downloaded: i64, warning: Option<&str>, incomplete: bool) -> YtDlpRun {
+        YtDlpRun { downloaded, warning: warning.map(str::to_string), incomplete }
+    }
+
+    #[test]
+    fn a_partial_failure_is_an_error_and_is_not_marked_synced() {
+        let (status, message, mark) = run_outcome(&run(3, Some("2 failed"), true));
+        assert_eq!(status, "error");
+        assert!(message.contains("Partial sync") && message.contains("3 track"));
+        assert!(!mark);
+    }
+
+    #[test]
+    fn skipped_unavailable_entries_and_clean_runs_are_done_and_synced() {
+        for (r, expect) in [
+            (run(0, Some("4 unavailable"), false), "No new downloads"),
+            (run(2, Some("1 unavailable"), false), "Downloaded 2 track(s); yt-dlp warning"),
+            (run(0, None, false), "archive is up to date"),
+            (run(5, None, false), "Downloaded 5 track(s)"),
+        ] {
+            let (status, message, mark) = run_outcome(&r);
+            assert_eq!(status, "done");
+            assert!(message.contains(expect), "{message}");
+            assert!(mark);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stalled_process_is_stopped_at_the_limit() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut slow = tokio::process::Command::new("cmd");
+            slow.args(["/C", "ping -n 20 127.0.0.1 >nul"]);
+            let started = std::time::Instant::now();
+            let result = output_within(&mut slow, Duration::from_millis(300), "slow tool").await;
+            assert!(result.unwrap_err().contains("timed out"));
+            assert!(started.elapsed() < Duration::from_secs(5));
+
+            let mut quick = tokio::process::Command::new("cmd");
+            quick.args(["/C", "echo ok"]);
+            let output = output_within(&mut quick, Duration::from_secs(10), "quick tool").await.unwrap();
+            assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+        });
     }
 }
 

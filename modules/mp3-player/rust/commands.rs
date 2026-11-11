@@ -1084,7 +1084,7 @@ pub async fn reanalyze_tracks(state: &AppState) -> Result<usize, String> {
         {
             let mut ai_dj_lock = player.ai_dj.lock().map_err(|e| e.to_string())?;
             if let Some(ref mut dj) = *ai_dj_lock {
-                dj.clear();
+                dj.clear()?;
             } else {
                 let mut new_dj =
                     crate::ai::ai_dj::AiDj::new(crate::ai::ai_dj::ai_dj_store()?);
