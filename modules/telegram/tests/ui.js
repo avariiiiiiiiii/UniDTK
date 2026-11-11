@@ -113,20 +113,23 @@ export async function runTelegramUiTests() {
     railHost.remove();
     // The avatar flight carries the avatar only: a copied badge would sit
     // beside the real one at the destination and vanish at the end.
-    const flightFrom = document.createElement('div');
-    flightFrom.innerHTML = '<span class="tg-avatar">A<em>3</em><i></i></span>';
-    const flightTo = document.createElement('div');
-    flightTo.className = 'tg-chat-row';
-    flightTo.innerHTML = '<span class="tg-row-avatar">A</span><span class="tg-row-unread">3</span>';
-    body.append(flightFrom, flightTo);
-    const flightRect = { left: 10, top: 10, width: 30, height: 30 };
-    flyTelegramAvatars(card, new Map([['a', { el: flightFrom.firstElementChild, rect: flightRect }]]), new Map([['a', { el: flightTo.firstElementChild, rect: flightRect }]]), true, 300);
-    const flightLayer = document.querySelector('.tg-avatar-flight');
-    check('flight ghost carries no badge', !!flightLayer && flightLayer.querySelectorAll('em, i').length === 0);
-    check('destination badge waits for the flight', getComputedStyle(flightTo.querySelector('.tg-row-unread')).visibility === 'hidden');
-    card._tgAvatarFlight?.finish();
-    check('destination badge returns after the flight', getComputedStyle(flightTo.querySelector('.tg-row-unread')).visibility === 'visible');
-    flightFrom.remove(); flightTo.remove();
+    const flightCard = document.createElement('div');
+    flightCard.className = 'widget-card telegram-widget';
+    flightCard.style.cssText = 'position:fixed;left:20px;top:20px;width:500px;height:300px;pointer-events:none;z-index:2600';
+    flightCard.innerHTML = '<div class="tg-rail" style="position:absolute;left:0;top:0;width:60px;height:300px"><button type="button" data-chat-id="a"><span class="tg-avatar" style="display:block;width:30px;height:30px">A<em>3</em><i></i></span></button></div>'
+      + '<div class="tg-chat-list" style="position:absolute;left:100px;top:0;width:300px;height:300px"><div class="tg-chat-row" data-chat-id="a"><span class="tg-row-avatar" style="display:block;width:40px;height:40px">A<em>3</em></span><span class="tg-row-unread">3</span></div></div>';
+    document.body.appendChild(flightCard);
+    const flightSnapshot = surfaceManager.captureOrigin(flightCard, { shared: telegramAvatarFlights(flightCard) });
+    check('one flight per avatar that is in both lists', flightSnapshot.shared.length === 1);
+    const flightOpened = surfaceManager.openSurface(flightCard, { snapshot: flightSnapshot, morph: 'container', duration: 80, closeOnEscape: false, closeOnOutsideClick: false });
+    const flightPlane = surfaceManager.getRecord(flightCard).flight.planes[0].element;
+    check('flight copy carries no badge', flightPlane.querySelectorAll('em, i').length === 0);
+    check('destination badge waits for the flight', getComputedStyle(flightCard.querySelector('.tg-row-unread')).visibility === 'hidden');
+    await flightOpened;
+    check('destination badge returns after the flight', getComputedStyle(flightCard.querySelector('.tg-row-unread')).visibility === 'visible' && !flightPlane.isConnected);
+    surfaceManager.closeSurface(flightCard);
+    while (surfaceManager.getRecord(flightCard)) await new Promise(resolve => requestAnimationFrame(resolve));
+    flightCard.remove();
     check('narrow back visible', body.querySelector('.tg-topics-back-btn').getBoundingClientRect().width > 50);
     const panel = body.querySelector('.tg-panel');
     const strip = body.querySelector('.tg-connection-state');

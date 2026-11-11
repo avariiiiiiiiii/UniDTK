@@ -2666,7 +2666,10 @@ img.tg-media:not(.tg-video-wrap *) {
   .tg-voice-card.downloading .tg-voice-play-btn::after,
   .tg-audio-card.downloading .tg-audio-play-btn::after,
   .tg-video-wrap.downloading .tg-video-download-overlay::after {
-    animation-duration: 2s;
+    /* Slower, not stopped. The global reduced-motion rule is !important and would win
+       over a plain declaration, freezing the spinner of a download in progress. */
+    animation-duration: 2s !important;
+    animation-iteration-count: infinite !important;
   }
 }
 
@@ -3720,11 +3723,6 @@ textarea.tg-input {
   color: rgb(var(--jelly-hi-rgb));
   box-shadow: none;
 }
-
-/* Avatar flights between rail and list (widget.js flyTelegramAvatars). */
-/* Id-qualified: #shell-portals > * turns pointer events back on for portal children. */
-#shell-portals > .tg-avatar-flight { position: fixed; inset: 0; z-index: 2600; pointer-events: none; }
-.tg-avatar-flight > * { will-change: transform; }
 
 /* Portaled popups do not inherit the card tint. */
 :root[data-material="jelly"] [data-surface-tint="telegram"] { --card-tint: var(--tint-telegram); --fg-rgb: var(--ink-tint-telegram); }

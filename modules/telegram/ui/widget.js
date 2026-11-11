@@ -1,6 +1,6 @@
 import { invoke, convertFileSrc, listen, openPath } from '@unidtk/bridge';
 import { saveConfig, showDebugMessage, logFrontend, repairMojibake, editMode, widgetsCanvas, config, defaultWidgetPosition, cachedTelegramCard, escapeHtml, placeOnCanvas } from '../../unidtk-core.js';
-import { surfaceManager, syncSurfaceWash } from '../../surface-manager.js';
+import { surfaceManager } from '../../surface-manager.js';
 import { calculateDuration, getDuration, prefersReducedMotion, EASINGS, motionTimeline } from '../../motion.js';
 import { getFileIconName, getFileTypeName } from '../../file-icons.js';
 
@@ -64,6 +64,10 @@ const telegramRuntime = {
   customEmojiPaths: new Map(),
   /** Track custom emoji paths currently being queried to prevent duplicate requests */
   pendingCustomEmojiFetches: new Set(),
+  /** customEmojiId -> time of its last failed fetch, so a failure is retried later, not never. */
+  customEmojiFailedAt: new Map(),
+  /** chatId -> time of the last failed forum-topics load. */
+  forumTopicsFailedAt: new Map(),
   /** Detached history state when viewing history around pinned message or quote */
   detachedState: null,
   /** Monotonic jump token to cancel stale jumps */
@@ -113,6 +117,7 @@ function clearTelegramAccountState() {
   telegramRuntime.loadingArchivedChats = false;
   telegramRuntime.chatListView = "main";
   telegramRuntime.chatsError = "";
+  telegramRuntime.archivedChatsError = "";
   telegramRuntime.messages = new Map();
   telegramRuntime.messageCacheOrder = [];
   telegramRuntime.messagesLoaded = new Set();
@@ -146,6 +151,8 @@ function clearTelegramAccountState() {
   telegramRuntime.accountGeneration += 1;
   telegramRuntime.forumTopics.clear();
   telegramRuntime.forumTopicsLoading.clear();
+  telegramRuntime.forumTopicsFailedAt.clear();
+  telegramRuntime.customEmojiFailedAt.clear();
   telegramRuntime.forumFilterByChat.clear();
   telegramRuntime.forumTopicByChat.clear();
   telegramRuntime.pausedAnimations.clear();
@@ -161,6 +168,9 @@ function clearTelegramAccountState() {
 }
 
 const TELEGRAM_DEFAULT_TDJSON_PATH = "";
+const TG_EARLIER_COOLDOWN_MS = 60000;
+/** How long a failed forum-topics or custom-emoji load is left alone before the next try. */
+const TG_RETRY_AFTER_FAILURE_MS = 15000;
 const TELEGRAM_CHAT_PAGE_SIZE = 24;
 const TELEGRAM_RAIL_CHAT_LIMIT = 14;
 const TELEGRAM_MAX_CACHED_CHATS = 6;
@@ -374,6 +384,7 @@ async function refreshTelegramStatus(card, widgetId) {
   telegramRuntime.statusLoaded = true;
   try {
     const status = await invoke("telegram_status");
+    telegramRuntime.backendReachable = true;
     if (status) {
       const previousStatus = telegramRuntime.status;
       const becameAuthorized = status.authorized && !previousStatus?.authorized;
@@ -436,6 +447,7 @@ async function refreshTelegramStatus(card, widgetId) {
       }
     }
   } catch {
+    telegramRuntime.backendReachable = false;
     telegramRuntime.statusLoaded = false;
   }
 }
@@ -695,13 +707,24 @@ function markTelegramChatRead(card, chatId, { force = false } = {}) {
   if (!force && !newestId && !telegramRuntime.messagesLoaded.has(cacheKey)) return;
   const lastMarkedId = telegramRuntime.lastMarkedRead.get(chatId) || "";
   if (!force && newestId && lastMarkedId === newestId) return;
-  if (newestId) telegramRuntime.lastMarkedRead.set(chatId, newestId);
+  // One request per chat and message at a time; the "marked" note is written only
+  // when the backend accepted it, so a failure is tried again on the next render.
+  const inFlight = (telegramRuntime.markReadInFlight ||= new Set());
+  const requestKey = `${chatId}:${newestId}`;
+  if (inFlight.has(requestKey)) return;
+  inFlight.add(requestKey);
   try {
     const openP = invoke("telegram_open_chat", { chatId: chatId });
     if (openP && typeof openP.then === "function") openP.catch(() => {});
-    const p = invoke("telegram_mark_read", { chatId: chatId });
-    if (p && typeof p.then === "function") p.catch(() => {});
-  } catch (_) {}
+    invoke("telegram_mark_read", { chatId: chatId })
+      .then(() => {
+        if (newestId) telegramRuntime.lastMarkedRead.set(chatId, newestId);
+      })
+      .catch((err) => logFrontend(`mark read failed: ${err}`))
+      .finally(() => inFlight.delete(requestKey));
+  } catch (_) {
+    inFlight.delete(requestKey);
+  }
 }
 
 function openTelegramChatSession(chatId) {
@@ -1118,7 +1141,9 @@ function wireTelegramMessageRow(card, widgetId, row, chat) {
       if (fsEnter) fsEnter.style.display = isFs ? "none" : "block";
       if (fsExit) fsExit.style.display = isFs ? "block" : "none";
     };
-    document.addEventListener("fullscreenchange", onFsChange);
+    // The event fires on the element that enters or leaves fullscreen, so the wrapper
+    // hears it itself; a listener on `document` outlived every re-render.
+    wrap.addEventListener("fullscreenchange", onFsChange);
 
     // Controls auto-hide
     let hideTimer = null;
@@ -1317,15 +1342,17 @@ function wireTelegramMessageRow(card, widgetId, row, chat) {
       e.stopPropagation();
       const path = btn.dataset.path || btn.closest("[data-path]")?.dataset.path;
       if (!path) return;
-      const opened = await (async () => {
+      let opened = true;
+      try {
+        await invoke("open_explorer", { path: path });
+      } catch {
         try {
-          await invoke("open_explorer", { path: path });
-        } catch {
           await openPath(path);
+        } catch {
+          opened = false;
         }
-        return true;
-      })();
-      if (opened === false && chat?.id) {
+      }
+      if (!opened && chat?.id) {
         telegramRuntime.messagesError.set(telegramMessageCacheKey(chat.id), "Не удалось открыть файл (заблокировано правами приложения)");
         updateTelegramWidget(card, widgetId);
       }
@@ -2082,9 +2109,12 @@ function renderTelegramReactionsHtml(message, chatId) {
           iconHtml = `<img class="tg-rx-icon tg-rx-custom-img" src="${escapeHtml(src)}" alt="" loading="lazy" decoding="async" data-custom-emoji-id="${escapeHtml(customEmojiId)}" />`;
         } else {
           if (!telegramRuntime.pendingCustomEmojiFetches) telegramRuntime.pendingCustomEmojiFetches = new Set();
-          if (!telegramRuntime.pendingCustomEmojiFetches.has(customEmojiId)) {
+          const emojiFailedAt = telegramRuntime.customEmojiFailedAt.get(customEmojiId);
+          const emojiRecentlyFailed = emojiFailedAt && Date.now() - emojiFailedAt < TG_RETRY_AFTER_FAILURE_MS;
+          if (!telegramRuntime.pendingCustomEmojiFetches.has(customEmojiId) && !emojiRecentlyFailed) {
             telegramRuntime.pendingCustomEmojiFetches.add(customEmojiId);
             invoke("telegram_get_custom_emoji_path", { customEmojiId }).then((fetchedPath) => {
+              if (!fetchedPath) telegramRuntime.customEmojiFailedAt.set(customEmojiId, Date.now());
               if (fetchedPath) {
                 if (!telegramRuntime.customEmojiPaths) telegramRuntime.customEmojiPaths = new Map();
                 telegramRuntime.customEmojiPaths.set(customEmojiId, fetchedPath);
@@ -2107,7 +2137,12 @@ function renderTelegramReactionsHtml(message, chatId) {
                   });
                 }
               }
-            }).catch(() => false);
+            }).catch(() => {
+              telegramRuntime.customEmojiFailedAt.set(customEmojiId, Date.now());
+            }).finally(() => {
+              // Not pending any more, whatever the outcome: the placeholder is not a promise.
+              telegramRuntime.pendingCustomEmojiFetches.delete(customEmojiId);
+            });
           }
           iconHtml = `<span class="tg-rx-icon tg-rx-placeholder" data-custom-emoji-id="${escapeHtml(customEmojiId)}">✨</span>`;
         }
@@ -2850,21 +2885,25 @@ function wireTelegramAccountSwitcher(card, widgetId, body, activeAccountId) {
         switcher.classList.remove("open");
         const bodyEl = card.querySelector(".widget-body");
         if (bodyEl) bodyEl.style.opacity = "0.4";
-        clearTelegramAccountState();
-        if (config.positions[widgetId]) {
-          config.positions[widgetId].activeChatId = null;
-        }
-        await saveConfig();
         try {
-          await invoke("telegram_switch_account", { accountId: accId });
-        } catch (err) {
-          console.error("switch account failed:", err);
+          clearTelegramAccountState();
+          if (config.positions[widgetId]) {
+            config.positions[widgetId].activeChatId = null;
+          }
+          await saveConfig();
+          try {
+            await invoke("telegram_switch_account", { accountId: accId });
+          } catch (err) {
+            console.error("switch account failed:", err);
+            showDebugMessage(`Не удалось переключить аккаунт: ${err?.message || err}`);
+          }
+          telegramRuntime.statusLoaded = false;
+          telegramRuntime.chatsLoaded = false;
+          await refreshTelegramStatus(card, widgetId);
+          await refreshTelegramChats(card, widgetId, true);
+        } finally {
+          if (bodyEl) bodyEl.style.opacity = "";
         }
-        telegramRuntime.statusLoaded = false;
-        telegramRuntime.chatsLoaded = false;
-        await refreshTelegramStatus(card, widgetId);
-        await refreshTelegramChats(card, widgetId, true);
-        if (bodyEl) bodyEl.style.opacity = "";
       }
     });
   });
@@ -3001,6 +3040,10 @@ function wireTelegramListSection(card, widgetId, body) {
 function loadForumTopics(chatId) {
   if (telegramRuntime.forumTopicsLoading.has(chatId)) return;
   if (telegramRuntime.forumTopics.has(chatId)) return;
+  // A load that failed is tried again after a pause: every render asks, so without the
+  // pause a dead backend would be asked on each one.
+  const failedAt = telegramRuntime.forumTopicsFailedAt.get(chatId);
+  if (failedAt && Date.now() - failedAt < TG_RETRY_AFTER_FAILURE_MS) return;
   telegramRuntime.forumTopicsLoading.add(chatId);
   const generation = telegramRuntime.accountGeneration;
   
@@ -3032,8 +3075,11 @@ function loadForumTopics(chatId) {
         updateTelegramWidget(card, widgetId);
       }
     }
-  }).catch(() => {
-    if (generation === telegramRuntime.accountGeneration) telegramRuntime.forumTopics.set(chatId, []);
+  }).catch((error) => {
+    if (generation === telegramRuntime.accountGeneration) {
+      telegramRuntime.forumTopicsFailedAt.set(chatId, Date.now());
+      logFrontend(`forum topics load failed: ${error?.message || error}`);
+    }
   }).finally(() => {
     if (generation === telegramRuntime.accountGeneration) {
       telegramRuntime.forumTopicsLoading.delete(chatId);
@@ -4121,16 +4167,19 @@ document.addEventListener("pointerdown", (e) => {
 window.addEventListener("blur", closeTelegramContextMenu);
 
 async function copyTelegramText(text) {
-  if (!text) return;
+  if (!text) return false;
   // The wallpaper window never has OS focus, so the JS clipboard API is
   // unreliable; the backend command writes CF_UNICODETEXT directly.
   try {
     await invoke("set_clipboard_text", { text: text });
-    return;
+    return true;
   } catch (_) { /* fall through to the web API */ }
   try {
     await navigator.clipboard.writeText(text);
-  } catch (_) { /* clipboard unavailable */ }
+    return true;
+  } catch (_) {
+    return false; /* clipboard unavailable */
+  }
 }
 
 function openTelegramMessageMenu(card, widgetId, body, msgEl, x, y) {
@@ -4328,6 +4377,9 @@ function openTelegramChatMenu(card, widgetId, chatId, x, y) {
           await invoke("telegram_delete_chat_history", { request: { chatId: chatId, removeFromChatList: true, revoke: true } });
           if (Array.isArray(telegramRuntime.chats)) {
             telegramRuntime.chats = telegramRuntime.chats.filter((c) => c.id !== chatId);
+          }
+          if (Array.isArray(telegramRuntime.archivedChats)) {
+            telegramRuntime.archivedChats = telegramRuntime.archivedChats.filter((c) => c.id !== chatId);
           }
           cacheTelegramMessages(chatId, []);
           updateTelegramWidget(card, widgetId);
@@ -4624,6 +4676,7 @@ function wireTelegramComposer(card, widgetId, body, active, capturedComposer = {
         const curActiveId = pos.activeChatId || active?.id;
         if (curActiveId) {
           telegramRuntime.editMessage?.delete(curActiveId);
+          telegramRuntime.drafts.delete(curActiveId);
           const input = composerEl.querySelector(".tg-input");
           if (input) input.value = "";
         }
@@ -5119,15 +5172,15 @@ function renderTelegramWidget(card, widgetId, { preparing = false } = {}) {
   });
   body.querySelector(".tg-auth-copy-link")?.addEventListener("click", async (e) => {
     e.stopPropagation();
-    const link = e.currentTarget.dataset.link || "";
+    // currentTarget is reset once the handler awaits: keep the button itself.
+    const button = e.currentTarget;
+    const link = button.dataset.link || "";
     if (!link) return;
-    try {
-      await navigator.clipboard?.writeText?.(link);
-      e.currentTarget.textContent = "Скопировано";
-      setTimeout(() => {
-        if (e.currentTarget.isConnected) e.currentTarget.textContent = "Копировать ссылку";
-      }, 1500);
-    } catch (_) { /* clipboard may be denied */ }
+    const copied = await copyTelegramText(link);
+    button.textContent = copied ? "Скопировано" : "Не удалось скопировать";
+    setTimeout(() => {
+      if (button.isConnected) button.textContent = "Копировать ссылку";
+    }, 1500);
   });
   body.querySelector(".tg-auth-logout")?.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -5551,14 +5604,14 @@ async function loadTelegramOlderMessages(card, widgetId, chatId, requestedThread
     if (generation !== telegramRuntime.accountGeneration) return;
     if (!Array.isArray(messages) || !messages.length) {
       telegramRuntime.historyExhausted.add(cacheKey);
-      telegramRuntime.earlierCooldownUntil.set(cacheKey, Date.now() + 60000);
+      telegramRuntime.earlierCooldownUntil.set(cacheKey, Date.now() + TG_EARLIER_COOLDOWN_MS);
       return;
     }
     const known = new Set(current.map((message) => message.id));
     const older = messages.filter((message) => !known.has(message.id));
     if (!older.length) {
       telegramRuntime.historyExhausted.add(cacheKey);
-      telegramRuntime.earlierCooldownUntil.set(cacheKey, Date.now() + 60000);
+      telegramRuntime.earlierCooldownUntil.set(cacheKey, Date.now() + TG_EARLIER_COOLDOWN_MS);
       return;
     }
     telegramRuntime.earlierCooldownUntil.delete(cacheKey);
@@ -5574,7 +5627,9 @@ async function loadTelegramOlderMessages(card, widgetId, chatId, requestedThread
       loadTelegramOlderMessages(card, widgetId, chatId, threadId);
     }
   } catch {
-    // Older history is best-effort; leave the current thread intact on failure.
+    // Older history is best-effort: the thread stays intact, and the next try waits,
+    // so scrolling at the top does not repeat a failing request on every event.
+    telegramRuntime.earlierCooldownUntil.set(cacheKey, Date.now() + TG_EARLIER_COOLDOWN_MS);
   } finally {
     if (generation === telegramRuntime.accountGeneration) telegramRuntime.loadingEarlier.delete(cacheKey);
   }
@@ -5858,7 +5913,9 @@ function renderTelegramAccountsSection(status) {
 }
 
 function renderTelegramAuth(status, showSettings = false) {
-  const backendAvailable = !!invoke("telegram_status");
+  // False only when the last status request failed outright; an `invoke(...)` result is
+  // always a truthy Promise, so it says nothing, and calling it here asked the backend again.
+  const backendAvailable = telegramRuntime.backendReachable !== false;
   const state = backendAvailable ? (status?.authState || "mock") : "backend_unavailable";
   const hint = backendAvailable
     ? (status?.authHint || "TDLib пока не подключён.")
@@ -6987,85 +7044,49 @@ function renderTelegramDock(card, widgetId) {
 
 // ── Avatar continuity (dock rail <-> expanded chat list) ─────────────────────
 // Every avatar visible in both states flies between its two positions in
-// lockstep with the surface morph. Flights are ghosts in the portal: the card
-// clips its own content, so a real avatar could not leave it mid-morph.
+// lockstep with the surface morph. The flight itself is the surface manager's
+// shared-element flight (r[motion.shared-flight]); this only names the parts.
 
-/** chatId -> {el, rect} for avatars inside their scroller's visible area. */
-function telegramAvatarRects(card, scrollerSel, avatarSel) {
-  const out = new Map();
-  const scroller = card.querySelector(scrollerSel);
-  if (!scroller) return out;
-  const view = scroller.getBoundingClientRect();
-  for (const el of scroller.querySelectorAll(avatarSel)) {
-    const host = el.closest('[data-chat-id]');
-    const rect = el.getBoundingClientRect();
-    if (!host || rect.width === 0 || rect.bottom <= view.top || rect.top >= view.bottom) continue;
-    out.set(host.dataset.chatId, { el, rect });
-  }
-  return out;
-}
-
-function cancelTelegramAvatarFlight(card) {
-  card._tgAvatarFlight?.finish();
-  card._tgAvatarFlight = null;
+/** The chat row avatar for `chatId` in the expanded list, or null when it is not on screen. */
+function telegramListAvatar(card, chatId) {
+  const list = card.querySelector('.tg-chat-list');
+  const row = list?.querySelector(`[data-chat-id="${CSS.escape(chatId)}"]`);
+  const avatar = row?.querySelector('.tg-row-avatar');
+  if (!list || !avatar) return null;
+  const view = list.getBoundingClientRect();
+  const rect = avatar.getBoundingClientRect();
+  return rect.width === 0 || rect.bottom <= view.top || rect.top >= view.bottom ? null : avatar;
 }
 
 /**
- * Fly avatars from `from` to `to` positions (Map chatId -> {el, rect}).
- * The flight ends when both its timeline and `settle()` (the surface's own
- * finalize) have run, so ghosts never vanish before the real avatars paint.
+ * The rail avatars as docked right now (call before "expanded" hides the rail),
+ * as shared-element specs. The copy carries the avatar only: badges stay where they
+ * belong and fade in when the flight ends, so none is drawn twice or scaled with
+ * the avatar.
  */
-function flyTelegramAvatars(card, from, to, open, duration) {
-  cancelTelegramAvatarFlight(card);
-  if (prefersReducedMotion()) return;
-  const pairs = [...from].filter(([id]) => to.has(id));
-  if (!pairs.length) return;
-  const layer = document.createElement('div');
-  layer.className = 'tg-avatar-flight';
-  layer.setAttribute('aria-hidden', 'true');
-  surfaceManager.getPortal().appendChild(layer);
-  const hidden = [];
-  const hide = el => { if (el?.isConnected) { el.style.visibility = 'hidden'; hidden.push(el); } };
-  // The ghost carries the avatar only. Badges stay where they belong and fade
-  // in when the flight ends, so none is drawn twice or scaled with the avatar.
-  const badges = [];
-  const hideBadges = el => {
-    const found = [el?.closest?.('.tg-chat-row')?.querySelector('.tg-row-unread'), el?.querySelector?.('em')];
-    for (const badge of found) if (badge) { hide(badge); badges.push(badge); }
-  };
-  let pending = 2;
-  const flight = {
-    target: null,
-    finish() {
-      timeline.cleanup();
-      layer.remove();
-      for (const el of hidden) el.style.visibility = '';
-      for (const badge of badges) badge.animate?.({ opacity: [0, 1] }, { duration: getDuration('hover'), easing: 'ease-out' });
-      if (card._tgAvatarFlight === flight) card._tgAvatarFlight = null;
-    },
-    settle() { if (--pending === 0) flight.finish(); },
-  };
-  const timeline = motionTimeline({ duration, durationIsScaled: true,
-    easing: open ? EASINGS.expoOut : EASINGS.surfaceExit,
-    onFinish: () => flight.settle(), onCancel: () => flight.finish() });
-  for (const [id, a] of pairs) {
-    const b = to.get(id);
-    const ghost = a.el.cloneNode(true);
-    ghost.querySelectorAll('em, i').forEach(node => node.remove());
-    ghost.style.cssText = `position:fixed;left:${a.rect.left}px;top:${a.rect.top}px;width:${a.rect.width}px;height:${a.rect.height}px;margin:0;transform-origin:0 0;`;
-    layer.appendChild(ghost);
-    const scale = b.rect.width / a.rect.width;
-    timeline.add(ghost, [
-      { transform: 'translate(0px, 0px) scale(1)' },
-      { transform: `translate(${b.rect.left - a.rect.left}px, ${b.rect.top - a.rect.top}px) scale(${scale})` },
-    ]);
-    hide(a.el);
-    hide(b.el);
-    hideBadges(a.el);
-    hideBadges(b.el);
+function telegramAvatarFlights(card) {
+  const rail = card.querySelector('.tg-rail');
+  if (!rail) return [];
+  const view = rail.getBoundingClientRect();
+  const specs = [];
+  for (const avatar of rail.querySelectorAll('.tg-avatar')) {
+    const host = avatar.closest('[data-chat-id]');
+    const rect = avatar.getBoundingClientRect();
+    if (!host || rect.width === 0 || rect.bottom <= view.top || rect.top >= view.bottom) continue;
+    const chatId = host.dataset.chatId;
+    specs.push({
+      source: avatar,
+      scale: 'uniform',
+      freeze: 'visual',
+      strip: 'em, i',
+      target: () => telegramListAvatar(card, chatId),
+      fadeIn: [
+        () => telegramListAvatar(card, chatId)?.querySelector('em'),
+        () => telegramListAvatar(card, chatId)?.closest('.tg-chat-row')?.querySelector('.tg-row-unread'),
+      ],
+    });
   }
-  card._tgAvatarFlight = flight;
-  timeline.play();
+  return specs;
 }
 
 // The prepared panel takes no input until it is wired, but its header stays
@@ -7182,17 +7203,10 @@ function toggleTelegramWidget(card, widgetId) {
   card.classList.toggle("expand-right", expandRight);
   card.classList.toggle("expand-left", !expandRight);
 
-  const originRect = {
-    left: rect.left,
-    top: rect.top,
-    width: rect.width || dockW,
-    height: rect.height || dockH,
-  };
-  // The dock's own radius (a full pill in jelly) — read before "expanded" changes it.
-  const dockRadius = getComputedStyle(card).borderRadius || "18px";
-  // Rail avatars as docked right now (before "expanded" hides the rail): the
-  // expand flies them into the list, the collapse flies them back here.
-  card._tgRailAvatars = telegramAvatarRects(card, '.tg-rail', '.tg-avatar');
+  // The dock as it is right now, before "expanded" changes it: its box, its own radius
+  // (a full pill in jelly) and the rail avatars. The expand flies the avatars into the
+  // list, the collapse flies them back here.
+  const snapshot = surfaceManager.captureOrigin(card, { shared: telegramAvatarFlights(card) });
   card._tgRailScroll = card.querySelector('.tg-rail')?.scrollTop || 0;
 
   // Set destination dimensions immediately (1 Layout pass): the base card CSS
@@ -7216,24 +7230,15 @@ function toggleTelegramWidget(card, widgetId) {
 
   card._tgSurfaceTransitioning = true;
   surfaceManager.openSurface(card, {
-    origin: originRect,
+    snapshot,
+    morph: "container",
     axis: horizontalOnly ? "x" : "both",
-    openOpacity: 1,
-    closeOpacity: 1,
-    originRadius: dockRadius,
     suppressContentAnimation: true,
     elevation: "120",
     closeOnOutsideClick: false,
     closeOnEscape: false,
     keepPointerOnClose: true,
-    onTransitionStart: ({ open, duration }) => {
-      syncSurfaceWash(card, open, duration);
-      const list = telegramAvatarRects(card, '.tg-chat-list', '.tg-row-avatar');
-      const rail = card._tgRailAvatars || new Map();
-      flyTelegramAvatars(card, open ? rail : list, open ? list : rail, open, duration);
-    },
     onOpened: () => {
-      card._tgAvatarFlight?.settle();
       // Geometry already applied during the morph (transition was off) — hand
       // CSS transitions back for any future geometry changes.
       card.style.transition = "";
@@ -7267,8 +7272,6 @@ function toggleTelegramWidget(card, widgetId) {
       renderTelegramDock(card, widgetId);
       const rail = card.querySelector('.tg-rail');
       if (rail) rail.scrollTop = card._tgRailScroll || 0;
-      // The ghosts land on avatars that only exist from this render on.
-      card._tgAvatarFlight?.settle();
       // Restore transitions on the next frame, after this geometry set settles.
       requestAnimationFrame(() => { card.style.transition = ""; });
     },
