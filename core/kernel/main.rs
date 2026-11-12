@@ -474,44 +474,6 @@ fn explorer_sort_set(
     state.set_explorer_sort(&column, ascending)
 }
 
-/// Layout seeded into redb on first start; the "Reset positions" action restores the
-/// geometry from it. The frontend asks for it instead of keeping its own copy.
-const DEFAULT_WIDGET_CONFIG: &str = r#"{
-  "order": [],
-  "align": "left",
-  "positions": {
-    "clock": { "x": 510, "y": -10, "w": 210, "h": 190, "version": "rings" },
-    "mp3-player": { "x": 500, "y": 260, "w": 210, "h": 220, "version": "circular", "authUser": 1, "autoShuffle": false, "aiDj": true },
-    "telegram": { "x": 1090, "y": 30, "w": 70, "h": 590, "expanded": false, "showSettings": false },
-    "glyph-bar": { "x": 1170, "y": 30, "w": 56, "h": 587 }
-  },
-  "instances": [],
-  "nested": { "clock": ["vpn"] },
-  "migrations": { "vpnNested": true },
-  "hidden": ["tools-shortcut", "scripts"]
-}"#;
-
-fn default_widget_config() -> serde_json::Value {
-    serde_json::from_str(DEFAULT_WIDGET_CONFIG).expect("DEFAULT_WIDGET_CONFIG is valid JSON")
-}
-
-#[tauri::command]
-fn get_default_widget_config() -> serde_json::Value {
-    default_widget_config()
-}
-
-#[cfg(test)]
-mod default_widget_config_tests {
-    #[test]
-    fn default_layout_parses_with_core_widgets() {
-        let config = super::default_widget_config();
-        for id in ["clock", "mp3-player", "telegram", "glyph-bar"] {
-            let pos = &config["positions"][id];
-            assert!(pos["x"].is_number() && pos["y"].is_number(), "{id} has no position");
-        }
-    }
-}
-
 #[tauri::command(async)]
 fn get_widget_config(
     state: tauri::State<Arc<UniDtkDatabase>>,
@@ -1302,7 +1264,6 @@ fn main() {
             explorer_sort_get,
             explorer_sort_set,
             get_widget_config,
-            get_default_widget_config,
             save_widget_config,
             get_disabled_modules,
             set_module_enabled,
@@ -1350,11 +1311,6 @@ fn main() {
                 let db_path = UniDtkDatabase::default_path();
                 match data_bootstrap.join().unwrap_or_else(|_| Err("data bootstrap panicked".into())) {
                     Ok(arc) => {
-                        if let Ok(None) = arc.get_widget_config() {
-                            let _ = arc.set_widget_config(&default_widget_config());
-                            log_line("setup: seeded default widget config in redb");
-                        }
-
                         let folders_to_migrate = unidtk_api::paths::data_dir().join("folders");
                         if let Ok(migrated) = arc.auto_migrate_disk_folders(&folders_to_migrate) {
                             if migrated > 0 {

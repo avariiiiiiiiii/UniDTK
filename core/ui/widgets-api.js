@@ -116,7 +116,9 @@ function migrateWidgetConfig(config) {
   return changed;
 }
 
-export async function getWidgets() {
+// Every desk module with its parsed metadata.json; a module whose file is
+// missing or broken is left out.
+async function readModuleMetadata() {
   const moduleEntries = await readResourceDir("modules");
   const moduleIds = moduleEntries
     ? moduleEntries.filter((e) => e.isDirectory && e.name !== "explorer").map((e) => e.name)
@@ -124,16 +126,22 @@ export async function getWidgets() {
 
   flog(`[bridge] moduleIds: ${JSON.stringify(moduleIds)}`);
 
-  const modulePromises = moduleIds.map(async (id) => {
+  const read = await Promise.all(moduleIds.map(async (id) => {
     const text = await readResourceText(`modules/${id}/metadata.json`);
     if (!text) return null;
     try {
       const meta = JSON.parse(text);
-      if (!meta) return null;
-      let iconSvg = "";
-      try { iconSvg = await readResourceText(`modules/${id}/icon.svg`) || ""; } catch {}
-      return { id, name: meta.name || id, description: meta.description || "", iconSvg, isFolder: false, ...meta };
+      return meta ? { id, meta } : null;
     } catch { return null; }
+  }));
+  return read.filter(Boolean);
+}
+
+export async function getWidgets() {
+  const modulePromises = (await readModuleMetadata()).map(async ({ id, meta }) => {
+    let iconSvg = "";
+    try { iconSvg = await readResourceText(`modules/${id}/icon.svg`) || ""; } catch {}
+    return { id, name: meta.name || id, description: meta.description || "", iconSvg, isFolder: false, ...meta };
   });
 
   // User-created folders exclusively from redb
@@ -179,17 +187,23 @@ export async function getWidgetShortcuts(widgetId) {
   return [];
 }
 
-// The kernel owns the default layout (the one it seeds on first start), so
-// first run and "reset positions" agree. Unreachable kernel: an empty layout,
-// cards then stack at their fallback positions.
+// The default layout is the modules' own (r[modules.metadata]): a module's
+// `defaultPlacement` is its card's position and settings, and `defaultParent`
+// names the container it starts nested in. First run and "reset positions"
+// both read it, so they agree. A module with neither stacks at its fallback.
 export async function getDefaultWidgetConfig() {
-  try {
-    const config = await invoke("get_default_widget_config");
-    if (config && typeof config === "object" && config.positions) return config;
-  } catch (e) {
-    console.warn("get_default_widget_config failed:", e);
+  // `vpnNested` marks the one-time nesting migration as done: a fresh layout
+  // already has the VPN panel where that migration would put it.
+  const config = { order: [], align: "left", positions: {}, instances: [], nested: {}, migrations: { vpnNested: true }, hidden: [] };
+  for (const { id, meta } of await readModuleMetadata()) {
+    if (meta.defaultPlacement && typeof meta.defaultPlacement === "object") {
+      config.positions[id] = { ...meta.defaultPlacement };
+    }
+    if (typeof meta.defaultParent === "string") {
+      (config.nested[meta.defaultParent] ||= []).push(id);
+    }
   }
-  return { order: [], align: "left", positions: {}, instances: [], hidden: [] };
+  return config;
 }
 
 

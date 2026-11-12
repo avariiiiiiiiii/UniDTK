@@ -20,5 +20,6 @@
     "render": "renderVpnPanel"
   },
   "backend": true,
-  "settingsView": "vpn"
+  "settingsView": "vpn",
+  "defaultParent": "clock"
 }

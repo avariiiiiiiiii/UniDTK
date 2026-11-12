@@ -355,6 +355,25 @@ fn lint_module_contracts() {
                 fail(format!("tint default is not a palette slot: {tint}"));
             }
         }
+        // The default desk layout is assembled from these by the page
+        // (`getDefaultWidgetConfig`); a card without numbers would land nowhere.
+        if let Some(placement) = value.get("defaultPlacement") {
+            for key in ["x", "y", "w", "h"] {
+                if !placement[key].is_number() {
+                    fail(format!("defaultPlacement.{key} must be a number"));
+                }
+            }
+        }
+        if let Some(parent) = value.get("defaultParent") {
+            let parent = parent.as_str().unwrap_or_else(|| fail("defaultParent must be a module id".into()));
+            let container = std::fs::read_to_string(format!("../modules/{parent}/ui/metadata.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|meta| meta["container"] == true);
+            if !container {
+                fail(format!("defaultParent {parent} is not a container module"));
+            }
+        }
     }
 }
 

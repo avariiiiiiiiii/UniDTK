@@ -19,5 +19,6 @@
       "role": "calm"
     }
   ],
-  "container": true
+  "container": true,
+  "defaultPlacement": { "x": 510, "y": -10, "w": 210, "h": 190, "version": "rings" }
 }

@@ -15,5 +15,6 @@
       "role": "player"
     }
   ],
-  "backend": true
+  "backend": true,
+  "defaultPlacement": { "x": 500, "y": 260, "w": 210, "h": 220, "version": "circular", "authUser": 1, "autoShuffle": false, "aiDj": true }
 }

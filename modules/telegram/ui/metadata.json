@@ -34,5 +34,6 @@
       ]
     }
   ],
-  "backend": true
+  "backend": true,
+  "defaultPlacement": { "x": 1090, "y": 30, "w": 70, "h": 590, "expanded": false, "showSettings": false }
 }
