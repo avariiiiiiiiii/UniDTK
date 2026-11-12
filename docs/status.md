@@ -4,7 +4,7 @@ This is the first file an agent reads. It says what is true today and where to r
 
 ## Current state
 
-- **Focus:** the native desktop host on Rune source code ([plan](dev/plan-rune-host.md)), on the branch `rune-transition`. The kernel cleanup ([plan](dev/plan-kernel-cleanup.md)) is done there (session 138): the registry starts, switches and stops the modules, each module declares its commands, state events, hotkeys and default placement itself; what the kernel still names is listed in the plan's step 4. Open physical checks: three real sign-outs (#326), Win+E with a browser in front (#327).
+- **Focus:** the native desktop host on Rune source code ([plan](dev/plan-rune-host.md)), on the branch `rune-transition`. The kernel cleanup ([plan](dev/plan-kernel-cleanup.md)) is done there (session 138): the registry starts, switches and stops the modules, each module declares its commands, state events, hotkeys and default placement itself; what the kernel still names is listed in the plan's step 4. The host stands at G0: a transparency probe (`unidtk-desktop --probe-transparency`) presents its first frame at 576 ms; whether its clear pixels show the desktop needs a run in an unlocked session. Open physical checks: three real sign-outs (#326), Win+E with a browser in front (#327).
 - **Production:** `C:\Program Files\UniDTK` (Tauri v2 + WebView2), built by `udtk build`.
 
 | Subsystem / Metric | Value / Status | Technology stack | Primary document |
