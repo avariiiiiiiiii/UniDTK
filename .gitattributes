@@ -1,0 +1,5 @@
+# Our copy of Rune stays byte-identical to upstream on every checkout. Its renderer
+# accepts the precompiled DX12 uber shader only while the WGSL source hashes as it did
+# upstream, with LF line ends; a CRLF checkout made it compile the shader on every
+# launch instead (57 s to the first frame on an Iris Xe laptop).
+core/rune/** -text

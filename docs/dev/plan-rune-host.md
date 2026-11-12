@@ -65,6 +65,13 @@ Each gate ends with the full verification below and a screenshot comparison with
 
 The WorkerW attach exists in the kernel today (`core/kernel/wallpaper.rs`) for the WebView window. The host gets its own copy at G0; the kernel copy is deleted at G5 with the WebView.
 
+### G0 so far (session 138)
+
+- `unidtk-desktop` exists as a `[[bin]]` with one mode, `--probe-transparency <report.json>`: it reads screen pixels through GDI (`CAPTUREBLT`), attaches a full-screen transparent Rune window as a child of the desktop host (`core/desktop/desktop_host.rs`, Progman on this machine), draws one half-transparent card, reads the pixels again and writes the report with Rune's launch marks.
+- **First frame.** The window attached 0.3–0.5 s after launch and presented its first frame at 576 ms (Iris Xe, DX12 through DirectComposition). Before the line-end fix in `core/rune/UPSTREAM.md` (item 5) it took 57.3 s, because the precompiled uber shader was refused and FXC compiled it on every launch.
+- **Memory.** 132 MB Working Set, 116 MB private, 14 threads after the first frame of one full-screen window: over the G0 threshold of 80 MB. Not yet investigated (swapchain buffers of a 1920×1080 surface, the D3D12 runtime, the adapter pick without the `wgpu-hal` patch are the first candidates).
+- **Transparency: not answered yet.** Every probe so far ran while the session was locked (`LogonUI`, `LockApp`), when any screen read returns black, so "clear pixels show what lies under them" could be neither confirmed nor refuted. The next probe runs in an unlocked session, once without and once with `UNIDTK_PROBE_LAYERED=1` (the kernel makes its WebView window layered at full alpha).
+
 ## Measurements
 
 Every gate records, per process (kernel, WebView2 tree, host), after a one-minute warm-up and over a five-minute idle window:
