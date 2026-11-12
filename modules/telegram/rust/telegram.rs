@@ -6352,6 +6352,12 @@ impl unidtk_api::Module for TelegramModule {
         TELEGRAM_DEPENDENCIES
     }
 
+    /// Telegram reads the VPN state when it starts, and must stop before the VPN:
+    /// the VPN's stop fires the state event that would start the proxy again.
+    fn starts_after(&self) -> &'static [&'static str] {
+        &["vpn"]
+    }
+
     fn init(&self, ctx: unidtk_api::ModuleContext) -> Result<(), String> {
         if ctx.is_diagnostic() {
             // In diagnostics mode, check the config from the database without starting the C++ TDLib
@@ -6373,6 +6379,10 @@ impl unidtk_api::Module for TelegramModule {
         }
         *self.runtime.lock().expect("telegram module lock") = Some(runtime);
         Ok(())
+    }
+
+    fn begin_shutdown(&self) {
+        begin_shutdown();
     }
 
     fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> {

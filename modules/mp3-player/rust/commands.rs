@@ -141,22 +141,71 @@ impl AppState {
     }
 }
 
-/// Player module: `init` builds the state and background jobs; `shutdown` stops
-/// analysis, spectrum capture, and playback. The original state lives here
-/// (lifecycle); a copy lives in the kernel's managed state (command wrappers).
+/// Player module: `init` starts the library and the player on a thread of
+/// their own (the library load is slow and must stay off the startup path);
+/// `shutdown` stops analysis, spectrum capture, and playback. The original state
+/// lives here (lifecycle); a copy is registered with the host for the command
+/// wrappers once the start is done.
 pub struct Mp3PlayerModule {
-    state: Mutex<Option<AppState>>,
+    state: Arc<Mutex<Option<AppState>>>,
+    /// Set while a start is under way, so a switch during it starts nothing twice.
+    starting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Mp3PlayerModule {
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(None),
+            state: Arc::new(Mutex::new(None)),
+            starting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     pub fn state(&self) -> Option<AppState> {
         self.state.lock().expect("mp3-player module lock").clone()
+    }
+
+    /// Builds the state in the background and publishes it under the module lock.
+    /// The exit latch and the switch are read under the same lock that `shutdown`
+    /// and `suspend` take, so a player stopped or switched off during its start
+    /// does not keep running.
+    fn start(&self, ctx: unidtk_api::ModuleContext) {
+        use std::sync::atomic::Ordering;
+        if self.starting.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let slot = self.state.clone();
+        let starting = self.starting.clone();
+        let spawned = std::thread::Builder::new()
+            .name("mp3-player-start".into())
+            .spawn(move || {
+                let host = ctx.host::<tauri::AppHandle>().cloned();
+                match AppState::bootstrap(ctx) {
+                    Ok(state) => {
+                        let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if IS_SHUTTING_DOWN.load(Ordering::SeqCst) {
+                            state.begin_shutdown();
+                            unidtk_api::log("mp3-player: the start finished after the exit began; stopped");
+                        } else {
+                            state.start_background_jobs();
+                            if is_suspended() {
+                                let _ = state.set_visualizer_enabled(false);
+                                let _ = state.player.set_pause(true);
+                            }
+                            if let Some(app) = host {
+                                tauri::Manager::manage(&app, state.clone());
+                            }
+                            *guard = Some(state);
+                            unidtk_api::log("mp3-player: ready (auto-sync armed)");
+                        }
+                    }
+                    Err(error) => unidtk_api::log(format!("mp3-player: start failed: {error}")),
+                }
+                starting.store(false, Ordering::SeqCst);
+            });
+        if let Err(error) = spawned {
+            self.starting.store(false, Ordering::SeqCst);
+            unidtk_api::log(format!("mp3-player: start thread failed: {error}"));
+        }
     }
 }
 
@@ -208,10 +257,16 @@ impl unidtk_api::Module for Mp3PlayerModule {
             ));
             return Ok(());
         }
-        let state = AppState::bootstrap(ctx)?;
-        state.start_background_jobs();
-        *self.state.lock().expect("mp3-player module lock") = Some(state);
+        if !ctx.enabled() {
+            unidtk_api::log("mp3-player: disabled — library not loaded");
+            return Ok(());
+        }
+        self.start(ctx);
         Ok(())
+    }
+
+    fn begin_shutdown(&self) {
+        begin_shutdown();
     }
 
     fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> {
@@ -233,10 +288,12 @@ impl unidtk_api::Module for Mp3PlayerModule {
         Ok(())
     }
 
-    fn resume(&self, _ctx: unidtk_api::ModuleContext) -> Result<(), String> {
+    /// A player that was off since startup was never built, so it starts here.
+    fn resume(&self, ctx: unidtk_api::ModuleContext) -> Result<(), String> {
         SUSPENDED.store(false, std::sync::atomic::Ordering::SeqCst);
-        if let Some(state) = self.state() {
-            state.set_visualizer_enabled(state.config.get().visualizer_enabled)?;
+        match self.state() {
+            Some(state) => state.set_visualizer_enabled(state.config.get().visualizer_enabled)?,
+            None => self.start(ctx),
         }
         Ok(())
     }

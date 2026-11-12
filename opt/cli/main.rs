@@ -23,7 +23,10 @@ mod splash_art;
 /// background work is invisible (r[install.native-tasks]).
 const NO_WINDOW: u32 = 0x0800_0000;
 
+// The CLI reads only the factory list; `Registry`, which starts and stops the
+// modules of a run, is the kernel's.
 #[path = "../../core/kernel/registry.rs"]
+#[allow(dead_code)]
 mod registry;
 
 #[path = "../../core/kernel/command_inventory.rs"]

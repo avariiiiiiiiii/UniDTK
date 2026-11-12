@@ -32,7 +32,9 @@ Filename: core/api/src/lib.rs (abridged)
 pub trait Module: Send + Sync {
     fn id(&self) -> &'static str;
     fn dependencies(&self) -> &'static [manifest::ModuleDependency] { &[] }
+    fn starts_after(&self) -> &'static [&'static str] { &[] }
     fn init(&self, ctx: ModuleContext) -> Result<(), String>;
+    fn begin_shutdown(&self) {}
     fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> { Ok(()) }
     fn suspend(&self) -> Result<(), String> {
         self.shutdown(std::time::Duration::from_millis(1500))
@@ -47,11 +49,13 @@ Each method has one job:
 
 - `id` returns the folder name, such as `"glyph-bar"`. The kernel and the page both use this string to find the module.
 - `dependencies` lists external files the module needs, such as a DLL. The [`udtk` book](../udtk/ch15-how-a-module-joins-the-bridge.md) explains how the doctor reads it.
+- `starts_after` names the modules this one must start after, and so stop before. Section 4.4 shows how the kernel orders the start by it.
 - `init` starts the module. It receives a `ModuleContext` by value, so the module owns the context from then on.
-- `shutdown` stops the module's threads and processes. It receives a time budget, and the module must finish within it.
+- `begin_shutdown` raises the module's exit latches. On exit the kernel calls it on every module before it stops any, so that no stop can start another module's work again. It must be cheap and must not wait.
+- `shutdown` stops the module's threads and processes. It receives a time budget, and the module must finish within it. A zero budget means "do not wait at all", because the caller is the main thread.
 - `suspend` and `resume` are the switch for a running app. Their defaults call `shutdown` and `init`, so most modules get switching for free. A module that overrides them must not set a global flag that means "the app is exiting", because the app keeps running.
 
-The trait requires `Send + Sync`, because the kernel keeps each module in Tauri's managed state.
+The trait requires `Send + Sync`, because the kernel keeps each module in its registry, which Tauri's managed state holds and every thread can reach.
 
 ## 4.3 ModuleContext: what the kernel hands in
 
@@ -123,52 +127,58 @@ The diagnostic branch runs under `udtk doctor`. It must not start a thread that 
 
 ## 4.4 How the kernel creates a module
 
-The kernel has no plugin loader and no loop over a list of modules at startup. Each module is named in the setup code of `core/kernel/main.rs`, inside the `setup` closure of the Tauri builder. The code for `glyph-bar` is representative.
+The kernel has no plugin loader. It builds every module at the top of the `setup` closure in `core/kernel/main.rs` and hands the list to a `Registry` (in `core/kernel/registry.rs`), which is the only place that starts, switches and stops modules. Building a module starts nothing; `init` does.
 
 Filename: core/kernel/main.rs (abridged)
 
 ```rust
-let disabled_mods = disabled_module_set(app.handle());
+let registry = registry::Registry::new(vec![
+    glyph_bar_module,
+    explorer_module.clone(),
+    vpn_module.clone(),
+    // ... telegram, mp3-player, micrographics
+])?;
+app.manage(registry);
 // ...
-let glyph_bar_module = glyph_bar::GlyphBarModule::new();
-unidtk_api::Module::init(&glyph_bar_module, module_context(app.handle(), "glyph-bar", !disabled_mods.contains("glyph-bar")))?;
-app.manage(glyph_bar_module);
-log_line("setup: glyph-bar module started (system volume poll)");
-```
-
-`disabled_module_set` reads the switched-off list from the database, and `init` gets a context whose `enabled` flag comes from that list. The module is then registered as managed state, where other code finds it with `app.try_state::<T>()`. The `?` after `init` matters. If `init` returns an error, the setup closure fails, and Tauri stops the start-up with that error. A module that can fail at startup must report the failure as a value it can recover from, or it must not return an error at all.
-
-Note: the setup code calls `init` before `app.manage`, because a command that arrives between the two steps would otherwise find the state "not ready" forever (the comment above the micrographics block says so). The music player is the exception. Its slow library load runs on a background thread, started by `start_music_module` in `core/kernel/main.rs`.
-
-Warning: a module is named in several places in the kernel, and each place is a separate list. The setup code above is one. `core/kernel/registry.rs` has another, the function `all_modules()`. The CLI calls it, for `udtk doctor`, but the kernel's startup does not. The switch function, described in section 4.6, has a `match` on the id. The socket routes in `core/kernel/ipc.rs` have a third table. A new module must appear in all of them. The build lint checks only the registry, see section 4.8.
-
-## 4.5 The calls during a run
-
-After startup, the kernel calls a module in three situations. It calls `init` once, at startup, as shown above. It calls `suspend` or `resume` when the user switches the module, described in section 4.6. It calls `shutdown` once, when the application exits.
-
-The exit path is `app_shutdown` in `core/kernel/main.rs`, which names each module and calls `shutdown` with a budget of 1500 milliseconds.
-
-Filename: core/kernel/main.rs (abridged)
-
-```rust
-pub(crate) fn app_shutdown(app: &tauri::AppHandle, wait_for_vpn: bool) {
-    if SHUTDOWN_DONE.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    // ...
-    if let Some(module) = app.try_state::<commands::Mp3PlayerModule>() {
-        let _ = unidtk_api::Module::shutdown(&*module, Duration::from_millis(1500));
-    }
-    if let Some(module) = app.try_state::<glyph_bar::GlyphBarModule>() {
-        let _ = unidtk_api::Module::shutdown(&*module, Duration::from_millis(1500));
-    }
-    // ... telegram, vpn, micrographics follow in the same form
+for module in app.state::<registry::Registry>().in_start_order() {
+    let id = module.id();
+    module.init(module_context(app.handle(), id, !disabled_mods.contains(id)))?;
+    log_line(format!("setup: module {id} started"));
 }
 ```
 
-The `SHUTDOWN_DONE` flag makes the function run once. The order is deliberate: Telegram stops before VPN, because a VPN state change during exit used to race the Telegram proxy back to life.
+The start order comes from the modules themselves. `Module::starts_after` returns the ids a module must start after, and `Registry::new` sorts the list by it, keeping the given order where nothing constrains it. Telegram names `vpn`. An unknown id, a cycle or an id registered twice is a startup error. `starts_after` is not `dependencies`: the second lists files and scheduled tasks for `udtk doctor`.
 
-Warning: the kernel has no list of modules that it can walk. A module that starts a thread must be added to `app_shutdown` by hand, or its thread keeps running until the process is killed.
+`disabled_module_set` reads the switched-off list from the database, and `init` gets a context whose `enabled` flag comes from that list. The `?` after `init` matters. If `init` returns an error, the setup closure fails, and Tauri stops the start-up with that error. A module that can fail at startup must report the failure as a value it can recover from, or it must not return an error at all.
+
+Note: the commands' typed state (`VpnRuntime`, `TelegramRuntime`, the explorer search, the weather runtime) is registered after the loop, because a command that arrives before `init` filled the shared cell would find the state "not ready" forever. The music player loads its library on a thread of its own, started from its `init`, and registers its state with the host when the load is done.
+
+Warning: the registry knows every module, but two other lists still name them. The socket routes in `core/kernel/ipc.rs` are one, and the Tauri command list in `main.rs` is the other. The build lint checks `ALL_MODULE_IDS` in the registry against the folders on disk, see section 4.8.
+
+## 4.5 The calls during a run
+
+After startup, the kernel calls a module in four situations. It calls `init` once, at startup, as shown above. It calls `suspend` or `resume` when the user switches the module, described in section 4.6. On exit it calls `begin_shutdown` on every module and then `shutdown` on each.
+
+The exit path is `app_shutdown` in `core/kernel/main.rs`. It runs once (a second exit route waits for the first), and it hands the modules to the registry.
+
+Filename: core/kernel/registry.rs (abridged)
+
+```rust
+pub fn shutdown(&self, budget: Duration) -> Vec<(&'static str, String)> {
+    for module in &self.modules {
+        module.begin_shutdown();
+    }
+    self.modules
+        .iter()
+        .rev()
+        .filter_map(|module| module.shutdown(budget).err().map(|error| (module.id(), error)))
+        .collect()
+}
+```
+
+The first pass raises every exit latch, so no stop can start another module's work again. The second stops the modules in reverse start order. The order matters for Telegram and the VPN: the VPN's stop fires the state event that would start Telegram's proxy again, and Telegram, which starts after the VPN, has latched and stopped before that.
+
+The budget is zero when `app_shutdown` runs on the main thread, and two seconds when it runs off it (`quit_app`, the session end). A zero budget means "do not wait": the VPN fires its stop and returns. With two seconds, it waits for the elevated helper to confirm that sing-box is gone.
 
 ## 4.6 Switching a module off and on
 
@@ -179,12 +189,17 @@ Filename: core/kernel/main.rs (abridged)
 ```rust
 pub(crate) fn apply_module_enabled(app: &tauri::AppHandle, db: &UniDtkDatabase, id: &str, enabled: bool) -> Result<(), String> {
     let _switch = MODULE_SWITCH.lock().map_err(|_| "module switch lock poisoned".to_string())?;
-    match id {
-        "glyph-bar" => switch_module::<glyph_bar::GlyphBarModule>(app, id, enabled)?,
-        // ... vpn, telegram, micrographics, mp3-player
-        _ => return Err(format!("unknown module: {id}")),
+    if is_shutting_down() {
+        return Err("the application is shutting down".to_string());
     }
-    let mut disabled = db.get_disabled_modules()?;
+    let registry = app.try_state::<registry::Registry>().ok_or("modules are not started yet")?;
+    let module = registry.get(id).ok_or_else(|| format!("unknown module: {id}"))?;
+    let mut disabled = db.get_disabled_modules_or_reset(/* ... */)?;
+    if enabled {
+        module.resume(module_context(app, id, true))?;
+    } else {
+        module.suspend()?;
+    }
     disabled.retain(|m| m != id);
     if !enabled {
         disabled.push(id.to_string());
@@ -196,9 +211,11 @@ pub(crate) fn apply_module_enabled(app: &tauri::AppHandle, db: &UniDtkDatabase, 
 
 The order keeps a failure from leaving the app and the saved choice in disagreement. A static lock, `MODULE_SWITCH`, serializes switches. The module changes state first, through `resume` or `suspend`. Only after that succeeds is the new list of disabled ids written. If the module fails, the stored list is unchanged, and the error goes back to the menu. The rule is [modules.lifecycle](../reference/modules.md#r-modules.lifecycle).
 
-Every module except the music player is built at startup, even when the user has it switched off, because it is initialized with `enabled` set to `false`. The music player is the exception. At startup it is not built at all when it is disabled. When the user switches it on and its state is missing, `apply_module_enabled` calls `start_music_module` instead of `resume`, so the module is built and started from scratch.
+The exit takes the same lock before it stops the modules, so a switch that is running finishes first, and one that comes later sees the exit and refuses. On the main thread the exit only tries the lock, because a switch may need the event loop.
 
-Note: the menu asks for a switch only for modules whose `metadata.json` says `"backend": true`, the rule [modules.states](../reference/modules.md#r-modules.states). Such a module needs a `match` arm here, or the switch fails with `unknown module`.
+Every module is built at startup and initialized, with `enabled` set to `false` when the user has it switched off. A module keeps that promise itself: the music player, switched off, does not load its library, and its `resume` loads it when the user switches it on. A switch during the load is not lost: the loading thread reads the switch and the exit latch under the same lock that `suspend` and `shutdown` take.
+
+Note: the menu asks for a switch only for modules whose `metadata.json` says `"backend": true`, the rule [modules.states](../reference/modules.md#r-modules.states).
 
 ## 4.7 Events: how modules exchange data
 
@@ -252,9 +269,9 @@ fn main() {
 | `lint_simulate_metadata` | a `simulate` entry names a real file and a function in that file | `SIMULATE METADATA ERROR` |
 | `lint_module_contracts` | `metadata.json` is valid JSON; an `embeddable` names a file that contains its render function; a container is not embeddable | a panic naming the file |
 
-The checks are text checks. `lint_modules_integrity` searches for the quoted id in the registry file, and it searches for the crate name in `Cargo.toml`. A text check cannot prove that the kernel calls `init`, which is why section 4.4 warns about the lists.
+The checks are text checks. `lint_modules_integrity` searches for the quoted id in the registry file, and it searches for the crate name in `Cargo.toml`. A text check cannot prove that the kernel registers the module, which is why section 4.4 warns about the lists.
 
 Note: no lint checks that a module avoids the kernel. The kernel package has only binary targets (see `toolchain/Cargo.toml`), so a module cannot link it as a library, and nothing else enforces the rule. The `udtk` book, in [how a module joins the bridge](../udtk/ch15-how-a-module-joins-the-bridge.md), states the same gap.
 ## 4.9 Summary
 
-A module is a crate with a `Module` implementation and a folder of page code. The kernel constructs it by name in `setup`, passes it a `ModuleContext` through `init`, and calls `shutdown` at exit. A user switch goes through `apply_module_enabled`. Modules exchange data only through `emit`, `subscribe`, and `state`, and the build lints catch broken shapes early. The next chapter shows where a module's data lives. Continue with [Chapter 5. Storage](ch05-storage.md).
+A module is a crate with a `Module` implementation and a folder of page code. The kernel constructs it in `setup`, hands it to the registry, which orders the start by `starts_after`, passes it a `ModuleContext` through `init`, and calls `begin_shutdown` and `shutdown` at exit. A user switch goes through `apply_module_enabled`. Modules exchange data only through `emit`, `subscribe`, and `state`, and the build lints catch broken shapes early. The next chapter shows where a module's data lives. Continue with [Chapter 5. Storage](ch05-storage.md).

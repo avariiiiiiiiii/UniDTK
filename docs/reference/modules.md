@@ -45,7 +45,7 @@ Commands must be safe to repeat. The interface, the CLI, and tests call them fro
 
 The contract crate is `core/api` (package `unidtk-api`). It must not depend on `tauri`, `redb`, or Win32.
 
-- `Module` trait: `id`, `dependencies`, `init(ModuleContext)`, `shutdown(budget)`, `suspend`, `resume(ModuleContext)`.
+- `Module` trait: `id`, `dependencies`, `starts_after`, `init(ModuleContext)`, `begin_shutdown`, `shutdown(budget)`, `suspend`, `resume(ModuleContext)`.
 - Services: `log`, `emit`, `subscribe`, `state`, and `paths`.
 - Storage: `ModuleContext::store(StoreSpec)` returns a `ModuleDb`. See [Storage](storage.md).
 
@@ -53,9 +53,11 @@ The contract crate is `core/api` (package `unidtk-api`). It must not depend on `
 
 r[modules.lifecycle]
 
-`set_module_enabled {id, enabled}` is the only command that switches a module in the running application (`apply_module_enabled` in `core/kernel/main.rs`). It switches the module first and writes the stored list of disabled modules only after that succeeds, so a failure leaves both unchanged. Switches are serialized by `MODULE_SWITCH`.
+The kernel's `Registry` (`core/kernel/registry.rs`) holds every module of a run and is the only place that starts, switches and stops them. It starts the modules in an order where each comes after the ids its `starts_after` names; an unknown id or a cycle is a startup error. On exit it calls `begin_shutdown` on every module, which only raises exit latches and never waits, and then `shutdown` in reverse start order. A zero budget means "do not wait": the caller is the main thread.
 
-By default `suspend` calls `shutdown` with a 1500 ms budget, and `resume` calls `init` with a fresh context. The application keeps running across a switch, so neither may set a global exit latch. A module that was off since startup was never built, so enabling it builds it from scratch.
+`set_module_enabled {id, enabled}` is the only command that switches a module in the running application (`apply_module_enabled` in `core/kernel/main.rs`). It switches the module first and writes the stored list of disabled modules only after that succeeds, so a failure leaves both unchanged. Switches are serialized by `MODULE_SWITCH`; the exit takes the same lock, and a switch after the exit began is refused.
+
+By default `suspend` calls `shutdown` with a 1500 ms budget, and `resume` calls `init` with a fresh context. The application keeps running across a switch, so neither may set a global exit latch. A module switched off at startup is still built and initialized with `enabled` false, and must start nothing heavy; its `resume` starts what `init` skipped.
 
 r[modules.states]
 

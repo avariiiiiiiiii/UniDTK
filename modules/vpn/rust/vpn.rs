@@ -2213,16 +2213,6 @@ impl VpnModule {
         self.runtime.clone()
     }
 
-    /// Stop with a time budget: `wait` is allowed only from a non-main thread
-    /// (quit_app / WM_ENDSESSION), where waiting for the helper is acceptable.
-    pub fn stop_with_budget(&self, wait: bool) -> bool {
-        if wait {
-            shutdown_and_wait(&self.runtime, std::time::Duration::from_secs(2))
-        } else {
-            shutdown(&self.runtime);
-            false
-        }
-    }
 }
 
 pub static VPN_DEPENDENCIES: &[unidtk_api::manifest::ModuleDependency] = &[
@@ -2297,7 +2287,16 @@ impl unidtk_api::Module for VpnModule {
         Ok(())
     }
 
-    fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> {
+    /// A non-zero budget waits for the elevated helper to confirm that sing-box
+    /// is gone: the exit paths off the main thread (`quit_app`, session end) pass
+    /// one, because a surviving TUN black-holes the network after the next boot.
+    fn shutdown(&self, budget: std::time::Duration) -> Result<(), String> {
+        shutdown_and_wait(&self.runtime, budget);
+        Ok(())
+    }
+
+    /// Switched off by the user: the cores stop, nobody waits for the helper.
+    fn suspend(&self) -> Result<(), String> {
         shutdown(&self.runtime);
         Ok(())
     }

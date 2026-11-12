@@ -117,9 +117,13 @@ pub(crate) fn log_line(message: impl AsRef<str>) {
 /// second stop had already replaced.
 static SHUTDOWN: ShutdownLatch = ShutdownLatch::new();
 
-/// How long a second exit route waits for the first one: four module stops of
-/// 1.5 s, the 2 s VPN stop, and the log flush.
+/// How long a second exit route waits for the first one: the module stops, the
+/// 2 s VPN stop, and the log flush, with room to spare.
 const SECOND_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
+
+/// How long an exit off the main thread waits for the elevated helper to
+/// confirm that sing-box is gone.
+const VPN_STOP_BUDGET: Duration = Duration::from_secs(2);
 
 /// Who runs the shutdown, and when it is finished. A second exit route must not
 /// return while the first is still stopping the VPN: a session end that returns
@@ -172,36 +176,19 @@ pub(crate) fn app_shutdown(app: &tauri::AppHandle, wait_for_vpn: bool) {
         return;
     }
     log_line("shutdown: begin");
-    // mp3-player: the global latch is closed unconditionally (in case the module
-    // state has not appeared yet), then a normal stop via the contract: analysis,
-    // spectrum capture and pause, without joins.
-    music::commands::begin_shutdown();
-    if let Some(module) = app.try_state::<commands::Mp3PlayerModule>() {
-        let _ = unidtk_api::Module::shutdown(&*module, Duration::from_millis(1500));
-    }
-    if let Some(module) = app.try_state::<glyph_bar::GlyphBarModule>() {
-        let _ = unidtk_api::Module::shutdown(&*module, Duration::from_millis(1500));
-    }
-    // Telegram first: vpn::shutdown() fires on_vpn_state_changed() mid-exit,
-    // which used to race the managed proxy back to life; begin_shutdown()
-    // latches that off permanently and kills the child process. The latch is a
-    // process-global static, so it runs unconditionally even if the module
-    // state was never managed.
-    telegram::begin_shutdown();
-    if let Some(module) = app.try_state::<telegram::TelegramModule>() {
-        let _ = unidtk_api::Module::shutdown(&*module, Duration::from_millis(1500));
-    }
-    if let Some(module) = app.try_state::<vpn::VpnModule>() {
-        if wait_for_vpn {
-            let _ = module.stop_with_budget(true);
-        } else {
-            let _ = unidtk_api::Module::shutdown(&*module, Duration::from_millis(1500));
+    // A switch that is still running finishes first; any later one sees the exit
+    // and refuses (`apply_module_enabled`). The main thread does not wait for it,
+    // because a switch may need the event loop.
+    drop(if wait_for_vpn { MODULE_SWITCH.lock().ok() } else { MODULE_SWITCH.try_lock().ok() });
+    // Every exit latch first, then each module in reverse start order: Telegram
+    // stops before the VPN, whose stop fires the state event that would start
+    // Telegram's proxy again. Off the main thread the VPN waits, bounded, for its
+    // elevated helper; on it, nothing waits.
+    let budget = if wait_for_vpn { VPN_STOP_BUDGET } else { Duration::ZERO };
+    if let Some(registry) = app.try_state::<registry::Registry>() {
+        for (id, error) in registry.shutdown(budget) {
+            log_line(format!("shutdown: module {id}: {error}"));
         }
-    }
-    // Last, and cheap by construction: the module only raises a flag and hands
-    // its join to a reaper, so it cannot spend the budget waiting on the network.
-    if let Some(module) = app.try_state::<micrographics::MicrographicsModule>() {
-        let _ = unidtk_api::Module::shutdown(&*module, Duration::from_millis(1500));
     }
     hotkeys::shutdown();
     let _ = wallpaper::reset();
@@ -219,40 +206,6 @@ pub(crate) fn is_shutting_down() -> bool {
 /// Module context: its own database slice + AppHandle as host state.
 /// If redb failed to open, the module receives an empty stub; modules that do not
 /// need the database must still start in degraded mode.
-/// Build mp3-player on its own thread: the library load is slow, and the module
-/// must be off the startup path.
-fn start_music_module(handle: tauri::AppHandle) {
-    let shared = shared_db(&handle);
-    thread::spawn(move || {
-        if shared.is_none() {
-            log_line("setup: qbc music core skipped (no redb)");
-            return;
-        }
-        let ctx = module_context(&handle, "mp3-player", true);
-        let module = commands::Mp3PlayerModule::new();
-        match unidtk_api::Module::init(&module, ctx) {
-            Ok(()) => {
-                if is_shutting_down() {
-                    // Shutdown started while the module was starting: stop whatever
-                    // has already launched, and do not manage it.
-                    let _ = unidtk_api::Module::shutdown(&module, Duration::from_millis(1500));
-                    log_line("setup: music core finished after shutdown; stopped");
-                    return;
-                }
-                match module.state() {
-                    Some(state) => {
-                        handle.manage(state);
-                        handle.manage(module);
-                        log_line("setup: qbc music core ready (deferred, auto-sync armed)");
-                    }
-                    None => log_line("setup: qbc music core produced no state"),
-                }
-            }
-            Err(error) => log_line(format!("setup: qbc music core bootstrap failed: {error}")),
-        }
-    });
-}
-
 fn module_context(app: &tauri::AppHandle, id: &str, enabled: bool) -> unidtk_api::ModuleContext {
     let module_id = unidtk_api::ModuleId::new(id);
     let db: Arc<dyn unidtk_api::ModuleDb> = match shared_db(app) {
@@ -628,38 +581,28 @@ fn get_disabled_modules(state: tauri::State<Arc<UniDtkDatabase>>) -> Result<Vec<
 }
 
 /// Switches are one read-modify-write of the stored list plus a module restart.
+/// The exit takes the same lock, so a switch never runs beside it.
 static MODULE_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn switch_module<M: unidtk_api::Module + 'static>(app: &tauri::AppHandle, id: &str, enabled: bool) -> Result<(), String> {
-    let Some(module) = app.try_state::<M>() else {
-        return Ok(());
-    };
-    if enabled {
-        module.resume(module_context(app, id, true))
-    } else {
-        module.suspend()
-    }
-}
 
 /// Turn a module on or off in the running app and remember the choice. The
 /// stored list changes only after the module did, so a failure leaves both as
 /// they were.
 pub(crate) fn apply_module_enabled(app: &tauri::AppHandle, db: &UniDtkDatabase, id: &str, enabled: bool) -> Result<(), String> {
     let _switch = MODULE_SWITCH.lock().map_err(|_| "module switch lock poisoned".to_string())?;
+    if is_shutting_down() {
+        return Err("the application is shutting down".to_string());
+    }
+    let registry = app.try_state::<registry::Registry>().ok_or("modules are not started yet")?;
+    let module = registry.get(id).ok_or_else(|| format!("unknown module: {id}"))?;
     // Read the stored list before the module changes: a read that fails afterwards
     // would leave the module switched and the choice not saved.
     let mut disabled = db.get_disabled_modules_or_reset(|why| {
         log_line(format!("module {id}: the stored disabled list is damaged ({why}); starting a new one"));
     })?;
-    match id {
-        "glyph-bar" => switch_module::<glyph_bar::GlyphBarModule>(app, id, enabled)?,
-        "vpn" => switch_module::<vpn::VpnModule>(app, id, enabled)?,
-        "telegram" => switch_module::<telegram::TelegramModule>(app, id, enabled)?,
-        "micrographics" => switch_module::<micrographics::MicrographicsModule>(app, id, enabled)?,
-        // Off since startup: the module was never built, so it starts from scratch.
-        "mp3-player" if enabled && app.try_state::<commands::Mp3PlayerModule>().is_none() => start_music_module(app.clone()),
-        "mp3-player" => switch_module::<commands::Mp3PlayerModule>(app, id, enabled)?,
-        _ => return Err(format!("unknown module: {id}")),
+    if enabled {
+        module.resume(module_context(app, id, true))?;
+    } else {
+        module.suspend()?;
     }
     disabled.retain(|m| m != id);
     if !enabled {
@@ -2445,9 +2388,23 @@ fn main() {
             log_line("setup: start");
             log_line(format!("startup: Tauri entered setup at {} ms", startup_started.elapsed().as_millis()));
 
-            // Modules publish through the contract; the kernel owns the transport
-            // (Tauri events) and the "last known state" cache that lets modules
-            // PATH registration belongs to the installer, never the UI startup.
+            // The registry exists before anything can publish or exit: building a
+            // module starts nothing, `init` below does. The kernel keeps the typed
+            // halves only to register the commands' state after `init`.
+            let glyph_bar_module = Arc::new(glyph_bar::GlyphBarModule::new());
+            let explorer_module = Arc::new(explorer::commands::ExplorerModule::new());
+            let vpn_module = Arc::new(vpn::VpnModule::new());
+            let telegram_module = Arc::new(telegram::TelegramModule::new());
+            let micrographics_module = Arc::new(micrographics::MicrographicsModule::new());
+            let registry = registry::Registry::new(vec![
+                glyph_bar_module,
+                explorer_module.clone(),
+                vpn_module.clone(),
+                telegram_module.clone(),
+                Arc::new(commands::Mp3PlayerModule::new()),
+                micrographics_module.clone(),
+            ])?;
+            app.manage(registry);
 
             // Modules publish through the contract; the kernel owns the transport
             // (Tauri events) and the "last known state" cache that lets modules
@@ -2512,22 +2469,7 @@ fn main() {
                 }
             }
 
-            // Music-core bootstrap (library + mpv pipe) is synchronous and was
-            // blocking setup from returning — which delayed the event loop and the
-            // wallpaper attach that rides on it (run_on_main_thread only fires once
-            // the loop is pumping). Defer it to a background thread and manage the
-            // state when ready; music commands are only reachable after the user
-            // opens that widget, well after this finishes.
-            //
-            // The library lives behind the module contract: the kernel hands
-            // mp3-player its own key slice of unidtk.redb and never exposes the raw
-            // engine (library_migration.rs moved the old tables there once).
             let disabled_mods = disabled_module_set(app.handle());
-            if disabled_mods.contains("mp3-player") {
-                log_line("setup: qbc music core skipped (module disabled)");
-            } else {
-                start_music_module(app.handle().clone());
-            }
 
             let show = MenuItemBuilder::with_id("show", "Показать виджеты").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Выход").build(app)?;
@@ -2559,20 +2501,6 @@ fn main() {
                 })
                 .build(app)?;
 
-            // Modules start through the `unidtk-api` contract: the core gives each one
-            // its own database slice and AppHandle, and after that only manages state.
-            // Spectrum capture (the visualizer) starts inside mp3-player.
-            let glyph_bar_module = glyph_bar::GlyphBarModule::new();
-            unidtk_api::Module::init(&glyph_bar_module, module_context(app.handle(), "glyph-bar", !disabled_mods.contains("glyph-bar")))?;
-            app.manage(glyph_bar_module);
-            log_line("setup: glyph-bar module started (system volume poll)");
-
-            let vpn_module = vpn::VpnModule::new();
-            unidtk_api::Module::init(&vpn_module, module_context(app.handle(), "vpn", !disabled_mods.contains("vpn")))?;
-            app.manage(vpn_module.runtime());
-            app.manage(vpn_module);
-            log_line("setup: vpn auto-connect kicked off");
-
             // Windows session-end listener (WM_QUERYENDSESSION / WM_ENDSESSION):
             // the wallpaper window is a WS_CHILD of WorkerW and never receives
             // those broadcasts, so a separate hidden top-level window listens
@@ -2580,28 +2508,24 @@ fn main() {
             shutdown::install(app.handle().clone());
             shutdown::guard_event_loop();
 
-            let telegram_module = telegram::TelegramModule::new();
-            unidtk_api::Module::init(&telegram_module, module_context(app.handle(), "telegram", !disabled_mods.contains("telegram")))?;
-            if let Some(runtime) = telegram_module.runtime() {
-                app.manage(runtime);
+            // Modules start through the `unidtk-api` contract, in the registry's
+            // order: the core gives each one its own database slice and AppHandle.
+            // mp3-player loads its library on a thread of its own and registers its
+            // state when ready, so the slow load stays off the wallpaper attach.
+            for module in app.state::<registry::Registry>().in_start_order() {
+                let id = module.id();
+                module.init(module_context(app.handle(), id, !disabled_mods.contains(id)))?;
+                log_line(format!("setup: module {id} started"));
             }
-            app.manage(telegram_module);
-            log_line("setup: telegram runtime ready");
-
-            let explorer_module = explorer::commands::ExplorerModule::new();
-            unidtk_api::Module::init(&explorer_module, module_context(app.handle(), "explorer", !disabled_mods.contains("explorer")))?;
-            app.manage(explorer_module.search());
-            app.manage(explorer_module);
-            log_line("setup: explorer search engine ready");
-
             // Init first, then register the state: a command arriving between the
             // two would otherwise find "not ready" forever, because the managed
             // clone is taken after `init` filled the shared cell.
-            let micrographics_module = micrographics::MicrographicsModule::new();
-            unidtk_api::Module::init(&micrographics_module, module_context(app.handle(), "micrographics", !disabled_mods.contains("micrographics")))?;
+            app.manage(vpn_module.runtime());
+            if let Some(runtime) = telegram_module.runtime() {
+                app.manage(runtime);
+            }
+            app.manage(explorer_module.search());
             app.manage(micrographics_module.runtime());
-            app.manage(micrographics_module);
-            log_line("setup: micrographics weather feed ready");
 
             // Localhost IPC server for CLI/agent debugging (r[ipc.socket-read-only]):
             // read-only module snapshots + core log/config commands.

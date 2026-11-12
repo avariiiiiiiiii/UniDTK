@@ -690,10 +690,23 @@ pub trait Module: Send + Sync {
         &[]
     }
 
+    /// Ids of the modules this one must start after (and so stop before). The kernel
+    /// orders the start by these; an unknown id or a cycle is a startup error.
+    /// Not to be confused with [`Self::dependencies`], which lists files and tasks.
+    fn starts_after(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Initialization: event subscriptions, opening its own tables.
     fn init(&self, ctx: ModuleContext) -> Result<(), String>;
 
+    /// The first pass of the exit: raise the module's exit latches, so that no
+    /// other module's stop can start its work again. Cheap, never waits, and
+    /// idempotent; called on every module before any [`Self::shutdown`].
+    fn begin_shutdown(&self) {}
+
     /// Shutdown with a time budget: stop background threads, close the module's processes.
+    /// A zero budget means "do not wait at all": the caller is the main thread.
     fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> {
         Ok(())
     }

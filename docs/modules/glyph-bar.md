@@ -41,7 +41,7 @@ The kernel creates the module in its setup code (`core/kernel/main.rs`, lines 24
 
 `start()` spawns one thread named `system-volume`. The `VolumeState` it returns holds the stop flag and the join handle.
 
-The metadata sets `backend: true`, so the card can be hidden while the backend keeps running ([modules.states](../reference/modules.md#r-modules.states)). Switching the module on or off goes through `switch_module` in the kernel, under [modules.lifecycle](../reference/modules.md#r-modules.lifecycle).
+The metadata sets `backend: true`, so the card can be hidden while the backend keeps running ([modules.states](../reference/modules.md#r-modules.states)). Switching the module on or off goes through the kernel's module registry, under [modules.lifecycle](../reference/modules.md#r-modules.lifecycle).
 
 ---
 

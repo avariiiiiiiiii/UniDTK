@@ -342,8 +342,8 @@ The kernel's `app_shutdown(app, wait_for_vpn)` has two modes, and each one gives
 
 | Caller | Call | What the VPN does |
 | :--- | :--- | :--- |
-| The `quit_app` command, and the Windows session-end message `WM_ENDSESSION` (see [core/kernel/shutdown.rs](../../core/kernel/shutdown.rs)) | `app_shutdown(app, true)` → `stop_with_budget(true)` | Waits up to 2 seconds for the helper. |
-| The exit request of the main event loop ([core/kernel/main.rs](../../core/kernel/main.rs), around line 2568) | `app_shutdown(app, false)` → `Module::shutdown(1,500 ms)` | Does not wait. `VpnModule::shutdown` ignores the budget and fires the stop without awaiting it. |
+| The `quit_app` command, and the Windows session-end message `WM_ENDSESSION` (see [core/kernel/shutdown.rs](../../core/kernel/shutdown.rs)) | `app_shutdown(app, true)` → `Module::shutdown(2 s)` | Waits up to 2 seconds for the helper. |
+| The exit request of the main event loop ([core/kernel/main.rs](../../core/kernel/main.rs), the `RunEvent::ExitRequested` arm) | `app_shutdown(app, false)` → `Module::shutdown(0)` | Does not wait. A zero budget fires the stop without awaiting it. |
 
 The main loop must never sleep, which is why it passes `false`. The source comment says so directly.
 
