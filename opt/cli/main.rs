@@ -1065,6 +1065,35 @@ extern "system" {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetLocalTime(lp_system_time: *mut SYSTEMTIME);
+    fn GetStdHandle(n_std_handle: u32) -> *mut c_void;
+    fn SetHandleInformation(h_object: *mut c_void, dw_mask: u32, dw_flags: u32) -> i32;
+}
+
+const STD_HANDLES: [u32; 3] = [-10i32 as u32, -11i32 as u32, -12i32 as u32];
+const HANDLE_FLAG_INHERIT: u32 = 1;
+
+/// Starts the app with nothing of this process's standard handles.
+/// `Command` creates every child with handle inheritance on, so the child gets
+/// every inheritable handle of udtk, not only the three it is given: nulling
+/// stdio alone leaves udtk's own stdout and stderr, the caller's pipe, open in
+/// the app and in each helper the app starts (observed: `udtk build` read
+/// through a pipe returned only after the pipe was closed in `ciadpi.exe`, a
+/// grandchild). Clearing their inherit flag keeps them out. A later child that
+/// inherits stdio on purpose is unaffected, because `Command` passes it a
+/// duplicate.
+fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    for id in STD_HANDLES {
+        keep_from_children(unsafe { GetStdHandle(id) });
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+}
+
+fn keep_from_children(handle: *mut c_void) {
+    // A null or invalid handle (no console, no redirect) fails harmlessly.
+    unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
 }
 
 fn get_known_folder(guid: &GUID) -> Option<PathBuf> {
@@ -1499,15 +1528,11 @@ fn build_cmd(args: &[String]) -> Result<String, String> {
     if !task_ok {
         let exe = programs_dir.join("unidtk.exe");
         if exe.is_file() {
-            // Null standard handles, as in `udtk run`: inherited ones keep the
-            // caller's pipe open for the app's whole life.
-            let _ = std::process::Command::new(&exe)
-                .current_dir(&programs_dir)
-                .creation_flags(NO_WINDOW)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            let _ = spawn_detached(
+                std::process::Command::new(&exe)
+                    .current_dir(&programs_dir)
+                    .creation_flags(NO_WINDOW),
+            );
             restart_note = "restart: task start denied (medium-integrity shell) — spawned the app directly\n".into();
         }
     }
@@ -1845,13 +1870,8 @@ fn run_cmd(args: &[String]) -> Result<String, String> {
         cmd.arg(arg);
     }
     cmd.creation_flags(NO_WINDOW);
-    // The app logs to its own file. Inherited stdout/stderr would keep the
-    // caller's pipe open for the app's whole life, so a script or agent reading
-    // `udtk run` would wait until the app exits.
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+    // The app logs to its own file; see `spawn_detached` for the caller's pipe.
+    spawn_detached(&mut cmd).map_err(|e| format!("spawn failed: {e}"))?;
     Ok(format!("launched {}", exe.display()))
 }
 
@@ -3884,6 +3904,56 @@ USAGE:
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct SecurityAttributes {
+        n_length: u32,
+        lp_security_descriptor: *mut c_void,
+        b_inherit_handle: i32,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreatePipe(read: *mut *mut c_void, write: *mut *mut c_void, sa: *const SecurityAttributes, size: u32) -> i32;
+        fn ReadFile(h: *mut c_void, buf: *mut u8, len: u32, read: *mut u32, overlapped: *mut c_void) -> i32;
+        fn CloseHandle(h: *mut c_void) -> i32;
+    }
+
+    // A pipe whose write end udtk holds as inheritable, as its stdout is when a
+    // script reads `udtk build`: once udtk lets go of the write end, the reader
+    // must see the end of the pipe while the started child still runs.
+    #[test]
+    fn a_detached_child_does_not_keep_the_callers_pipe_open() {
+        let sa = SecurityAttributes {
+            n_length: std::mem::size_of::<SecurityAttributes>() as u32,
+            lp_security_descriptor: std::ptr::null_mut(),
+            b_inherit_handle: 1,
+        };
+        let (mut read, mut write) = (std::ptr::null_mut(), std::ptr::null_mut());
+        assert_ne!(unsafe { CreatePipe(&mut read, &mut write, &sa, 0) }, 0);
+        super::keep_from_children(write);
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "6", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        unsafe { CloseHandle(write) };
+        let started = std::time::Instant::now();
+        let (mut byte, mut got) = (0u8, 0u32);
+        let ok = unsafe { ReadFile(read, &mut byte, 1, &mut got, std::ptr::null_mut()) };
+        let waited = started.elapsed();
+        let child_alive = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        unsafe { CloseHandle(read) };
+        assert_eq!((ok, got), (0, 0), "the read ends with a broken pipe, not data");
+        assert!(child_alive, "the child must still run when the pipe ends");
+        assert!(waited < std::time::Duration::from_secs(2), "the pipe ended only after {waited:?}, with the child");
+    }
+
     #[test]
     fn a_path_entry_is_matched_whole() {
         let p = r"C:\Windows;C:\Program Files\UniDTK2\;D:\tools";
