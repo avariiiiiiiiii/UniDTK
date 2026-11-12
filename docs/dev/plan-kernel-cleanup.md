@@ -30,14 +30,15 @@ The order is from small and isolated to large: Win+E first, then shutdown, then 
 
 ### 2b. The tao panic
 
-**Known.** After `shutdown: begin` the tao event loop panics on the main thread (by the issue: `runner.rs`, "cannot move state from Destroyed") and `shutdown: done` never appears. The release build is stripped, so the backtrace has no frames. **The cause is not known; the fix waits until it is proven.**
+**Known.** After `shutdown: begin` the tao event loop panics on the main thread (`runner.rs:371`, "cannot move state from Destroyed") and `shutdown: done` never appears.
 
-1. Release profile with `debug = "line-tables-only"` and `strip = false`; build with `udtk build`.
-2. Reproduce synthetically: send `WM_QUERYENDSESSION` and then `WM_ENDSESSION` with `ENDSESSION_LOGOFF` to **every** top-level window of the process (`EnumWindows`, the tao windows included, not only the listener). A synthetic run that does not panic proves nothing; then a real sign-out, three times, is the user's physical step.
-3. Read the backtrace. Candidates to check, not facts: the second entry through `RunEvent::ExitRequested` while the first shutdown runs; the WorkerW parent of the `WS_CHILD` wallpaper window destroyed under the loop; `wallpaper::reset()` blocking in its `SystemParametersInfo` broadcast while Explorer is leaving. (`app.exit(0)` in `quit_app` is not on the session-end path.)
-4. Fix the proven cause, with a test that fails without the fix.
+**Cause, proven.** The panic names the line, and tao 0.35.3's source explains it without symbols. tao's hidden window "Tao Thread Event Target" is a top-level `WS_POPUP`, so it receives `WM_ENDSESSION`; on `wParam = TRUE` its procedure (`thread_event_target_callback`, `event_loop.rs:2384`) calls `loop_destroyed()`, which moves the runner to `Destroyed`. The process does not end there: Windows ends it after every window has answered, and the listener in `core/kernel/shutdown.rs` is still stopping the VPN on its own thread. The main thread keeps dispatching, and the next event moves the runner out of `Destroyed`, which tao answers with the panic. The panic kills the process in the middle of the shutdown.
 
-**Done when.** Three of three session ends log `shutdown: done`, `crash.log` gains no record, and the TUN adapter is down after the next sign-in.
+**Reproduced.** `WM_QUERYENDSESSION` and then `WM_ENDSESSION` with `ENDSESSION_LOGOFF`, sent to every top-level window of the running process (`EnumWindows`): the log shows `shutdown: WM_ENDSESSION received`, `shutdown: begin`, `vpn: shutdown requested`, then the same panic 40 ms after the message, and no `shutdown: done`.
+
+**Fix.** `shutdown::guard_event_loop`, called from `setup` on the main thread, subclasses tao's event-target window and answers a committed `WM_ENDSESSION` itself, without passing it on. tao never learns of the session end and its loop keeps running until Windows ends the process; the shutdown is the listener's. A cancelled session end (`wParam = FALSE`) passes through, as tao does nothing with it. The test `the_event_loop_never_sees_a_committed_session_end` in `shutdown.rs` fails without the subclass.
+
+**Done when.** The synthetic session end logs `shutdown: done` and no panic; then three real sign-outs log `shutdown: done`, `crash.log` gains no record, and the TUN adapter is down after the next sign-in (the user's physical step).
 
 ## Step 3. One registry and one command table (#330)
 

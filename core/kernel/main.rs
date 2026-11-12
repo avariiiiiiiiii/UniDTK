@@ -2578,6 +2578,7 @@ fn main() {
             // those broadcasts, so a separate hidden top-level window listens
             // and stops the VPN synchronously inside the shutdown budget.
             shutdown::install(app.handle().clone());
+            shutdown::guard_event_loop();
 
             let telegram_module = telegram::TelegramModule::new();
             unidtk_api::Module::init(&telegram_module, module_context(app.handle(), "telegram", !disabled_mods.contains("telegram")))?;
