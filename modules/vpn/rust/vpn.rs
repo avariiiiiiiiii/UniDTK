@@ -219,57 +219,31 @@ fn settings_status(settings: VpnSettings) -> VpnSettingsStatus {
     }
 }
 
-// ── Socket surface (`unidtk_api::commands::ModuleIpcFn`) ───────────────────────
-// The kernel registers this under the module id, so its router never names
-// `VpnRuntime`.
+// ── Commands ────────────────────────────────────────────────────────────────
+// The writes answer `null` or the settings, exactly as the Tauri commands of the
+// same names did, so the interface sees the same shapes.
 
-fn runtime_from<'a>(
-    host: Option<unidtk_api::commands::HostHandle<'a>>,
-) -> Result<tauri::State<'a, VpnRuntime>, String> {
-    let app = host
-        .and_then(|h| h.downcast_ref::<tauri::AppHandle>())
-        .ok_or_else(|| "host handle unavailable".to_string())?;
-    tauri::Manager::try_state::<VpnRuntime>(app).ok_or_else(|| "vpn is not ready".to_string())
-}
-
-fn json_of<T: serde::Serialize>(value: T) -> Result<serde_json::Value, String> {
-    serde_json::to_value(value).map_err(|e| e.to_string())
-}
-
-pub fn ipc_call(
-    cmd: &str,
-    args: &serde_json::Value,
-    host: Option<unidtk_api::commands::HostHandle<'_>>,
-) -> Option<Result<serde_json::Value, String>> {
-    match cmd {
-        "vpn_status" => Some(runtime_from(host).and_then(|runtime| json_of(status(&runtime)))),
-        "vpn_list_servers" => Some(
-            runtime_from(host).and_then(|runtime| list_servers(&runtime).and_then(json_of)),
-        ),
-        "vpn_settings" => Some(json_of(settings())),
-        // The writes answer `null`, exactly like the `Result<(), String>` Tauri commands of
-        // the same name: a caller that switches transports must not see a different shape.
-        "vpn_connect" => Some(runtime_from(host).and_then(|runtime| {
-            let tag = args
-                .get("tag")
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
-            connect(&runtime, tag).map(|_| serde_json::Value::Null)
-        })),
-        "vpn_disconnect" => Some(runtime_from(host).and_then(|runtime| {
-            disconnect(&runtime);
-            Ok(serde_json::Value::Null)
-        })),
-        "vpn_ping_all" => {
-            Some(runtime_from(host).and_then(|runtime| ping_all(&runtime).and_then(json_of)))
-        }
-        "vpn_set_auto_connect" => Some(
-            args.get("enabled")
-                .and_then(|value| value.as_bool())
-                .ok_or_else(|| "vpn_set_auto_connect requires {enabled}".to_string())
-                .and_then(|enabled| json_of(set_auto_connect(enabled))),
-        ),
-        _ => None,
+unidtk_api::module_commands! {
+    impl VpnModule {
+        read_only "vpn_status" "VPN runtime status" |this| Ok(status(&this.runtime));
+        read_only "vpn_settings" "VPN settings" |this| Ok(settings());
+        read_only "vpn_list_servers" "VPN servers" |this| list_servers(&this.runtime);
+        write "vpn_refresh_servers" "Fetch the subscription again" |this| refresh_servers(&this.runtime);
+        write "vpn_set_auto_connect" "Toggle connect-on-startup" |this, enabled: bool| Ok(set_auto_connect(enabled));
+        write "vpn_set_subscription_url" "Set the subscription URL" |this, url: String| set_subscription_url(url);
+        write "vpn_set_home_server_config" "Set the home server" |this, config: HomeServerConfig| set_home_server_config(config);
+        write "vpn_connect" "Connect to a server (or the selected one)" |this, tag: Option<String>| {
+            unidtk_api::log(format!("vpn: command connect tag={tag:?}"));
+            connect(&this.runtime, tag)
+        };
+        write "vpn_disconnect" "Drop the current connection" |this| {
+            disconnect(&this.runtime);
+            Ok(())
+        };
+        write "vpn_select_server" "Select the server to connect to" |this, tag: String| select_server(&this.runtime, tag);
+        // Not a read, though it answers with measurements: it takes a global
+        // in-progress guard and stores the results.
+        write "vpn_ping_all" "Measure latency of every server" |this| ping_all(&this.runtime);
     }
 }
 
@@ -2134,8 +2108,7 @@ pub fn shutdown_and_wait(runtime: &VpnRuntime, budget: Duration) -> bool {
     stopped
 }
 
-pub fn auto_connect_on_startup(app: tauri::AppHandle) {
-    use tauri::Manager;
+pub fn auto_connect_on_startup(runtime: VpnRuntime) {
     std::thread::spawn(move || {
         let settings = load_settings();
         unidtk_api::log(format!(
@@ -2161,7 +2134,6 @@ pub fn auto_connect_on_startup(app: tauri::AppHandle) {
             unidtk_api::log("vpn: auto-connect aborted, empty target tag");
             return;
         }
-        let runtime = app.state::<VpnRuntime>();
         MANUAL_DISCONNECT.store(false, std::sync::atomic::Ordering::SeqCst);
         for attempt in 1..=3 {
             // Re-check each attempt: the AUTO toggle being switched off
@@ -2195,8 +2167,7 @@ pub fn auto_connect_on_startup(app: tauri::AppHandle) {
     });
 }
 
-/// VPN module: the core creates the runtime through the contract, and the command wrappers
-/// take a clone of it from managed state.
+/// VPN module: it owns the runtime, and its commands read it from here.
 pub struct VpnModule {
     runtime: VpnRuntime,
 }
@@ -2207,12 +2178,6 @@ impl VpnModule {
             runtime: VpnRuntime::default(),
         }
     }
-
-    /// Clone of the runtime for the core's managed state.
-    pub fn runtime(&self) -> VpnRuntime {
-        self.runtime.clone()
-    }
-
 }
 
 pub static VPN_DEPENDENCIES: &[unidtk_api::manifest::ModuleDependency] = &[
@@ -2275,16 +2240,20 @@ impl unidtk_api::Module for VpnModule {
         }
 
         let _ = VPN_DB.set(ctx.db());
-        let handle = ctx
-            .host::<tauri::AppHandle>()
-            .cloned()
-            .ok_or("vpn: AppHandle missing in ModuleContext")?;
         if !ctx.enabled() {
             unidtk_api::log("vpn: disabled — auto-connect not started");
             return Ok(());
         }
-        auto_connect_on_startup(handle);
+        auto_connect_on_startup(self.runtime.clone());
         Ok(())
+    }
+
+    fn commands(&self) -> &'static [unidtk_api::commands::CommandSpec] {
+        Self::COMMANDS
+    }
+
+    fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
+        self.dispatch_command(cmd, args)
     }
 
     /// A non-zero budget waits for the elevated helper to confirm that sing-box

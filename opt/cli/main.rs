@@ -23,8 +23,8 @@ mod splash_art;
 /// background work is invisible (r[install.native-tasks]).
 const NO_WINDOW: u32 = 0x0800_0000;
 
-// The CLI reads only the factory list; `Registry`, which starts and stops the
-// modules of a run, is the kernel's.
+// The CLI reads only the factory list and the modules' command tables; `Registry`,
+// which starts and stops the modules of a run, is the kernel's.
 #[path = "../../core/kernel/registry.rs"]
 #[allow(dead_code)]
 mod registry;
@@ -1276,12 +1276,12 @@ fn shot_cmd(args: &[String]) -> Result<String, String> {
     Ok(format!("screenshot: {abs_str}\nsize: {} bytes", bytes.len()))
 }
 
-/// The application's own command surface, taken from the very same inventory file the
-/// kernel compiles — so `help --json` describes it correctly even when the app is not
-/// running, and a name cannot drift between the two binaries.
+/// The application's own command surface, taken from the very same inventory file and
+/// module tables the kernel compiles — so `help --json` describes it correctly even when
+/// the app is not running, and a name cannot drift between the two binaries.
 fn app_command_manifest() -> Vec<serde_json::Value> {
-    command_inventory::ALL
-        .iter()
+    command_inventory::manifest()
+        .into_iter()
         .map(|spec| {
             serde_json::json!({
                 "name": spec.name,

@@ -11,7 +11,7 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 | File | Role |
 | :--- | :--- |
 | [fs.rs](../../modules/explorer/rust/fs.rs) | Directory listing and the `FileItem` record. |
-| [commands.rs](../../modules/explorer/rust/commands.rs) | The plain functions the kernel wraps: listing, drives, places, clipboard, operations, search index. |
+| [commands.rs](../../modules/explorer/rust/commands.rs) | The module, its command table, and the plain functions behind it: listing, drives, places, clipboard, operations, search index. |
 | [drives.rs](../../modules/explorer/rust/drives.rs), [files.rs](../../modules/explorer/rust/files.rs) | Drive enumeration; file info, shell open, create, rename, copy, delete. |
 | [search.rs](../../modules/explorer/rust/search.rs), [clipboard.rs](../../modules/explorer/rust/clipboard.rs) | The search index; the Win32 clipboard formats. |
 | [hashing.rs](../../modules/explorer/rust/hashing.rs), [archive.rs](../../modules/explorer/rust/archive.rs), [preview.rs](../../modules/explorer/rust/preview.rs) | Hashes, ZIP archives, preview metadata. |
@@ -240,13 +240,13 @@ A Start menu shortcut is installed too. `uninstall_as_default_file_manager` remo
 
 ## Step 12: The socket door, the contract, and the lifecycle
 
-**The socket door.** `ipc_call` in [mod.rs](../../modules/explorer/rust/mod.rs) (lines 23-35) answers two read-only commands, `get_drives` and `get_user_places`. The kernel's command inventory names them `explorer_drives` and `explorer_places` and routes them to these functions ([command_inventory.rs](../../core/kernel/command_inventory.rs), [ipc.rs](../../core/kernel/ipc.rs) lines 743-759). Everything else is reached only through the page.
+**The commands.** The module declares its 44 commands in one table in [commands.rs](../../modules/explorer/rust/commands.rs) (`unidtk_api::module_commands!`), with the names the page calls. Two are `read_only` and also answered on the socket: `get_drives` and `get_user_places`. The other reads are `read_ui`, so a file preview or a hash never leaves through the unauthenticated socket, and the writes are reached only through the page. The search commands read the index the module holds.
 
-**The contract.** The crate depends on `unidtk-api`, and on Tauri only for the blocking-pool helper in `get_drives`. It does not depend on the kernel. The `#[tauri::command]` wrappers live in the kernel ([modules.commands-in-core](../reference/modules.md#r-modules.commands-in-core)). Every explorer command in `main.rs` is marked `async` or is an `async fn`, so Tauri runs it off the window thread.
+**The contract.** The crate depends on `unidtk-api`, and on Tauri only for `tauri::async_runtime::block_on`, which drives the async bodies (`scan_directory`, `get_drives`). It does not depend on the kernel. The kernel serves every command of the table on a blocking thread, never on the window thread ([modules.command-table](../reference/modules.md#r-modules.command-table)).
 
 **Drives.** `get_all_drives` ([drives.rs](../../modules/explorer/rust/drives.rs)) reads, for each present letter, the type with `GetDriveTypeW`, the label with `GetVolumeInformationW`, and the size with `GetDiskFreeSpaceExW`. A network drive is resolved to its UNC path through `WNetGetConnectionW`, loaded from `mpr.dll` at run time. The page waits 1,500 ms for this list, then falls back to `get_raw_drives`, which returns letters only (explorer.js lines 95-145).
 
-**Lifecycle.** `init` logs when the module is disabled and otherwise returns `Ok`; in diagnostic mode it calls `get_user_places` once. `shutdown` returns `Ok` at once and releases nothing. The commands are listed at compile time in the kernel's `generate_handler!` (main.rs, from line 2160) ([modules.lifecycle](../reference/modules.md#r-modules.lifecycle)).
+**Lifecycle.** `init` logs when the module is disabled and otherwise returns `Ok`; in diagnostic mode it calls `get_user_places` once. `shutdown` returns `Ok` at once and releases nothing. The kernel's registry starts and stops it with the others ([modules.lifecycle](../reference/modules.md#r-modules.lifecycle)).
 
 **Idempotence.** [modules.idempotent](../reference/modules.md#r-modules.idempotent) asks that commands be safe to repeat. `create_directory` is, and that is exactly why the New Folder loop in Step 9 never advances.
 

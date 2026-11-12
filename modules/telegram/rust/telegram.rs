@@ -2676,74 +2676,57 @@ fn await_auth_progress(inner: &Arc<Mutex<TelegramInner>>, previous_state: &str, 
     }
 }
 
-// ── Socket surface (`unidtk_api::commands::ModuleIpcFn`) ───────────────────────
-// The kernel registers this under the module id, so its router never names
-// `TelegramRuntime`.
+// ── Commands ────────────────────────────────────────────────────────────────
+// The answers keep the shapes of the Tauri commands of the same names, so the
+// interface does not change. A command before `init` stored the runtime fails as
+// "telegram is not ready".
 
-fn runtime_from<'a>(
-    host: Option<unidtk_api::commands::HostHandle<'a>>,
-) -> Result<tauri::State<'a, TelegramRuntime>, String> {
-    let app = host
-        .and_then(|h| h.downcast_ref::<tauri::AppHandle>())
-        .ok_or_else(|| "host handle unavailable".to_string())?;
-    tauri::Manager::try_state::<TelegramRuntime>(app)
-        .ok_or_else(|| "telegram is not ready".to_string())
-}
-
-fn json_of<T: serde::Serialize>(value: T) -> Result<serde_json::Value, String> {
-    serde_json::to_value(value).map_err(|e| e.to_string())
-}
-
-fn chats_json(runtime: &TelegramRuntime) -> Result<serde_json::Value, String> {
-    json_of(chats(runtime))
-}
-
-fn archive_chats_json(runtime: &TelegramRuntime) -> Result<serde_json::Value, String> {
-    json_of(archive_chats(runtime))
-}
-
-pub fn ipc_call(
-    cmd: &str,
-    args: &serde_json::Value,
-    host: Option<unidtk_api::commands::HostHandle<'_>>,
-) -> Option<Result<serde_json::Value, String>> {
-    match cmd {
-        "telegram_status" => Some(runtime_from(host).and_then(|runtime| json_of(status(&runtime)))),
-        "telegram_chats" => Some(runtime_from(host).and_then(|runtime| {
-            // Same shape as the Tauri command: the array itself. The socket version used
-            // to wrap it in `{count, items}`.
-            chats_json(&runtime)
-        })),
-        "telegram_chats_archive" => Some(runtime_from(host).and_then(|runtime| {
-            archive_chats_json(&runtime)
-        })),
-        "telegram_set_archived" => Some(runtime_from(host).and_then(|runtime| {
-            let request = args
-                .get("request")
-                .ok_or_else(|| "telegram_set_archived requires {request}".to_string())
-                .and_then(|value| {
-                    serde_json::from_value::<TelegramArchiveRequest>(value.clone())
-                        .map_err(|e| format!("telegram_set_archived: bad request: {e}"))
-                })?;
-            set_chat_archived(&runtime, request).map(|_| serde_json::Value::Null)
-        })),
-        "telegram_messages_around" => Some(runtime_from(host).and_then(|runtime| {
-            let chat_id = args
-                .get("chat_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "telegram_messages_around requires chat_id".to_string())?
-                .to_string();
-            let message_id = args
-                .get("message_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "telegram_messages_around requires message_id".to_string())?
-                .to_string();
-            let thread_id = args.get("thread_id").and_then(|v| v.as_i64());
-            let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
-            let list = messages_around(&runtime, chat_id, message_id, thread_id, limit)?;
-            json_of(list)
-        })),
-        _ => None,
+unidtk_api::module_commands! {
+    impl TelegramModule {
+        read_only "telegram_status" "Telegram runtime status" |this| Ok(status(&this.rt()?));
+        read_only "telegram_chats" "Telegram chats" |this| Ok(chats(&this.rt()?));
+        read_only "telegram_chats_archive" "Telegram archived chats" |this| Ok(archive_chats(&this.rt()?));
+        write "telegram_set_archived" "Move a chat to or from Archive" |this, request: TelegramArchiveRequest| set_chat_archived(&this.rt()?, request);
+        read_ui "telegram_messages" "Messages of a chat or a forum thread" |this, chat_id: String, thread_id: Option<i64>| Ok(match thread_id { Some(thread_id) if thread_id != 0 => messages_for_thread(&this.rt()?, chat_id, Some(thread_id)), _ => messages(&this.rt()?, chat_id), });
+        read_ui "telegram_get_message" "One message" |this, chat_id: String, message_id: String| get_message(&this.rt()?, chat_id, message_id);
+        write "telegram_mark_read" "Mark a chat as read" |this, chat_id: String| { mark_read(&this.rt()?, chat_id); Ok(()) };
+        write "telegram_open_chat" "Tell Telegram a chat is open" |this, chat_id: String| { open_chat(&this.rt()?, chat_id); Ok(()) };
+        write "telegram_close_chat" "Tell Telegram a chat is closed" |this, chat_id: Option<String>| { close_chat(&this.rt()?, chat_id); Ok(()) };
+        read_ui "telegram_older_messages" "Messages before a given one" |this, chat_id: String, before_message_id: String, thread_id: Option<i64>| Ok(match thread_id {
+        Some(thread_id) if thread_id != 0 => older_messages_for_thread(&this.rt()?, chat_id, before_message_id, Some(thread_id)),
+        _ => older_messages(&this.rt()?, chat_id, before_message_id),
+    });
+        read_only "telegram_messages_around" "Messages centered around a target message" |this, chat_id: String, message_id: String, thread_id: Option<i64>, limit: Option<u32>| messages_around(&this.rt()?, chat_id, message_id, thread_id, limit);
+        write "telegram_send_message" "Send a text message" |this, request: TelegramSendRequest| send_message(&this.rt()?, request);
+        read_ui "telegram_chat_members" "Members of a chat, filtered by a query" |this, chat_id: String, query: Option<String>| chat_members(&this.rt()?, chat_id, query.unwrap_or_default());
+        write "telegram_send_attachment" "Send a file" |this, request: TelegramSendAttachmentRequest| send_attachment(&this.rt()?, request);
+        write "telegram_set_phone" "Sign-in: the phone number" |this, phone: TelegramPhone| set_phone(&this.rt()?, phone);
+        write "telegram_check_code" "Sign-in: the code" |this, code: TelegramAuthCode| check_code(&this.rt()?, code);
+        write "telegram_check_password" "Sign-in: the password" |this, password: TelegramPassword| check_password(&this.rt()?, password);
+        write "telegram_set_email" "Sign-in: the e-mail address" |this, email: TelegramEmail| set_email(&this.rt()?, email);
+        write "telegram_check_email_code" "Sign-in: the e-mail code" |this, code: TelegramEmailCode| check_email_code(&this.rt()?, code);
+        write "telegram_register_user" "Sign-up: the name" |this, registration: TelegramRegistration| register_user(&this.rt()?, registration);
+        read_ui "telegram_get_config" "Telegram settings" |this| Ok(get_config());
+        read_ui "telegram_debug" "Diagnostic state of the client" |this| Ok(debug_info(&this.rt()?));
+        write "telegram_restart" "Restart the client" |this| Ok(restart(&this.rt()?));
+        write "telegram_save_config" "Save Telegram settings" |this, config: TelegramConfig| save_config(&this.rt()?, config);
+        write "telegram_logout" "Sign out" |this| logout(&this.rt()?);
+        write "telegram_download_file" "Download a file and return its path" |this, file_id: i32| download_file(&this.rt()?, file_id);
+        write "telegram_edit_message" "Edit a message" |this, request: TelegramEditMessageRequest| edit_message(&this.rt()?, request);
+        write "telegram_delete_messages" "Delete messages" |this, request: TelegramDeleteMessagesRequest| delete_messages(&this.rt()?, request);
+        write "telegram_set_reaction" "Set or remove a reaction" |this, request: TelegramReactionRequest| set_reaction(&this.rt()?, request);
+        write "telegram_get_custom_emoji_path" "Download a custom emoji and return its path" |this, custom_emoji_id: String| get_custom_emoji_path(&this.rt()?, &custom_emoji_id);
+        write "telegram_pin_message" "Pin a message" |this, request: TelegramPinMessageRequest| pin_message(&this.rt()?, request);
+        write "telegram_unpin_message" "Unpin a message" |this, request: TelegramPinMessageRequest| unpin_message(&this.rt()?, request);
+        read_ui "telegram_get_chat_pinned_message" "The pinned message of a chat" |this, chat_id: String, thread_id: Option<i64>| get_chat_pinned_message(&this.rt()?, chat_id, thread_id);
+        write "telegram_forward_messages" "Forward messages" |this, request: TelegramForwardMessagesRequest| forward_messages(&this.rt()?, request);
+        write "telegram_delete_chat_history" "Clear a chat's history" |this, request: TelegramDeleteChatHistoryRequest| delete_chat_history(&this.rt()?, request);
+        write "telegram_send_callback_query" "Press an inline button" |this, request: TelegramCallbackQueryRequest| send_callback_query(&this.rt()?, request);
+        read_ui "telegram_get_forum_topics" "Topics of a forum" |this, request: TelegramForumTopicsRequest| get_forum_topics(&this.rt()?, request);
+        read_ui "telegram_list_accounts" "Signed-in accounts" |this| Ok(list_accounts(&this.rt()?));
+        write "telegram_switch_account" "Switch to another account" |this, account_id: String| switch_account(&this.rt()?, account_id);
+        write "telegram_add_account" "Start adding an account" |this| add_account(&this.rt()?);
+        write "telegram_remove_account" "Remove an account" |this, account_id: String| remove_account(&this.rt()?, account_id);
     }
 }
 
@@ -6135,7 +6118,7 @@ fn bundled_tdjson_path() -> Option<std::path::PathBuf> {
 }
 
 /// Telegram module: the runtime is created in `init` (the AppHandle and the VPN
-/// subscription are also passed in there); the core's managed state holds a clone for the command wrappers.
+/// subscription are also passed in there), and the commands read it from here.
 pub struct TelegramModule {
     runtime: std::sync::Mutex<Option<TelegramRuntime>>,
 }
@@ -6147,8 +6130,12 @@ impl TelegramModule {
         }
     }
 
-    pub fn runtime(&self) -> Option<TelegramRuntime> {
-        self.runtime.lock().expect("telegram module lock").clone()
+    fn rt(&self) -> Result<TelegramRuntime, String> {
+        self.runtime
+            .lock()
+            .expect("telegram module lock")
+            .clone()
+            .ok_or_else(|| "telegram is not ready".to_string())
     }
 }
 
@@ -6399,12 +6386,20 @@ impl unidtk_api::Module for TelegramModule {
         Ok(())
     }
 
-    /// The runtime stays registered with the host; the client restarts on the
-    /// widget's next call.
+    /// The runtime stays with the module; the client restarts on the widget's
+    /// next call.
     fn resume(&self, _ctx: unidtk_api::ModuleContext) -> Result<(), String> {
         SUSPENDED.store(false, Ordering::SeqCst);
         subscribe_vpn_events();
         Ok(())
+    }
+
+    fn commands(&self) -> &'static [unidtk_api::commands::CommandSpec] {
+        Self::COMMANDS
+    }
+
+    fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
+        self.dispatch_command(cmd, args)
     }
 }
 

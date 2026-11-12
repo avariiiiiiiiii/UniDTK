@@ -12,20 +12,16 @@
 //! caller-supplied source) stay out — they would let any local process redirect
 //! traffic, message as the user, or hammer the network on demand.
 //!
-//! Module state is resolved lazily through the Tauri `AppHandle` (`try_state`),
-//! so a module that failed to initialise or is still booting reports "not ready"
-//! instead of panicking. Each connection runs on its own OS thread (never on the
-//! event loop), which is also why async module commands can be driven with
+//! A module command is served by its module, which the kernel's registry finds by
+//! the command's name; a module still booting reports "not ready" instead of
+//! panicking. Each connection runs on its own OS thread (never on the event loop),
+//! which is also why a module may drive an async command body with
 //! `tauri::async_runtime::block_on`.
 
 use crate::log_store::LogStore;
 use crate::unidtk_db::UniDtkDatabase;
-use unidtk_mod_explorer as explorer;
-use unidtk_mod_glyph_bar as glyph_bar;
-use unidtk_mod_mp3_player as music;
-use unidtk_mod_micrographics as micrographics;
-use unidtk_mod_telegram as telegram;
-use unidtk_mod_vpn as vpn;
+use tauri::Manager;
+use unidtk_api::commands::{CommandSpec, Door};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -126,14 +122,18 @@ impl IpcServer {
     pub fn dispatch(
         &self,
         req: &serde_json::Value,
-        door: unidtk_api::commands::Door,
+        door: Door,
     ) -> Result<serde_json::Value, String> {
         let cmd = req["cmd"].as_str().unwrap_or("");
         let args = req["args"].as_object().cloned().unwrap_or_default();
 
-        // The inventory is authoritative for what exists and which door serves it:
-        // a write command is refused here by policy, not by being forgotten.
-        check_door(cmd, door)?;
+        let Some(spec) = crate::command_inventory::find(cmd) else {
+            return serve_module(&self.app, cmd, &serde_json::Value::Object(args), door)
+                .unwrap_or_else(|| check_door(cmd, None, door).map(|_| serde_json::Value::Null));
+        };
+        // The spec is authoritative for which door serves the command: a write
+        // command is refused here by policy, not by being forgotten.
+        check_door(cmd, Some(spec), door)?;
 
         match ROUTES.iter().find(|(name, _)| *name == cmd) {
             Some((_, handler)) => handler(self, &args),
@@ -155,7 +155,7 @@ impl IpcServer {
         // `{cmd, args}` keeps working. When an id is present it is echoed back.
         respond(
             req.get("id").cloned(),
-            self.dispatch(&req, unidtk_api::commands::Door::Socket),
+            self.dispatch(&req, Door::Socket),
         )
     }
 
@@ -165,19 +165,41 @@ fn json_value<T: serde::Serialize>(value: T) -> Result<serde_json::Value, String
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
-/// Applies the inventory's door policy to one command name.
+/// Serves a module's command through the door `door`, or `None` when no module
+/// declares `cmd` (a kernel command, an unknown one, or modules not started yet).
+///
+/// The one path of a module command, whichever door it came through: the socket and
+/// the WebSocket call it from `dispatch`, the Tauri door from the kernel's invoke
+/// handler. The caller is never the main thread, because a module command may block.
+pub fn serve_module(
+    app: &tauri::AppHandle,
+    cmd: &str,
+    args: &serde_json::Value,
+    door: Door,
+) -> Option<Result<serde_json::Value, String>> {
+    let registry = app.try_state::<crate::registry::Registry>()?;
+    let (module, spec) = registry.command(cmd)?;
+    if let Err(refusal) = check_door(cmd, Some(spec), door) {
+        return Some(Err(refusal));
+    }
+    Some(module.dispatch(cmd, args).unwrap_or_else(|| {
+        Err(format!("module '{}' declares '{cmd}' but does not handle it", module.id()))
+    }))
+}
+
+/// Applies a command's door policy. `spec` is `None` for a name nobody declares.
 ///
 /// A free function on purpose: the policy is pure data, and keeping it out of `dispatch`
 /// is what makes it testable at all — an `IpcServer` needs a live `AppHandle` to exist,
 /// while this needs nothing.
-fn check_door(cmd: &str, door: unidtk_api::commands::Door) -> Result<(), String> {
-    match crate::command_inventory::find(cmd) {
+fn check_door(cmd: &str, spec: Option<&CommandSpec>, door: Door) -> Result<(), String> {
+    match spec {
         None => Err(format!("unknown cmd: {cmd}")),
         Some(spec) if !spec.doors.contains(&door) => {
             // Say *why*, not just *no*: the refusals mean different things to a caller —
             // "this changes state", "this is the tool door's own surface", or "this
             // command is simply not yours to ask for".
-            let other = if spec.doors.contains(&unidtk_api::commands::Door::Socket) {
+            let other = if spec.doors.contains(&Door::Socket) {
                 "it is served by the tool door only"
             } else {
                 "it is served by the UI door only"
@@ -260,99 +282,12 @@ static ROUTES: &[(&str, Handler)] = &[
     ),
     (crate::command_inventory::COMMANDS.name, handle_commands),
     (
-        crate::command_inventory::PLAYER_STATUS.name,
-        handle_player_status,
-    ),
-    (
-        crate::command_inventory::AI_DJ_STATUS.name,
-        handle_ai_dj_status,
-    ),
-    (crate::command_inventory::LIST_TRACKS.name, handle_list_tracks),
-    (
-        crate::command_inventory::LIST_PLAYLISTS.name,
-        handle_list_playlists,
-    ),
-    (
-        crate::command_inventory::GET_SUBMODULES.name,
-        handle_get_submodules,
-    ),
-    (
-        crate::command_inventory::GET_SYSTEM_VOLUME.name,
-        handle_get_system_volume,
-    ),
-    // The UI door's first *module* writes: routed like the reads, refused on the socket
-    // by policy (they are declared `write`), so the same command serves both transports
-    // with one handler.
-    (
-        crate::command_inventory::SET_SYSTEM_VOLUME.name,
-        handle_set_system_volume,
-    ),
-    (
-        crate::command_inventory::SET_SYSTEM_MUTE.name,
-        handle_set_system_mute,
-    ),
-    (
-        crate::command_inventory::AI_DJ_MODEL_DOWNLOAD.name,
-        handle_ai_dj_model_download,
-    ),
-    (crate::command_inventory::VPN_STATUS.name, handle_vpn_status),
-    (
-        crate::command_inventory::VPN_SETTINGS.name,
-        handle_vpn_settings,
-    ),
-    (
-        crate::command_inventory::VPN_LIST_SERVERS.name,
-        handle_vpn_list_servers,
-    ),
-    (crate::command_inventory::VPN_CONNECT.name, handle_vpn_connect),
-    (
-        crate::command_inventory::VPN_DISCONNECT.name,
-        handle_vpn_disconnect,
-    ),
-    (crate::command_inventory::VPN_PING_ALL.name, handle_vpn_ping_all),
-    (
-        crate::command_inventory::VPN_SET_AUTO_CONNECT.name,
-        handle_vpn_set_auto_connect,
-    ),
-    (
-        crate::command_inventory::TELEGRAM_STATUS.name,
-        handle_telegram_status,
-    ),
-    (
-        crate::command_inventory::TELEGRAM_CHATS.name,
-        handle_telegram_chats,
-    ),
-    (
-        crate::command_inventory::TELEGRAM_CHATS_ARCHIVE.name,
-        handle_telegram_chats_archive,
-    ),
-    (
-        crate::command_inventory::TELEGRAM_SET_ARCHIVED.name,
-        handle_telegram_set_archived,
-    ),
-    (
-        crate::command_inventory::TELEGRAM_MESSAGES_AROUND.name,
-        handle_telegram_messages_around,
-    ),
-    (
-        crate::command_inventory::EXPLORER_DRIVES.name,
-        handle_explorer_drives,
-    ),
-    (
-        crate::command_inventory::EXPLORER_PLACES.name,
-        handle_explorer_places,
-    ),
-    (
         crate::command_inventory::EXPLORER_SORT_GET.name,
         handle_explorer_sort_get,
     ),
     (
         crate::command_inventory::EXPLORER_SORT_SET.name,
         handle_explorer_sort_set,
-    ),
-    (
-        crate::command_inventory::WEATHER_CURRENT.name,
-        handle_weather_current,
     ),
     (
         crate::command_inventory::WEATHER_LOCATION_REQUEST.name,
@@ -461,10 +396,19 @@ fn handle_set_module_enabled(
 
 /// Describes the surface of this door from the inventory itself, so the reply cannot
 /// disagree with what is actually served.
-fn handle_commands(_server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+fn handle_commands(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+    // The running modules' tables, not `manifest()`: that one builds fresh module
+    // instances, which the offline CLI needs and the running app does not.
+    let registry = server.app.try_state::<crate::registry::Registry>();
+    let module_commands = registry
+        .iter()
+        .flat_map(|registry| registry.in_start_order().iter().flat_map(|module| module.commands()));
     Ok(serde_json::json!({
-        "socket": crate::command_inventory::socket_commands()
+        "socket": crate::command_inventory::ALL
             .iter()
+            .copied()
+            .chain(module_commands)
+            .filter(|spec| spec.on_socket())
             .map(|spec| serde_json::json!({
                 "name": spec.name,
                 "args": spec.args,
@@ -478,94 +422,6 @@ fn handle_commands(_server: &IpcServer, _args: &Args) -> Result<serde_json::Valu
             .collect::<Vec<_>>(),
         "note": "The socket door is read-only by policy: write commands are declared in the inventory (with access=write) but are never served here.",
     }))
-}
-
-fn handle_player_status(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "mp3-player",
-        crate::command_inventory::PLAYER_STATUS.name,
-        args,
-    )
-}
-
-fn handle_ai_dj_status(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "mp3-player",
-        crate::command_inventory::AI_DJ_STATUS.name,
-        args,
-    )
-}
-
-fn handle_list_tracks(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "mp3-player",
-        crate::command_inventory::LIST_TRACKS.name,
-        args,
-    )
-}
-
-fn handle_list_playlists(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "mp3-player",
-        crate::command_inventory::LIST_PLAYLISTS.name,
-        args,
-    )
-}
-
-fn handle_get_submodules(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "mp3-player",
-        crate::command_inventory::GET_SUBMODULES.name,
-        args,
-    )
-}
-
-fn handle_get_system_volume(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "glyph-bar",
-        crate::command_inventory::GET_SYSTEM_VOLUME.name,
-        args,
-    )
-}
-
-fn handle_set_system_volume(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "glyph-bar",
-        crate::command_inventory::SET_SYSTEM_VOLUME.name,
-        args,
-    )
-}
-
-fn handle_set_system_mute(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "glyph-bar",
-        crate::command_inventory::SET_SYSTEM_MUTE.name,
-        args,
-    )
-}
-
-/// The mp3-player module's UI-door write: starts the AI DJ model download.
-/// The module answers immediately (`started` / `running` / `already_present`);
-/// the download itself runs in its own thread and publishes progress through
-/// the `ai-dj-model` event, so this handler never blocks on the network.
-fn handle_ai_dj_model_download(
-    server: &IpcServer,
-    args: &Args,
-) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "mp3-player",
-        crate::command_inventory::AI_DJ_MODEL_DOWNLOAD.name,
-        args,
-    )
 }
 
 /// The UI door's write command: it needs a route here like any other, because a command
@@ -583,182 +439,6 @@ fn handle_frontend_log(_server: &IpcServer, args: &Args) -> Result<serde_json::V
     Ok(serde_json::Value::Null)
 }
 
-/// Module→handler registry: the kernel knows a module by **id**, never by its state
-/// type. A module that needs application state downcasts the opaque host itself.
-///
-/// So extending the socket surface means: implement `ipc_call` in the module crate,
-/// declare the command in the inventory, add one line here. This router no longer
-/// names any module's state type — the test below enforces that.
-type ModuleRoute = (&'static str, unidtk_api::commands::ModuleIpcFn);
-
-static MODULE_ROUTES: &[ModuleRoute] = &[
-    ("glyph-bar", glyph_bar::ipc_call),
-    ("explorer", explorer::ipc_call),
-    ("vpn", vpn::ipc_call),
-    ("telegram", telegram::ipc_call),
-    ("mp3-player", music::ipc_call),
-    ("micrographics", micrographics::ipc_call),
-];
-
-fn call_module(
-    server: &IpcServer,
-    module_id: &str,
-    cmd: &str,
-    args: &Args,
-) -> Result<serde_json::Value, String> {
-    let handler = MODULE_ROUTES
-        .iter()
-        .find(|(id, _)| *id == module_id)
-        .map(|(_, handler)| *handler)
-        .ok_or_else(|| format!("module '{module_id}' does not serve the socket door"))?;
-    let host = &server.app as &(dyn std::any::Any + Send + Sync);
-    match handler(cmd, &serde_json::Value::Object(args.clone()), Some(host)) {
-        Some(result) => result,
-        None => Err(format!(
-            "module '{module_id}' is registered but does not handle '{cmd}'"
-        )),
-    }
-}
-
-fn handle_vpn_status(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(server, "vpn", crate::command_inventory::VPN_STATUS.name, args)
-}
-
-fn handle_vpn_settings(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "vpn",
-        crate::command_inventory::VPN_SETTINGS.name,
-        args,
-    )
-}
-
-fn handle_vpn_list_servers(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "vpn",
-        crate::command_inventory::VPN_LIST_SERVERS.name,
-        args,
-    )
-}
-
-/// The VPN writes. Routed exactly like the reads: the kernel still does not know the
-/// module's state type, it addresses `vpn` by id, and the door policy decides who may
-/// call these at all.
-fn handle_vpn_connect(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "vpn",
-        crate::command_inventory::VPN_CONNECT.name,
-        args,
-    )
-}
-
-fn handle_vpn_disconnect(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "vpn",
-        crate::command_inventory::VPN_DISCONNECT.name,
-        args,
-    )
-}
-
-fn handle_vpn_ping_all(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "vpn",
-        crate::command_inventory::VPN_PING_ALL.name,
-        args,
-    )
-}
-
-fn handle_vpn_set_auto_connect(
-    server: &IpcServer,
-    args: &Args,
-) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "vpn",
-        crate::command_inventory::VPN_SET_AUTO_CONNECT.name,
-        args,
-    )
-}
-
-fn handle_telegram_status(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "telegram",
-        crate::command_inventory::TELEGRAM_STATUS.name,
-        args,
-    )
-}
-
-fn handle_telegram_chats(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "telegram",
-        crate::command_inventory::TELEGRAM_CHATS.name,
-        args,
-    )
-}
-
-fn handle_telegram_chats_archive(
-    server: &IpcServer,
-    args: &Args,
-) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "telegram",
-        crate::command_inventory::TELEGRAM_CHATS_ARCHIVE.name,
-        args,
-    )
-}
-
-/// The UI door's write: a command that arrived over the WebSocket is dispatched
-/// here too, so it needs a route like any other — its Tauri twin is a different
-/// transport, not a substitute.
-fn handle_telegram_set_archived(
-    server: &IpcServer,
-    args: &Args,
-) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "telegram",
-        crate::command_inventory::TELEGRAM_SET_ARCHIVED.name,
-        args,
-    )
-}
-
-fn handle_telegram_messages_around(
-    server: &IpcServer,
-    args: &Args,
-) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "telegram",
-        crate::command_inventory::TELEGRAM_MESSAGES_AROUND.name,
-        args,
-    )
-}
-
-fn handle_explorer_drives(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "explorer",
-        crate::command_inventory::EXPLORER_DRIVES.name,
-        args,
-    )
-}
-
-fn handle_explorer_places(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "explorer",
-        crate::command_inventory::EXPLORER_PLACES.name,
-        args,
-    )
-}
-
 fn handle_explorer_sort_get(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
     let (col, asc) = server.db.get_explorer_sort()?;
     Ok(serde_json::json!({ "column": col, "ascending": asc }))
@@ -769,20 +449,6 @@ fn handle_explorer_sort_set(server: &IpcServer, args: &Args) -> Result<serde_jso
     let asc = args.get("ascending").and_then(|v| v.as_bool()).unwrap_or(true);
     server.db.set_explorer_sort(col, asc)?;
     Ok(serde_json::json!({ "ok": true }))
-}
-
-/// The ambient observation behind the micrographics panel.
-///
-/// A pure read of the module's last fetch: the module answers it in microseconds
-/// from a snapshot the background thread already took, so nothing here can be
-/// stalled by a slow network.
-fn handle_weather_current(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(
-        server,
-        "micrographics",
-        crate::command_inventory::WEATHER_CURRENT.name,
-        args,
-    )
 }
 
 fn handle_weather_location_request(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
@@ -813,13 +479,17 @@ mod route_tests {
     }
 
     /// The socket subset is what the CLI sees, so it must be routable too — kept as its
-    /// own check so a failure says which door lost the command.
+    /// own check so a failure says which door lost the command. A module's socket
+    /// command is served by the module's table, which generates its handler, and the
+    /// registry must find its module.
     #[test]
     fn every_socket_command_has_a_handler() {
+        let module_commands = crate::registry::all_module_commands();
         for spec in crate::command_inventory::socket_commands() {
             assert!(
-                ROUTES.iter().any(|(name, _)| *name == spec.name),
-                "inventory command '{}' is served on the socket but has no route handler",
+                ROUTES.iter().any(|(name, _)| *name == spec.name)
+                    || module_commands.iter().any(|(_, module_spec)| module_spec.name == spec.name),
+                "command '{}' is served on the socket but neither the kernel nor a module handles it",
                 spec.name
             );
         }
@@ -835,58 +505,54 @@ mod route_tests {
         }
     }
 
+    /// The spec of any command of the application, the kernel's or a module's.
+    fn spec(name: &str) -> Option<&'static CommandSpec> {
+        crate::command_inventory::manifest().into_iter().find(|spec| spec.name == name)
+    }
+
+    fn door(name: &str, door: Door) -> Result<(), String> {
+        check_door(name, spec(name), door)
+    }
+
     /// The policy that was silently wrong before: one rule was applied to both doors, so
     /// the UI's authenticated transport could not serve a state change at all — a write
     /// command was refused everywhere, which made it unreachable rather than safe.
     #[test]
     fn a_write_command_is_refused_on_the_socket_and_answered_on_the_ui() {
-        use unidtk_api::commands::Door;
-        let write = crate::command_inventory::ALL
-            .iter()
-            .copied()
-            .find(|spec| spec.is_write())
-            .expect("the inventory must describe at least one write command");
-        assert!(
-            check_door(write.name, Door::Socket).is_err(),
-            "write command '{}' must stay off the unauthenticated socket",
-            write.name
-        );
-        assert!(
-            check_door(write.name, Door::Ui).is_ok(),
-            "write command '{}' must be reachable from the UI, or it cannot run at all",
-            write.name
-        );
+        for name in ["set_module_enabled", "set_system_volume", "vpn_connect", "telegram_send_message"] {
+            assert!(door(name, Door::Socket).is_err(), "write command '{name}' must stay off the unauthenticated socket");
+            assert!(door(name, Door::Ui).is_ok(), "write command '{name}' must be reachable from the UI, or it cannot run at all");
+        }
     }
 
     #[test]
     fn a_read_command_is_served_on_both_doors() {
-        use unidtk_api::commands::Door;
-        // Selected by the property under test, not by position: the first read in the
-        // inventory is a CLI-only probe (`ping`), and picking it by index made this test
-        // assert the opposite of what the manifest says.
-        let read = crate::command_inventory::ALL
-            .iter()
-            .copied()
-            .find(|spec| !spec.is_write() && spec.doors.contains(&Door::Ui))
-            .expect("the inventory must describe at least one read served on both doors");
-        assert!(check_door(read.name, Door::Socket).is_ok());
-        assert!(check_door(read.name, Door::Ui).is_ok());
+        for name in ["get_widget_config", "vpn_status", "player_status", "get_drives", "weather_current"] {
+            assert!(door(name, Door::Socket).is_ok(), "'{name}' was served by the socket and must stay so");
+            assert!(door(name, Door::Ui).is_ok());
+        }
+    }
+
+    /// The socket surface does not grow with the interface's getters: a file preview
+    /// read through the unauthenticated socket would hand any local process the user's files.
+    #[test]
+    fn an_interface_read_is_not_offered_to_the_socket() {
+        for name in ["get_file_preview", "get_text_preview", "telegram_messages"] {
+            assert!(door(name, Door::Socket).is_err(), "'{name}' must stay off the socket");
+            assert!(door(name, Door::Ui).is_ok());
+        }
     }
 
     #[test]
     fn a_cli_only_read_is_not_offered_to_the_ui() {
-        use unidtk_api::commands::Door;
         let cli = crate::command_inventory::ALL
             .iter()
             .copied()
             .find(|spec| !spec.is_write() && !spec.doors.contains(&Door::Ui))
             .expect("the inventory must describe at least one read only the tool door serves");
+        assert!(door(cli.name, Door::Socket).is_ok(), "a tool-door read must work on the tool door");
         assert!(
-            check_door(cli.name, Door::Socket).is_ok(),
-            "a tool-door read must work on the tool door"
-        );
-        assert!(
-            check_door(cli.name, Door::Ui).is_err(),
+            door(cli.name, Door::Ui).is_err(),
             "claiming the UI door for '{}' would promise a command the interface cannot call",
             cli.name
         );
@@ -894,10 +560,9 @@ mod route_tests {
 
     #[test]
     fn an_unknown_command_is_refused_on_every_door() {
-        use unidtk_api::commands::Door;
         let unknown = "definitely_not_a_command";
-        assert!(check_door(unknown, Door::Socket).is_err());
-        assert!(check_door(unknown, Door::Ui).is_err());
+        assert!(door(unknown, Door::Socket).is_err());
+        assert!(door(unknown, Door::Ui).is_err());
     }
 
     #[test]
@@ -925,7 +590,7 @@ mod route_tests {
             assert!(
                 !SOURCE.contains(&needle),
                 "core/kernel/ipc.rs must not refer to a module state type (`{needle}`); \
-                 modules answer their own commands through `ipc_call`"
+                 modules answer their own commands through `Module::dispatch`"
             );
         }
     }

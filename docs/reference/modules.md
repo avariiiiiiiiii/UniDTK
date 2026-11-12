@@ -33,9 +33,9 @@ r[modules.no-module-to-module]
 
 Modules do not call each other, and Cargo must not allow one module crate to depend on another. They talk only through the contract's events: `unidtk_api::emit`, `subscribe`, and `state`.
 
-r[modules.commands-in-core]
+r[modules.command-table]
 
-`#[tauri::command]` is declared only in the crate that holds `generate_handler!`, which is the kernel. A library crate must not mark a command `pub`: the macro exports `__cmd__<name>` to the crate root, and two of them collide with error `E0255`. A module exposes plain functions; the kernel wraps them in thin commands.
+A module declares each of its commands once, in a `unidtk_api::module_commands!` table in its own crate: the access, the name, a summary, the arguments and the body. The table generates the module's `COMMANDS` and its `dispatch_command`, which the module returns from `Module::commands` and `Module::dispatch`, so a declared command always has a handler. The kernel's registry maps each name to its module and refuses a name that two modules, or a module and the kernel, both claim. Every door serves a module command through `ipc::serve_module` in `core/kernel/ipc.rs`, on a thread that is never the main thread; the Tauri door reaches it from the kernel's `invoke_handler`, so a module has no `#[tauri::command]`. An argument is read by its Rust name in camelCase, then in snake_case. A read that only the interface needs is `read_ui`, so the socket surface does not grow with it ([ipc.socket-read-only](ipc.md#r-ipc.socket-read-only)).
 
 r[modules.idempotent]
 
@@ -45,7 +45,8 @@ Commands must be safe to repeat. The interface, the CLI, and tests call them fro
 
 The contract crate is `core/api` (package `unidtk-api`). It must not depend on `tauri`, `redb`, or Win32.
 
-- `Module` trait: `id`, `dependencies`, `starts_after`, `init(ModuleContext)`, `begin_shutdown`, `shutdown(budget)`, `suspend`, `resume(ModuleContext)`.
+- `Module` trait: `id`, `dependencies`, `starts_after`, `init(ModuleContext)`, `begin_shutdown`, `shutdown(budget)`, `suspend`, `resume(ModuleContext)`, `commands`, `dispatch`.
+- Commands: `CommandSpec` and the `module_commands!` table (`unidtk_api::commands`).
 - Services: `log`, `emit`, `subscribe`, `state`, and `paths`.
 - Storage: `ModuleContext::store(StoreSpec)` returns a `ModuleDb`. See [Storage](storage.md).
 

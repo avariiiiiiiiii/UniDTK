@@ -42,6 +42,8 @@ pub trait Module: Send + Sync {
     fn resume(&self, ctx: ModuleContext) -> Result<(), String> {
         self.init(ctx)
     }
+    fn commands(&self) -> &'static [commands::CommandSpec] { &[] }
+    fn dispatch(&self, _cmd: &str, _args: &Value) -> Option<Result<Value, String>> { None }
 }
 ```
 
@@ -53,6 +55,7 @@ Each method has one job:
 - `init` starts the module. It receives a `ModuleContext` by value, so the module owns the context from then on.
 - `begin_shutdown` raises the module's exit latches. On exit the kernel calls it on every module before it stops any, so that no stop can start another module's work again. It must be cheap and must not wait.
 - `shutdown` stops the module's threads and processes. It receives a time budget, and the module must finish within it. A zero budget means "do not wait at all", because the caller is the main thread.
+- `commands` and `dispatch` are the module's commands: what it serves, and the call that serves one. Both usually come from the module's command table, section 4.5.
 - `suspend` and `resume` are the switch for a running app. Their defaults call `shutdown` and `init`, so most modules get switching for free. A module that overrides them must not set a global flag that means "the app is exiting", because the app keeps running.
 
 The trait requires `Send + Sync`, because the kernel keeps each module in its registry, which Tauri's managed state holds and every thread can reach.
@@ -127,17 +130,12 @@ The diagnostic branch runs under `udtk doctor`. It must not start a thread that 
 
 ## 4.4 How the kernel creates a module
 
-The kernel has no plugin loader. It builds every module at the top of the `setup` closure in `core/kernel/main.rs` and hands the list to a `Registry` (in `core/kernel/registry.rs`), which is the only place that starts, switches and stops modules. Building a module starts nothing; `init` does.
+The kernel has no plugin loader. At the top of the `setup` closure in `core/kernel/main.rs` it builds every module from the factory list `all_modules()` and hands them to a `Registry` (both in `core/kernel/registry.rs`), which is the only place that starts, switches and stops modules, and the only place that knows which module serves which command. Building a module starts nothing; `init` does.
 
 Filename: core/kernel/main.rs (abridged)
 
 ```rust
-let registry = registry::Registry::new(vec![
-    glyph_bar_module,
-    explorer_module.clone(),
-    vpn_module.clone(),
-    // ... telegram, mp3-player, micrographics
-])?;
+let registry = registry::Registry::new(registry::all_modules().into_iter().map(Arc::from).collect())?;
 app.manage(registry);
 // ...
 for module in app.state::<registry::Registry>().in_start_order() {
@@ -147,17 +145,35 @@ for module in app.state::<registry::Registry>().in_start_order() {
 }
 ```
 
-The start order comes from the modules themselves. `Module::starts_after` returns the ids a module must start after, and `Registry::new` sorts the list by it, keeping the given order where nothing constrains it. Telegram names `vpn`. An unknown id, a cycle or an id registered twice is a startup error. `starts_after` is not `dependencies`: the second lists files and scheduled tasks for `udtk doctor`.
+The start order comes from the modules themselves. `Module::starts_after` returns the ids a module must start after, and `Registry::new` sorts the list by it, keeping the given order where nothing constrains it. Telegram names `vpn`. An unknown id, a cycle, an id registered twice, or a command name that two modules (or a module and the kernel) both declare is a startup error. `starts_after` is not `dependencies`: the second lists files and scheduled tasks for `udtk doctor`.
 
 `disabled_module_set` reads the switched-off list from the database, and `init` gets a context whose `enabled` flag comes from that list. The `?` after `init` matters. If `init` returns an error, the setup closure fails, and Tauri stops the start-up with that error. A module that can fail at startup must report the failure as a value it can recover from, or it must not return an error at all.
 
-Note: the commands' typed state (`VpnRuntime`, `TelegramRuntime`, the explorer search, the weather runtime) is registered after the loop, because a command that arrives before `init` filled the shared cell would find the state "not ready" forever. The music player loads its library on a thread of its own, started from its `init`, and registers its state with the host when the load is done.
+Note: a module keeps its own state (`VpnRuntime`, `TelegramRuntime`, the explorer search, the weather runtime), and its commands read it from the module, so the kernel registers no module state with Tauri. A command that arrives before the state exists answers "not ready". The music player loads its library on a thread of its own, started from its `init`, and its commands answer "music core not ready yet" until the load is done.
 
-Warning: the registry knows every module, but two other lists still name them. The socket routes in `core/kernel/ipc.rs` are one, and the Tauri command list in `main.rs` is the other. The build lint checks `ALL_MODULE_IDS` in the registry against the folders on disk, see section 4.8.
+Warning: `all_modules()` and `ALL_MODULE_IDS` in the registry are the only lists that name the modules. The build lint checks `ALL_MODULE_IDS` against the folders on disk, see section 4.8.
 
 ## 4.5 The calls during a run
 
-After startup, the kernel calls a module in four situations. It calls `init` once, at startup, as shown above. It calls `suspend` or `resume` when the user switches the module, described in section 4.6. On exit it calls `begin_shutdown` on every module and then `shutdown` on each.
+After startup, the kernel calls a module in five situations. It calls `init` once, at startup, as shown above. It calls `dispatch` when a door asks for one of the module's commands. It calls `suspend` or `resume` when the user switches the module, described in section 4.6. On exit it calls `begin_shutdown` on every module and then `shutdown` on each.
+
+A module declares its commands in one table, with the `module_commands!` macro from `unidtk-api`. Each entry gives the access, the name, a summary, the arguments and the body.
+
+Filename: modules/glyph-bar/rust/glyph_bar.rs
+
+```rust
+unidtk_api::module_commands! {
+    impl GlyphBarModule {
+        read_only "get_system_volume" "Windows master volume" |this| get_system_volume();
+        write "set_system_volume" "Set the master volume, 0 to 100" |this, level: u64| set_system_volume(volume_level(level));
+        write "set_system_mute" "Mute or unmute the master volume" |this, muted: bool| set_system_mute(muted);
+    }
+}
+```
+
+The macro generates two items on the module type: `COMMANDS`, the specs, and `dispatch_command`, which reads each argument by name and runs the body. The module returns them from `Module::commands` and `Module::dispatch`. Because one table generates both, a command cannot be declared without a handler, and the kernel does not list module commands anywhere. The access names the `CommandSpec` constructor from chapter 3: `read_only` is served on both doors, `read_ui` and `write` only on the page's. `this` is the module itself, so a body reaches the module's state as `this.runtime`.
+
+An argument is read by its Rust name, first in camelCase (`chatId`, what the page sends) and then in snake_case (`chat_id`, what a tool may send). A missing argument reads as `null`, so an `Option` parameter is `None` and a required one fails with its name. The body must evaluate to `Result<T, String>`, and the kernel always calls `dispatch` on a blocking thread, so a body may block, and an async body is driven with `tauri::async_runtime::block_on`.
 
 The exit path is `app_shutdown` in `core/kernel/main.rs`. It runs once (a second exit route waits for the first), and it hands the modules to the registry.
 

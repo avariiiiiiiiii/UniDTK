@@ -12,8 +12,8 @@ pub fn create_shared_search() -> SharedSearch {
     Arc::new(Mutex::new(SearchEngine::new(100)))
 }
 
-/// Explorer module: its only state is the search index, which the core
-/// puts into managed state for the command wrappers.
+/// Explorer module: its only state is the search index, which its commands
+/// read from here.
 pub struct ExplorerModule {
     search: SharedSearch,
 }
@@ -23,10 +23,6 @@ impl ExplorerModule {
         Self {
             search: create_shared_search(),
         }
-    }
-
-    pub fn search(&self) -> SharedSearch {
-        self.search.clone()
     }
 }
 
@@ -56,6 +52,70 @@ impl unidtk_api::Module for ExplorerModule {
 
     fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> {
         Ok(())
+    }
+
+    fn commands(&self) -> &'static [unidtk_api::commands::CommandSpec] {
+        Self::COMMANDS
+    }
+
+    fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
+        self.dispatch_command(cmd, args)
+    }
+}
+
+// The answers keep the shapes of the Tauri commands of the same names.
+
+/// Runs an async command body on the blocking thread the kernel dispatches on.
+fn block<F: std::future::Future>(future: F) -> F::Output {
+    tauri::async_runtime::block_on(future)
+}
+
+unidtk_api::module_commands! {
+    impl ExplorerModule {
+        read_ui "scan_directory" "Entries of a folder" |this, path: String| block(crate::commands::scan_directory(path));
+        read_ui "scan_directory_full" "Entries of a folder with sizes and details" |this, path: String| block(crate::commands::scan_directory_full(path));
+        read_only "get_drives" "Mounted drives" |this| block(crate::commands::get_drives());
+        read_only "get_user_places" "User shell folders" |this| crate::commands::get_user_places();
+        read_ui "path_is_directory" "Whether a path is a folder" |this, path: String| crate::commands::path_is_directory(path);
+        read_ui "get_raw_drives" "Drives without a file system" |this| crate::commands::get_raw_drives();
+        read_ui "get_unmounted_volumes" "Volumes without a drive letter" |this| crate::commands::get_unmounted_volumes();
+        read_ui "is_drive_removable" "Whether a drive is removable" |this, drive: String| crate::commands::is_drive_removable(drive);
+        read_ui "get_portable_devices" "Portable devices" |this| crate::commands::get_portable_devices();
+        read_ui "get_portable_contents" "Contents of a portable device" |this, device_id: String| crate::commands::get_portable_contents(device_id);
+        write "copy_to_clipboard" "Put paths on the clipboard, to copy or cut" |this, paths: Vec<String>, cut: bool| crate::commands::copy_to_clipboard(paths, cut);
+        read_ui "paste_from_clipboard" "Paths on the clipboard" |this| crate::commands::paste_from_clipboard();
+        write "clear_clipboard" "Empty the clipboard" |this| crate::commands::clear_clipboard();
+        read_ui "file_exists" "Whether a path exists" |this, path: String| crate::commands::file_exists(path);
+        read_ui "get_file_info" "Size, dates and attributes of a path" |this, path: String| crate::commands::get_file_info(path);
+        read_ui "format_file_size" "A byte count for people" |this, bytes: u64| Ok(crate::commands::format_file_size(bytes));
+        read_ui "get_file_type_name" "The Windows name of a file type" |this, extension: String| Ok(crate::commands::get_file_type_name(extension));
+        read_ui "is_valid_filename" "Whether a file name is allowed" |this, name: String| crate::commands::is_valid_filename(name);
+        write "delete_to_recycle_bin" "Move a path to the Recycle Bin" |this, path: String| crate::commands::delete_to_recycle_bin(path);
+        read_ui "get_folder_size" "Total size of a folder" |this, path: String| crate::commands::get_folder_size(path);
+        read_ui "sort_files" "Sort entries by a column" |this, files: Vec<crate::fs::FileItem>, column: String, ascending: bool| crate::commands::sort_files(files, column, ascending);
+        read_ui "search_files" "Search the index" |this, query: String| Ok(crate::commands::search_files(&this.search, query));
+        write "build_search_index" "Index a folder for search" |this, root: String| { crate::commands::build_search_index(&this.search, root); Ok(()) };
+        write "remove_from_search_index" "Drop a path from the search index" |this, path: String| { crate::commands::remove_from_search_index(&this.search, path); Ok(()) };
+        write "clear_search_index" "Empty the search index" |this| { crate::commands::clear_search_index(&this.search); Ok(()) };
+        read_ui "get_search_suggestions" "Names that start with a prefix" |this, prefix: String, limit: usize| Ok(crate::commands::get_search_suggestions(&this.search, prefix, limit));
+        read_ui "hash_file" "MD5 and SHA-256 of a file" |this, path: String| crate::commands::hash_file(path);
+        read_ui "hash_file_md5" "MD5 of a file" |this, path: String| crate::commands::hash_file_md5(path);
+        read_ui "hash_file_sha256" "SHA-256 of a file" |this, path: String| crate::commands::hash_file_sha256(path);
+        read_ui "get_archive_info" "Entries of an archive" |this, path: String| crate::commands::get_archive_info(path);
+        write "extract_archive" "Extract an archive into a folder" |this, archive_path: String, dest_dir: String| crate::commands::extract_archive(archive_path, dest_dir);
+        write "extract_archive_entry" "Extract one entry of an archive" |this, archive_path: String, entry_name: String, dest_dir: String| crate::commands::extract_archive_entry(archive_path, entry_name, dest_dir);
+        write "create_zip_archive" "Pack files into a ZIP archive" |this, files: Vec<String>, archive_path: String| crate::commands::create_zip_archive(files, archive_path);
+        read_ui "is_zip_file" "Whether a file is a ZIP archive" |this, path: String| Ok(crate::commands::is_zip_file(path));
+        read_ui "get_file_preview" "Preview of a file" |this, path: String| Ok(crate::commands::get_file_preview(path));
+        read_ui "get_text_preview" "The first bytes of a text file" |this, path: String, max_bytes: usize| Ok(crate::commands::get_text_preview(path, max_bytes));
+        read_ui "get_file_icon" "Icon of a file type" |this, extension: String| Ok(crate::commands::get_file_icon(extension));
+        write "open_path_default" "Open a path with its default application" |this, path: String| crate::commands::open_path_default(path);
+        write "create_directory" "Create a folder" |this, path: String| crate::commands::create_directory(path);
+        write "create_empty_file" "Create an empty file" |this, path: String| crate::commands::create_empty_file(path);
+        write "rename_path" "Rename a path" |this, from: String, to: String| crate::commands::rename_path(from, to);
+        write "copy_path" "Copy a path" |this, from: String, to: String| crate::commands::copy_path(from, to);
+        write "open_terminal" "Open a terminal in a folder" |this, path: String| crate::commands::open_terminal(path);
+        write "setup_registry_override" "Make UniDTK the default file manager" |this| crate::registry::install_as_default_file_manager();
     }
 }
 

@@ -12,7 +12,7 @@ The kernel owns:
 
 - the frame: windows, overlays, layout, lifecycle, and attaching the window to the desktop (`core/kernel/wallpaper.rs`);
 - the widget system: loading, placing, dragging, adding and removing widgets;
-- the command inventory and the event bus (`core/kernel/command_inventory.rs`, `core/kernel/events.rs`), and the list of modules (`core/kernel/registry.rs`, which the CLI reads; the kernel names each module type at startup);
+- the command inventory and the event bus (`core/kernel/command_inventory.rs`, `core/kernel/events.rs`), and the list of modules (`core/kernel/registry.rs`, which the CLI reads too; the kernel's registry starts the modules and maps each module command to its module);
 - storage: `unidtk.redb` and `unidtk_logs.redb` (see [Storage](storage.md));
 - the contract crate `unidtk-api` (`core/api`), which is all a module may depend on;
 - the IPC server and the tray.

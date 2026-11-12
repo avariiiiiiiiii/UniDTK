@@ -11,9 +11,10 @@
 //!   application and the CLI can compile the inventory;
 //! - a command is described by data, never by silence: whether it changes state is a
 //!   field, not the mere absence of an entry;
-//! - handlers are deliberately *not* part of the description: a handler needs the
-//!   kernel's typed state, so it belongs to the kernel. The description is what
-//!   travels.
+//! - a module's command is declared once, together with its handler, in the module's
+//!   [`module_commands!`](crate::module_commands) table, which generates both the
+//!   module's specs and its dispatch; the kernel's own commands are described in
+//!   `core/kernel/command_inventory.rs`.
 
 /// Whether a command only reads, or is able to change something.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -115,6 +116,20 @@ impl CommandSpec {
     /// A command that changes state. It is **never** served over the socket: that
     /// door is unauthenticated, so any local process could drive it.
     ///
+    /// A read that only the interface asks for. It stays off the socket, so the tool
+    /// door does not grow with every getter a widget needs (a file preview read through
+    /// the unauthenticated socket would hand any local process the user's files).
+    pub const fn read_ui(name: &'static str, summary: &'static str, args: &'static str) -> Self {
+        Self {
+            name,
+            summary,
+            args,
+            access: Access::ReadOnly,
+            doors: &[Door::Ui],
+            idempotency: Idempotency::Safe,
+        }
+    }
+
     /// Marked as not retry-safe by default — the conservative side for a write.
     pub const fn write(name: &'static str, summary: &'static str, args: &'static str) -> Self {
         Self {
@@ -140,27 +155,157 @@ impl CommandSpec {
     }
 }
 
-/// Opaque host handle passed to a module's command handler.
+/// Reads one argument of a command by its Rust parameter name.
 ///
-/// The kernel passes its `tauri::AppHandle`, but the contract stays free of Tauri
-/// types: a module that needs the host downcasts it, a module that does not (like
-/// `glyph-bar`) ignores the parameter entirely. This is what lets modules answer for
-/// their own commands without the kernel naming their state types.
-pub type HostHandle<'a> = &'a (dyn std::any::Any + Send + Sync);
+/// The interface sends the name in camelCase, because Tauri asked it for that while the
+/// commands were Tauri functions; a tool may send it in snake_case. A missing argument
+/// reads as `null`, so an `Option` parameter becomes `None` and a required one fails
+/// with its own name in the message.
+pub fn arg<T: serde::de::DeserializeOwned>(args: &serde_json::Value, name: &str) -> Result<T, String> {
+    let camel = camel_case(name);
+    let value = args
+        .get(&camel)
+        .or_else(|| args.get(name))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::from_value(value).map_err(|e| format!("argument '{camel}': {e}"))
+}
 
-/// Signature of a module's command handler, as registered by the kernel.
+/// `chat_id` → `chatId`: the name the interface uses for a parameter.
+pub fn camel_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut upper = false;
+    for c in name.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.extend(c.to_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Turns a command's result into the reply value.
+pub fn reply<T: serde::Serialize>(result: Result<T, String>) -> Result<serde_json::Value, String> {
+    result.and_then(|value| serde_json::to_value(value).map_err(|e| e.to_string()))
+}
+
+/// Declares a module's commands, each in one place.
 ///
-/// Returns `None` when the module does not know the command — the caller then reports
-/// it as a build inconsistency rather than guessing.
-pub type ModuleIpcFn = fn(
-    cmd: &str,
-    args: &serde_json::Value,
-    host: Option<HostHandle<'_>>,
-) -> Option<Result<serde_json::Value, String>>;
+/// Every entry gives the access (`read_only`, `read_ui` or `write`: the [`CommandSpec`]
+/// constructor of that name), the command's name and summary, then the module and the
+/// arguments as closure parameters, and a body that evaluates to `Result<T, String>`
+/// for a serializable `T`. The macro generates the module's `COMMANDS` and its
+/// `dispatch_command`, so a spec and its handler cannot drift apart. The arguments are
+/// read with [`arg`].
+///
+/// ```ignore
+/// unidtk_api::module_commands! {
+///     impl VpnModule {
+///         read_only "vpn_status" "VPN runtime status" |this| Ok(status(&this.runtime));
+///         write "vpn_connect" "Connect to a server" |this, tag: Option<String>| connect(&this.runtime, tag);
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! module_commands {
+    (
+        impl $module:ty {
+            $(
+                $access:ident $name:literal $summary:literal
+                |$this:ident $(, $arg:ident : $argty:ty)* $(,)?| $body:expr;
+            )*
+        }
+    ) => {
+        impl $module {
+            /// This module's commands, as the kernel's inventory lists them.
+            pub const COMMANDS: &'static [$crate::commands::CommandSpec] = &[
+                $(
+                    $crate::commands::CommandSpec::$access(
+                        $name,
+                        $summary,
+                        concat!($(stringify!($arg), " ",)*),
+                    ),
+                )*
+            ];
+
+            /// Runs one of [`Self::COMMANDS`]; `None` for a name this module does not own.
+            pub fn dispatch_command(
+                &self,
+                cmd: &str,
+                args: &$crate::__serde_json::Value,
+            ) -> Option<Result<$crate::__serde_json::Value, String>> {
+                match cmd {
+                    $(
+                        $name => Some((|| -> Result<$crate::__serde_json::Value, String> {
+                            #[allow(unused_variables)]
+                            let $this = self;
+                            $( let $arg: $argty = $crate::commands::arg(args, stringify!($arg))?; )*
+                            $crate::commands::reply($body)
+                        })()),
+                    )*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_argument_is_read_in_camel_case_then_snake_case() {
+        let args = serde_json::json!({ "chatId": "7", "thread_id": 3 });
+        assert_eq!(arg::<String>(&args, "chat_id").unwrap(), "7");
+        assert_eq!(arg::<i64>(&args, "thread_id").unwrap(), 3);
+        assert_eq!(camel_case("custom_emoji_id"), "customEmojiId");
+        assert_eq!(camel_case("path"), "path");
+    }
+
+    #[test]
+    fn a_missing_argument_is_none_or_names_itself() {
+        let args = serde_json::json!({});
+        assert_eq!(arg::<Option<String>>(&args, "tag").unwrap(), None);
+        let error = arg::<String>(&args, "chat_id").unwrap_err();
+        assert!(error.contains("chatId"), "the error names the argument: {error}");
+    }
+
+    struct Probe(u32);
+
+    crate::module_commands! {
+        impl Probe {
+            read_only "probe_value" "The value" |this| Ok(this.0);
+            write "probe_add" "Adds to the value" |this, amount: u32, label: Option<String>| Ok(format!("{}{}", label.unwrap_or_default(), this.0 + amount));
+        }
+    }
+
+    #[test]
+    fn the_table_declares_and_dispatches_the_same_commands() {
+        let names: Vec<_> = Probe::COMMANDS.iter().map(|spec| spec.name).collect();
+        assert_eq!(names, ["probe_value", "probe_add"]);
+        assert!(Probe::COMMANDS[0].on_socket() && Probe::COMMANDS[1].is_write());
+        assert_eq!(Probe::COMMANDS[1].args, "amount label ");
+        let probe = Probe(2);
+        assert_eq!(probe.dispatch_command("probe_value", &serde_json::json!({})), Some(Ok(serde_json::json!(2))));
+        assert_eq!(
+            probe.dispatch_command("probe_add", &serde_json::json!({ "amount": 3, "label": "n=" })),
+            Some(Ok(serde_json::json!("n=5")))
+        );
+        assert!(probe.dispatch_command("probe_add", &serde_json::json!({})).unwrap().is_err());
+        assert_eq!(probe.dispatch_command("other", &serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn an_interface_read_stays_off_the_socket() {
+        let spec = CommandSpec::read_ui("get_file_preview", "Preview a file", "");
+        assert!(!spec.is_write() && spec.is_retry_safe());
+        assert_eq!(spec.doors, &[Door::Ui]);
+    }
 
     #[test]
     fn write_commands_stay_off_the_socket() {

@@ -4,15 +4,15 @@ This chapter records the decisions behind the structure. The history of how each
 
 ## 6.1 One contract, two doors
 
-The command surface used to be written down three times: a `match` in the kernel, a list in the `commands` reply, and the Tauri command list. Adding a module command meant editing the kernel in three places. The decision was to describe the surface **once**, as data (the inventory of Chapter 2), and to make both doors read that data. The Tauri wrappers stay handwritten, because they carry the Tauri injection (`State`, `AppHandle`) that only the kernel can express. Their names are checked against the inventory by a test.
+The command surface used to be written down three times: a `match` in the kernel, a list in the `commands` reply, and the Tauri command list. Adding a module command meant editing the kernel in three places. The decision was to describe the surface **once**, as data (the inventory of Chapter 2), and to make both doors read that data. The kernel's own Tauri commands stay handwritten, because they carry the Tauri injection (`State`, `AppHandle`) that only the kernel can express, and a test checks their names against the inventory. A module's commands have no Tauri wrapper: the kernel's `invoke_handler` sends them to the module's table, which declares and serves each one in a single line.
 
 ## 6.2 A manifest built into both binaries
 
-The manifest is a static build artifact, compiled into the kernel and into `udtk`. It must not be produced by instantiating the modules. The reason is concrete: building the list from `registry::all_modules()` would create second instances of the modules. That means a repeated VPN auto-connect, a second TDLib, and a race with the deferred start of the player. The CLI does call `registry::all_modules()` in `doctor -env`, but only to read `Module::dependencies()`, which does not start anything.
+The manifest is compiled into the kernel and into `udtk`: the kernel's commands as constants, each module's as the table in its crate. The offline CLI lists the modules' commands by building them with `registry::all_modules()` and asking each for `Module::commands()`. That is safe only because building a module starts nothing: the VPN auto-connect, TDLib and the player's library load all begin in `init`, which the CLI never calls (the same holds for `doctor -env`, which reads `Module::dependencies()`). The running kernel does not build second instances at all: its `commands` reply reads the tables of the modules in its registry.
 
 ## 6.3 Modules own their state
 
-The kernel no longer names module types in its router. Each module answers for its own commands through `ipc_call`, and fetches its state from the host handle itself. A third-party module can add a command in three steps: declare it in the inventory, implement it in `ipc_call`, and add one line to `MODULE_ROUTES`. No kernel code changes. This is true for the socket and the UI door. For the Tauri wrappers it stays true only while they exist.
+The kernel does not name module types in its router, and it registers no module state with Tauri. Each module keeps its own state and declares its commands in one table in its crate (`unidtk_api::module_commands!`), which generates the specs and the dispatch together. A module adds a command by adding one line to its table. No kernel code changes, on any door: the socket, the WebSocket and Tauri's `invoke` all reach the module through `serve_module` and the registry.
 
 ## 6.4 Rejected alternatives
 

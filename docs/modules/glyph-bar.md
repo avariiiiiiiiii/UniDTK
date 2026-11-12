@@ -22,7 +22,7 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 | [modules/glyph-bar/ui/glyph-bar.css](../../modules/glyph-bar/ui/glyph-bar.css) | LED styles, and the Jelly material, which draws the level as one fill (176 lines). |
 | [modules/glyph-bar/ui/metadata.json](../../modules/glyph-bar/ui/metadata.json) | Declares `specialType: "glyph-bar"`, the tint slot, and `backend: true`. |
 | [core/api/src/lib.rs](../../core/api/src/lib.rs) | The contract: `emit`, `subscribe`, `state`. |
-| [core/kernel/main.rs](../../core/kernel/main.rs) | Starts the module, registers the Tauri commands, and sets the emitter that sends events to the page. |
+| [core/kernel/main.rs](../../core/kernel/main.rs) | Starts the module through the registry, serves its commands from the Tauri door, and sets the emitter that sends events to the page. |
 | [core/kernel/events.rs](../../core/kernel/events.rs) | The event broker that serves the socket door and keeps the newest `system-volume` value. |
 | [core/kernel/ipc.rs](../../core/kernel/ipc.rs) | Routes the socket commands to the module. |
 | [core/ui/unidtk-bridge.js](../../core/ui/unidtk-bridge.js) | Chooses, per call, between the Tauri door and the socket door. |
@@ -186,7 +186,7 @@ Clicking segment 0 instead toggles the mute with `set_system_mute`.
 
 ### 6.4 The Rust side of a write
 
-The page's `invoke` reaches a kernel Tauri command, which calls a plain function in the module:
+The page's `invoke` reaches the module's command table, whose body calls a plain function in the module:
 
 ```rust
 // Filename: modules/glyph-bar/rust/glyph_bar.rs (lines 130-146, abridged)
@@ -207,13 +207,13 @@ pub fn set_system_volume(level: u8) -> Result<SystemVolume, String> {
 - A level above zero also clears the mute. A level of zero leaves the mute flag alone.
 - The function returns a fresh `read_volume()`, so the page adopts the value the system reports, not the value it asked for.
 
-The kernel wraps these functions in Tauri commands with the same names (`core/kernel/main.rs`, lines 383-394), registered at lines 2246-2248.
+The module declares the three commands in its table (`unidtk_api::module_commands!`, glyph_bar.rs), under the names the page calls. `set_system_volume` reads its `level` as a `u64` and clamps it with `volume_level` before it narrows to `u8`, so 300 sets 100, not 44.
 
 ---
 
 ## Step 7: The socket door
 
-The same three operations are answered on the socket. [core/kernel/ipc.rs](../../core/kernel/ipc.rs) routes them by module id through `MODULE_ROUTES`, and the module's `ipc_call` (glyph_bar.rs, lines 264-295) matches the command name and converts the level argument. The command inventory marks `get_system_volume` as a read and the other two as writes ([core/kernel/command_inventory.rs](../../core/kernel/command_inventory.rs), lines 71-82). In the bridge, a write goes over the socket only in the `ws` transport; otherwise it goes to Tauri.
+The same table serves every door. The socket and the WebSocket reach it through `serve_module` in [core/kernel/ipc.rs](../../core/kernel/ipc.rs), and Tauri through the kernel's `invoke_handler`. The table marks `get_system_volume` as `read_only`, served on the socket too, and the other two as writes, which the socket refuses. In the bridge, a write goes over the socket only in the `ws` transport; otherwise it goes to Tauri.
 
 ---
 
@@ -236,7 +236,6 @@ The page stores one thing: the strip's size in the desk configuration. `renderGl
 
 ## Known gaps
 
-- **The socket write truncates the level before clamping.** `ipc_call` converts the argument with `level as u8` (glyph_bar.rs, line 281). `set_system_volume` clamps only afterwards (line 131). A caller that sends 256 sets the level to 0 and leaves the mute flag alone; 300 sets it to 44.
 - **Click and drag disagree on the bottom segment.** Clicking segment 0 toggles the mute. Dragging to it calls `dragGlyphBarTo(0)`, which sets the level to `(0 + 1) × 10 = 10`, unmuted (widget.js, lines 220-222). The comment at line 13 says index 0 is "mute, not a level". A click can never set 10%, because segment 1 sets 20%.
 - **Failed writes are not rolled back.** The click, drag and wheel handlers set the new state before the call, and their `catch` blocks only show a debug message. The strip keeps the optimistic value until the next `system-volume` event. If the system did not change, the strip stays wrong.
 - **Shutdown ignores its budget and has no timeout.** `shutdown(_budget)` ignores the budget it is given, and `VolumeState::stop` joins the thread without a limit (glyph_bar.rs, lines 36-42 and 327-332). The thread may be asleep for up to a second in its error path.

@@ -7,8 +7,8 @@ description = "Explorer vertical slice (file manager backend: fs, archives, hash
 # Vertical slice for the `explorer` module (was `modules/explorer/src/*`).
 # Real crate (`unidtk-mod-explorer`), pulled in by the kernel as a Cargo path
 # dependency. It talks to the kernel only through `unidtk-api`; `tauri` remains a
-# dependency solely for `async_runtime::spawn_blocking` in `get_drives`. The
-# `#[tauri::command]` wrappers live in the kernel, not here.
+# dependency for `async_runtime`: `spawn_blocking` in `get_drives` and
+# `block_on` for the async bodies of its command table.
 
 [lib]
 name = "unidtk_mod_explorer"

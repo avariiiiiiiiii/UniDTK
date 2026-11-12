@@ -22,7 +22,7 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 | [modules/micrographics/ui/metadata.json](../../modules/micrographics/ui/metadata.json) | Module declaration: `backend: true`, `singleton: true`, the tints, and the `mgLayout` look option. |
 | [modules/micrographics/ui/location-permission.html](../../modules/micrographics/ui/location-permission.html) | The page of the temporary window that hosts the Windows consent prompt. |
 | [core/kernel/weather_location.rs](../../core/kernel/weather_location.rs) | The kernel side of the permission request: the window, the foreground check, and the timeout. |
-| [core/kernel/command_inventory.rs](../../core/kernel/command_inventory.rs) | Declares `weather_current` as read-only and `weather_location_request` as write. |
+| [core/kernel/command_inventory.rs](../../core/kernel/command_inventory.rs) | Declares the kernel's `weather_location_request` as write; `weather_current` is in the module's own table. |
 
 The crate `unidtk-mod-micrographics` depends on `unidtk-api` and not on the kernel, as [modules.contract-only](../reference/modules.md#r-modules.contract-only) requires.
 
@@ -64,11 +64,11 @@ fn init(&self, ctx: unidtk_api::ModuleContext) -> Result<(), String> {
 }
 ```
 
-`WeatherRuntime` is a small clonable handle around one shared cell. The kernel registers a clone as managed state, and `init` fills the same cell. `snapshot()` returns a copy of the latest snapshot, with staleness decided at read time, so a cached value cannot claim to be fresh hours after it was taken. Without a store or before the first observation, the door says so: `weather: no observation yet`. It does not return a zeroed reading.
+`WeatherRuntime` is a small clonable handle around one shared cell. The module holds it, and `init` fills the cell. `init` also registers a clone with the host, because the kernel's location-permission window writes the user's answer into it. `snapshot()` returns a copy of the latest snapshot, with staleness decided at read time, so a cached value cannot claim to be fresh hours after it was taken. Without a store or before the first observation, the door says so: `weather: no observation yet`. It does not return a zeroed reading.
 
-The socket door and the UI door both reach this function. In the kernel, `weather_current` is a read-only command in [core/kernel/command_inventory.rs](../../core/kernel/command_inventory.rs) (line 159), and its UI handler is in [core/kernel/main.rs](../../core/kernel/main.rs) (line 403).
+The socket door and the UI door both reach this function. `weather_current` is a `read_only` command in the module's own table (`unidtk_api::module_commands!`, micrographics.rs), which every door serves through the kernel's registry.
 
-The panel gets its data in two ways, both in `widget.js`. It listens for the `weather-update` event, which the worker emits after every committed change. On load it also calls `weather_current` through `invoke`, retrying at 0, 250, 1000, and 3000 ms because the managed state may not exist yet. A one-second timer calls `schedule()`, but only while the document is visible, and a repaint runs layout only when the cell signature changes.
+The panel gets its data in two ways, both in `widget.js`. It listens for the `weather-update` event, which the worker emits after every committed change. On load it also calls `weather_current` through `invoke`, retrying at 0, 250, 1000, and 3000 ms because the modules may not be started yet. A one-second timer calls `schedule()`, but only while the document is visible, and a repaint runs layout only when the cell signature changes.
 
 ---
 

@@ -256,54 +256,20 @@ pub fn create_module() -> Box<dyn unidtk_api::Module> {
     Box::new(GlyphBarModule::new())
 }
 
-/// Answers the socket commands this module owns.
-///
-/// The kernel registers this function under the module id and calls it instead of
-/// naming this crate's types itself. `host` is unused here: the volume endpoint needs
-/// no application state, which is exactly why this module can stay Tauri-free.
-pub fn ipc_call(
-    cmd: &str,
-    args: &serde_json::Value,
-    _host: Option<unidtk_api::commands::HostHandle<'_>>,
-) -> Option<Result<serde_json::Value, String>> {
-    match cmd {
-        // The name must equal the manifest's, because the kernel addresses a module by
-        // the name it read from the inventory: while these read different things
-        // (`volume_get` here, `get_system_volume` in the kernel), the command failed as
-        // "declared in the inventory but has no handler".
-        "get_system_volume" => Some(
-            get_system_volume()
-                .and_then(|volume| serde_json::to_value(volume).map_err(|e| e.to_string())),
-        ),
-        // The writes answer with the same shape as the Tauri commands of the same name:
-        // the caller gets the resulting state, so the effect is readable, not assumed.
-        "set_system_volume" => Some(json_arg(args, "level").and_then(|level| {
-            set_system_volume(volume_level(level))
-                .and_then(|volume| serde_json::to_value(volume).map_err(|e| e.to_string()))
-        })),
-        "set_system_mute" => Some(
-            args.get("muted")
-                .and_then(|value| value.as_bool())
-                .ok_or_else(|| "set_system_mute requires {muted}".to_string())
-                .and_then(|muted| {
-                    set_system_mute(muted)
-                        .and_then(|volume| serde_json::to_value(volume).map_err(|e| e.to_string()))
-                }),
-        ),
-        _ => None,
+// The writes answer with the resulting state, so the effect is readable, not assumed.
+// They are writes although easily undone: whatever changes the machine stays off the
+// unauthenticated socket by rule.
+unidtk_api::module_commands! {
+    impl GlyphBarModule {
+        read_only "get_system_volume" "Windows master volume" |this| get_system_volume();
+        write "set_system_volume" "Set the master volume, 0 to 100" |this, level: u64| set_system_volume(volume_level(level));
+        write "set_system_mute" "Mute or unmute the master volume" |this, muted: bool| set_system_mute(muted);
     }
 }
 
-/// Reads one numeric argument, or says which one is missing.
 /// Clamps before narrowing: `300 as u8` would wrap to 44, not stop at 100.
 fn volume_level(level: u64) -> u8 {
     level.min(100) as u8
-}
-
-fn json_arg(args: &serde_json::Value, name: &str) -> Result<u64, String> {
-    args.get(name)
-        .and_then(|value| value.as_u64())
-        .ok_or_else(|| format!("this command requires the argument {{{name}}}"))
 }
 
 impl unidtk_api::Module for GlyphBarModule {
@@ -334,6 +300,14 @@ impl unidtk_api::Module for GlyphBarModule {
             state.stop();
         }
         Ok(())
+    }
+
+    fn commands(&self) -> &'static [unidtk_api::commands::CommandSpec] {
+        Self::COMMANDS
+    }
+
+    fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
+        self.dispatch_command(cmd, args)
     }
 }
 

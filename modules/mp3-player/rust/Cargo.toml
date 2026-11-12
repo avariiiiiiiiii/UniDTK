@@ -9,8 +9,8 @@ description = "MP3 player vertical slice (playback, library, sync, AI DJ, spectr
 # are only the crates this module actually references.
 #
 # Lib-only crate: the kernel pulls it in as a Cargo path dependency
-# (`unidtk-mod-mp3-player`) and holds the Tauri command wrappers; the module
-# itself talks to the kernel only through `unidtk-api`. It builds standalone, and
+# (`unidtk-mod-mp3-player`) and serves its command table; the module itself
+# talks to the kernel only through `unidtk-api`. It builds standalone, and
 # every dependency below (tauri for `AppHandle`/`Emitter`/`async_runtime`) is
 # required by this crate. Storage is *not* a dependency: the module asks the
 # kernel for a store (`ModuleContext::store`) and gets a `ModuleDb` back, so no

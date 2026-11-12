@@ -1840,12 +1840,6 @@ impl MicrographicsModule {
             runtime: WeatherRuntime::new(),
         }
     }
-
-    /// The state half, for the kernel to register as managed state. A clone, so
-    /// what a command handler reaches and what `init` filled are one value.
-    pub fn runtime(&self) -> WeatherRuntime {
-        self.runtime.clone()
-    }
 }
 
 impl Default for MicrographicsModule {
@@ -1858,49 +1852,15 @@ pub fn create_module() -> Box<dyn unidtk_api::Module> {
     Box::new(MicrographicsModule::new())
 }
 
-/// The live state a command handler was handed, or a clear reason there is none.
-///
-/// Reached the way `vpn` reaches its runtime: the host handle is downcast to the
-/// app handle and the registered state is looked up there. A missing runtime is a
-/// wiring bug, and says so rather than reading as "no weather".
-fn runtime_from<'a>(
-    host: Option<unidtk_api::commands::HostHandle<'a>>,
-) -> Result<tauri::State<'a, WeatherRuntime>, String> {
-    let app = host
-        .and_then(|handle| handle.downcast_ref::<tauri::AppHandle>())
-        .ok_or_else(|| "host handle unavailable".to_string())?;
-    tauri::Manager::try_state::<WeatherRuntime>(app)
-        .ok_or_else(|| "micrographics is not ready".to_string())
-}
-
-/// Weather and independent network identity, including permission state.
-///
-/// Deliberately says "no observation yet" rather than a zeroed reading: a
-/// fabricated `0°` is a lie the panel would have no way to detect.
-pub fn weather_current(
-    host: Option<unidtk_api::commands::HostHandle<'_>>,
-) -> Result<WeatherSnapshot, String> {
-    runtime_from(host)?
-        .snapshot()
-        .ok_or_else(|| "weather: no observation yet".to_string())
-}
-
-/// Answers the socket commands this module owns.
-///
-/// The name must equal the manifest's: the kernel addresses a module by the name
-/// it read from the inventory, and a mismatch reads as "declared but has no
-/// handler".
-pub fn ipc_call(
-    cmd: &str,
-    _args: &serde_json::Value,
-    host: Option<unidtk_api::commands::HostHandle<'_>>,
-) -> Option<Result<serde_json::Value, String>> {
-    match cmd {
-        "weather_current" => Some(
-            weather_current(host)
-                .and_then(|snapshot| serde_json::to_value(snapshot).map_err(|e| e.to_string())),
-        ),
-        _ => None,
+// Weather and independent network identity, including permission state. It says
+// "no observation yet" rather than a zeroed reading: a fabricated `0°` is a lie
+// the panel would have no way to detect.
+unidtk_api::module_commands! {
+    impl MicrographicsModule {
+        read_only "weather_current" "Ambient weather observation" |this| this
+            .runtime
+            .snapshot()
+            .ok_or_else(|| "weather: no observation yet".to_string());
     }
 }
 
@@ -1926,6 +1886,12 @@ impl unidtk_api::Module for MicrographicsModule {
                 "micrographics: diagnostic mode, cached position present: {cached}"
             ));
             return Ok(());
+        }
+        // The kernel's location-permission window (`core/kernel/weather_location.rs`)
+        // writes the answer into this runtime through the host. It stays there until
+        // that window leaves with the WebView; a second `manage` on resume is a no-op.
+        if let Some(app) = ctx.host::<tauri::AppHandle>() {
+            tauri::Manager::manage(app, self.runtime.clone());
         }
         if !ctx.enabled() {
             unidtk_api::log("micrographics: disabled — weather refresh not started");
@@ -2000,6 +1966,14 @@ impl unidtk_api::Module for MicrographicsModule {
     fn shutdown(&self, _budget: std::time::Duration) -> Result<(), String> {
         self.runtime.halt();
         Ok(())
+    }
+
+    fn commands(&self) -> &'static [unidtk_api::commands::CommandSpec] {
+        Self::COMMANDS
+    }
+
+    fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
+        self.dispatch_command(cmd, args)
     }
 }
 

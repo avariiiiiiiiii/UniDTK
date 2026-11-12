@@ -8,11 +8,7 @@ mod network;
 // kernel depends on them as Cargo packages instead of including their sources.
 // No `#[path]` source includes remain.
 use unidtk_mod_explorer as explorer;
-use unidtk_mod_glyph_bar as glyph_bar;
-use unidtk_mod_mp3_player as music;
 use unidtk_mod_micrographics as micrographics;
-use unidtk_mod_telegram as telegram;
-use unidtk_mod_vpn as vpn;
 
 mod hotkeys;
 mod input;
@@ -33,7 +29,6 @@ mod shell_db;
 mod shutdown;
 mod start_menu;
 
-use unidtk_mod_mp3_player::commands;
 use crate::unidtk_db::UniDtkDatabase;
 use crate::log_store::LogStore;
 
@@ -384,40 +379,34 @@ fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-// ─── Module IPC surface ──────────────────────────────────────────────────────
-// Tauri commands must be declared where `generate_handler!` lives, so the kernel
-// owns the thin wrappers around each module's plain functions.
-
-#[tauri::command(async)]
-fn get_system_volume() -> Result<glyph_bar::SystemVolume, String> {
-    glyph_bar::get_system_volume()
+/// Serves a module's command that arrived through Tauri, or hands the invoke back
+/// when no module declares the name. The module runs on the blocking pool, never
+/// on the main thread (r[kernel.no-blocking-main-thread]), and the door is checked
+/// as for the other doors.
+fn invoke_module_command(invoke: tauri::ipc::Invoke) -> Result<bool, tauri::ipc::Invoke> {
+    let app = invoke.message.webview().app_handle().clone();
+    let cmd = invoke.message.command().to_string();
+    let declared = app
+        .try_state::<registry::Registry>()
+        .is_some_and(|registry| registry.command(&cmd).is_some());
+    if !declared {
+        return Err(invoke);
+    }
+    let args = match invoke.message.payload() {
+        tauri::ipc::InvokeBody::Json(value) => value.clone(),
+        tauri::ipc::InvokeBody::Raw(_) => serde_json::Value::Null,
+    };
+    invoke.resolver.respond_async(async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            ipc::serve_module(&app, &cmd, &args, unidtk_api::commands::Door::Ui)
+                .unwrap_or_else(|| Err(format!("unknown cmd: {cmd}")))
+        })
+        .await
+        .map_err(|error| tauri::ipc::InvokeError::from(error.to_string()))?
+        .map_err(tauri::ipc::InvokeError::from)
+    });
+    Ok(true)
 }
-
-#[tauri::command(async)]
-fn set_system_volume(level: u8) -> Result<glyph_bar::SystemVolume, String> {
-    glyph_bar::set_system_volume(level)
-}
-
-#[tauri::command(async)]
-fn set_system_mute(muted: bool) -> Result<glyph_bar::SystemVolume, String> {
-    glyph_bar::set_system_mute(muted)
-}
-
-/// The UI door's half of `weather_current`.
-///
-/// Deliberately thin and deliberately *not* the place the weather is fetched:
-/// the module's background thread owns that. This only hands the interface the
-/// snapshot the module already has, so a repaint can never wait on the network.
-#[tauri::command(async)]
-fn weather_current(
-    state: tauri::State<micrographics::WeatherRuntime>,
-) -> Result<micrographics::WeatherSnapshot, String> {
-    state
-        .snapshot()
-        .ok_or_else(|| "weather: no observation yet".to_string())
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 
 fn hides_on_close(label: &str) -> bool {
     label == "wallpaper"
@@ -426,43 +415,6 @@ fn hides_on_close(label: &str) -> bool {
 #[tauri::command(async)]
 fn weather_location_request(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     weather_location::request(app)
-}
-
-#[tauri::command(async)]
-fn vpn_list_servers(state: tauri::State<vpn::VpnRuntime>) -> Result<Vec<vpn::VpnServer>, String> {
-    vpn::list_servers(&state)
-}
-
-#[tauri::command(async)]
-fn vpn_refresh_servers(
-    state: tauri::State<vpn::VpnRuntime>,
-) -> Result<Vec<vpn::VpnServer>, String> {
-    vpn::refresh_servers(&state)
-}
-
-#[tauri::command(async)]
-fn vpn_status(state: tauri::State<vpn::VpnRuntime>) -> vpn::VpnStatus {
-    vpn::status(&state)
-}
-
-#[tauri::command(async)]
-fn vpn_settings() -> vpn::VpnSettingsStatus {
-    vpn::settings()
-}
-
-#[tauri::command(async)]
-fn vpn_set_auto_connect(enabled: bool) -> vpn::VpnSettingsStatus {
-    vpn::set_auto_connect(enabled)
-}
-
-#[tauri::command(async)]
-fn vpn_set_subscription_url(url: String) -> Result<vpn::VpnSettingsStatus, String> {
-    vpn::set_subscription_url(url)
-}
-
-#[tauri::command(async)]
-fn vpn_set_home_server_config(config: vpn::HomeServerConfig) -> Result<vpn::VpnSettingsStatus, String> {
-    vpn::set_home_server_config(config)
 }
 
 #[tauri::command(async)]
@@ -647,890 +599,6 @@ fn delete_folder(
 }
 
 #[tauri::command(async)]
-fn vpn_connect(state: tauri::State<vpn::VpnRuntime>, tag: Option<String>) -> Result<(), String> {
-    log_line(format!("vpn: command connect tag={tag:?}"));
-    vpn::connect(&state, tag)
-}
-
-#[tauri::command(async)]
-fn vpn_disconnect(state: tauri::State<vpn::VpnRuntime>) -> Result<(), String> {
-    vpn::disconnect(&state);
-    Ok(())
-}
-
-#[tauri::command(async)]
-fn vpn_select_server(state: tauri::State<vpn::VpnRuntime>, tag: String) -> Result<(), String> {
-    vpn::select_server(&state, tag)
-}
-
-#[tauri::command(async)]
-fn vpn_ping_all(state: tauri::State<vpn::VpnRuntime>) -> Result<Vec<vpn::VpnPingResult>, String> {
-    vpn::ping_all(&state)
-}
-
-#[tauri::command(async)]
-fn telegram_status(state: tauri::State<telegram::TelegramRuntime>) -> telegram::TelegramStatus {
-    telegram::status(&state)
-}
-
-#[tauri::command(async)]
-fn telegram_chats(state: tauri::State<telegram::TelegramRuntime>) -> Vec<telegram::TelegramChat> {
-    telegram::chats(&state)
-}
-
-#[tauri::command(async)]
-fn telegram_chats_archive(
-    state: tauri::State<telegram::TelegramRuntime>,
-) -> Vec<telegram::TelegramChat> {
-    telegram::archive_chats(&state)
-}
-
-#[tauri::command(async)]
-fn telegram_set_archived(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramArchiveRequest,
-) -> Result<(), String> {
-    telegram::set_chat_archived(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_messages(
-    state: tauri::State<telegram::TelegramRuntime>,
-    chat_id: String,
-    thread_id: Option<i64>,
-) -> Vec<telegram::TelegramMessage> {
-    match thread_id {
-        Some(thread_id) if thread_id != 0 => telegram::messages_for_thread(&state, chat_id, Some(thread_id)),
-        _ => telegram::messages(&state, chat_id),
-    }
-}
-
-#[tauri::command(async)]
-fn telegram_get_message(
-    state: tauri::State<telegram::TelegramRuntime>,
-    chat_id: String,
-    message_id: String,
-) -> Result<telegram::TelegramMessage, String> {
-    telegram::get_message(&state, chat_id, message_id)
-}
-
-#[tauri::command(async)]
-fn telegram_mark_read(state: tauri::State<telegram::TelegramRuntime>, chat_id: String) {
-    telegram::mark_read(&state, chat_id)
-}
-
-#[tauri::command(async)]
-fn telegram_open_chat(state: tauri::State<telegram::TelegramRuntime>, chat_id: String) {
-    telegram::open_chat(&state, chat_id)
-}
-
-#[tauri::command(async)]
-fn telegram_close_chat(
-    state: tauri::State<telegram::TelegramRuntime>,
-    chat_id: Option<String>,
-) {
-    telegram::close_chat(&state, chat_id)
-}
-
-#[tauri::command(async)]
-fn telegram_older_messages(
-    state: tauri::State<telegram::TelegramRuntime>,
-    chat_id: String,
-    before_message_id: String,
-    thread_id: Option<i64>,
-) -> Vec<telegram::TelegramMessage> {
-    match thread_id {
-        Some(thread_id) if thread_id != 0 => telegram::older_messages_for_thread(&state, chat_id, before_message_id, Some(thread_id)),
-        _ => telegram::older_messages(&state, chat_id, before_message_id),
-    }
-}
-
-#[tauri::command(async)]
-fn telegram_messages_around(
-    state: tauri::State<telegram::TelegramRuntime>,
-    chat_id: String,
-    message_id: String,
-    thread_id: Option<i64>,
-    limit: Option<u32>,
-) -> Result<Vec<telegram::TelegramMessage>, String> {
-    telegram::messages_around(&state, chat_id, message_id, thread_id, limit)
-}
-
-#[tauri::command(async)]
-fn telegram_send_message(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramSendRequest,
-) -> Result<telegram::TelegramMessage, String> {
-    telegram::send_message(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_chat_members(
-    state: tauri::State<telegram::TelegramRuntime>,
-    chat_id: String,
-    query: Option<String>,
-) -> Result<Vec<telegram::TelegramMember>, String> {
-    telegram::chat_members(&state, chat_id, query.unwrap_or_default())
-}
-
-#[tauri::command(async)]
-fn telegram_send_attachment(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramSendAttachmentRequest,
-) -> Result<telegram::TelegramMessage, String> {
-    telegram::send_attachment(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_set_phone(
-    state: tauri::State<telegram::TelegramRuntime>,
-    phone: telegram::TelegramPhone,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::set_phone(&state, phone)
-}
-
-#[tauri::command(async)]
-fn telegram_check_code(
-    state: tauri::State<telegram::TelegramRuntime>,
-    code: telegram::TelegramAuthCode,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::check_code(&state, code)
-}
-
-#[tauri::command(async)]
-fn telegram_check_password(
-    state: tauri::State<telegram::TelegramRuntime>,
-    password: telegram::TelegramPassword,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::check_password(&state, password)
-}
-
-#[tauri::command(async)]
-fn telegram_set_email(
-    state: tauri::State<telegram::TelegramRuntime>,
-    email: telegram::TelegramEmail,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::set_email(&state, email)
-}
-
-#[tauri::command(async)]
-fn telegram_check_email_code(
-    state: tauri::State<telegram::TelegramRuntime>,
-    code: telegram::TelegramEmailCode,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::check_email_code(&state, code)
-}
-
-#[tauri::command(async)]
-fn telegram_register_user(
-    state: tauri::State<telegram::TelegramRuntime>,
-    registration: telegram::TelegramRegistration,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::register_user(&state, registration)
-}
-
-#[tauri::command(async)]
-fn telegram_get_config() -> telegram::TelegramConfig {
-    telegram::get_config()
-}
-
-#[tauri::command(async)]
-fn telegram_debug(state: tauri::State<telegram::TelegramRuntime>) -> telegram::TelegramDebugInfo {
-    telegram::debug_info(&state)
-}
-
-#[tauri::command(async)]
-fn telegram_restart(state: tauri::State<telegram::TelegramRuntime>) -> telegram::TelegramStatus {
-    telegram::restart(&state)
-}
-
-#[tauri::command(async)]
-fn telegram_logout(
-    state: tauri::State<telegram::TelegramRuntime>,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::logout(&state)
-}
-
-/// Non-blocking: starts an async TDLib download and returns immediately.
-/// Empty string means the download was kicked off (or is already in flight);
-/// a non-empty path means the file was already available. Completion is
-/// delivered via `updateFile` / `telegram-chat-update` (avatars) or
-/// `telegram-attachment-ready` (message attachments), not this call.
-#[tauri::command(async)]
-fn telegram_download_file(
-    state: tauri::State<telegram::TelegramRuntime>,
-    file_id: i32,
-) -> Result<String, String> {
-    telegram::download_file(&state, file_id)
-}
-
-#[tauri::command(async)]
-fn telegram_save_config(
-    state: tauri::State<telegram::TelegramRuntime>,
-    config: telegram::TelegramConfig,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::save_config(&state, config)
-}
-
-#[tauri::command(async)]
-fn telegram_edit_message(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramEditMessageRequest,
-) -> Result<telegram::TelegramMessage, String> {
-    telegram::edit_message(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_delete_messages(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramDeleteMessagesRequest,
-) -> Result<(), String> {
-    telegram::delete_messages(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_set_reaction(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramReactionRequest,
-) -> Result<(), String> {
-    telegram::set_reaction(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_get_custom_emoji_path(
-    state: tauri::State<telegram::TelegramRuntime>,
-    custom_emoji_id: String,
-) -> Result<Option<String>, String> {
-    telegram::get_custom_emoji_path(&state, &custom_emoji_id)
-}
-
-#[tauri::command(async)]
-fn telegram_pin_message(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramPinMessageRequest,
-) -> Result<(), String> {
-    telegram::pin_message(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_unpin_message(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramPinMessageRequest,
-) -> Result<(), String> {
-    telegram::unpin_message(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_get_chat_pinned_message(
-    state: tauri::State<telegram::TelegramRuntime>,
-    chat_id: String,
-    thread_id: Option<i64>,
-) -> Result<Option<telegram::TelegramMessage>, String> {
-    telegram::get_chat_pinned_message(&state, chat_id, thread_id)
-}
-
-#[tauri::command(async)]
-fn telegram_forward_messages(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramForwardMessagesRequest,
-) -> Result<Vec<telegram::TelegramMessage>, String> {
-    telegram::forward_messages(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_delete_chat_history(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramDeleteChatHistoryRequest,
-) -> Result<(), String> {
-    telegram::delete_chat_history(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_send_callback_query(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramCallbackQueryRequest,
-) -> Result<serde_json::Value, String> {
-    telegram::send_callback_query(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_get_forum_topics(
-    state: tauri::State<telegram::TelegramRuntime>,
-    request: telegram::TelegramForumTopicsRequest,
-) -> Result<serde_json::Value, String> {
-    telegram::get_forum_topics(&state, request)
-}
-
-#[tauri::command(async)]
-fn telegram_list_accounts(
-    state: tauri::State<telegram::TelegramRuntime>,
-) -> Vec<telegram::TelegramAccount> {
-    telegram::list_accounts(&state)
-}
-
-#[tauri::command(async)]
-fn telegram_switch_account(
-    state: tauri::State<telegram::TelegramRuntime>,
-    account_id: String,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::switch_account(&state, account_id)
-}
-
-#[tauri::command(async)]
-fn telegram_add_account(
-    state: tauri::State<telegram::TelegramRuntime>,
-) -> Result<telegram::TelegramStatus, String> {
-    telegram::add_account(&state)
-}
-
-#[tauri::command(async)]
-fn telegram_remove_account(
-    state: tauri::State<telegram::TelegramRuntime>,
-    account_id: String,
-) -> Result<Vec<telegram::TelegramAccount>, String> {
-    telegram::remove_account(&state, account_id)
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tauri::command]
-async fn scan_directory(path: String) -> Result<Vec<explorer::fs::FileItem>, String> {
-    explorer::commands::scan_directory(path).await
-}
-
-#[tauri::command]
-async fn scan_directory_full(path: String) -> Result<Vec<explorer::fs::FileItem>, String> {
-    explorer::commands::scan_directory_full(path).await
-}
-
-#[tauri::command]
-async fn get_drives() -> Result<Vec<explorer::drives::DriveInfo>, String> {
-    explorer::commands::get_drives().await
-}
-
-#[tauri::command(async)]
-fn get_user_places() -> Result<Vec<explorer::commands::UserPlace>, String> {
-    explorer::commands::get_user_places()
-}
-
-#[tauri::command(async)]
-fn path_is_directory(path: String) -> Result<bool, String> {
-    explorer::commands::path_is_directory(path)
-}
-
-#[tauri::command(async)]
-fn get_raw_drives() -> Result<Vec<String>, String> {
-    explorer::commands::get_raw_drives()
-}
-
-#[tauri::command(async)]
-fn get_unmounted_volumes() -> Result<Vec<String>, String> {
-    explorer::commands::get_unmounted_volumes()
-}
-
-#[tauri::command(async)]
-fn is_drive_removable(drive: String) -> Result<bool, String> {
-    explorer::commands::is_drive_removable(drive)
-}
-
-#[tauri::command(async)]
-fn get_portable_devices() -> Result<Vec<String>, String> {
-    explorer::commands::get_portable_devices()
-}
-
-#[tauri::command(async)]
-fn get_portable_contents(device_id: String) -> Result<Vec<String>, String> {
-    explorer::commands::get_portable_contents(device_id)
-}
-
-#[tauri::command(async)]
-fn copy_to_clipboard(paths: Vec<String>, cut: bool) -> Result<(), String> {
-    explorer::commands::copy_to_clipboard(paths, cut)
-}
-
-#[tauri::command(async)]
-fn paste_from_clipboard() -> Result<Vec<String>, String> {
-    explorer::commands::paste_from_clipboard()
-}
-
-#[tauri::command(async)]
-fn clear_clipboard() -> Result<(), String> {
-    explorer::commands::clear_clipboard()
-}
-
-#[tauri::command(async)]
-fn file_exists(path: String) -> Result<bool, String> {
-    explorer::commands::file_exists(path)
-}
-
-#[tauri::command(async)]
-fn get_file_info(path: String) -> Result<explorer::files::FileInfo, String> {
-    explorer::commands::get_file_info(path)
-}
-
-#[tauri::command(async)]
-fn format_file_size(bytes: u64) -> String {
-    explorer::commands::format_file_size(bytes)
-}
-
-#[tauri::command(async)]
-fn get_file_type_name(extension: String) -> String {
-    explorer::commands::get_file_type_name(extension)
-}
-
-#[tauri::command(async)]
-fn is_valid_filename(name: String) -> Result<(), String> {
-    explorer::commands::is_valid_filename(name)
-}
-
-#[tauri::command(async)]
-fn delete_to_recycle_bin(path: String) -> Result<(), String> {
-    explorer::commands::delete_to_recycle_bin(path)
-}
-
-#[tauri::command(async)]
-fn get_folder_size(path: String) -> Result<u64, String> {
-    explorer::commands::get_folder_size(path)
-}
-
-#[tauri::command(async)]
-fn sort_files(
-    files: Vec<explorer::fs::FileItem>,
-    column: String,
-    ascending: bool,
-) -> Result<Vec<explorer::fs::FileItem>, String> {
-    explorer::commands::sort_files(files, column, ascending)
-}
-
-#[tauri::command(async)]
-fn search_files(
-    state: tauri::State<'_, explorer::commands::SharedSearch>,
-    query: String,
-) -> Vec<explorer::search::SearchResult> {
-    explorer::commands::search_files(&state, query)
-}
-
-#[tauri::command(async)]
-fn build_search_index(state: tauri::State<'_, explorer::commands::SharedSearch>, root: String) {
-    explorer::commands::build_search_index(&state, root)
-}
-
-#[tauri::command(async)]
-fn remove_from_search_index(state: tauri::State<'_, explorer::commands::SharedSearch>, path: String) {
-    explorer::commands::remove_from_search_index(&state, path)
-}
-
-#[tauri::command(async)]
-fn clear_search_index(state: tauri::State<'_, explorer::commands::SharedSearch>) {
-    explorer::commands::clear_search_index(&state)
-}
-
-#[tauri::command(async)]
-fn get_search_suggestions(
-    state: tauri::State<'_, explorer::commands::SharedSearch>,
-    prefix: String,
-    limit: usize,
-) -> Vec<String> {
-    explorer::commands::get_search_suggestions(&state, prefix, limit)
-}
-
-#[tauri::command(async)]
-fn hash_file(path: String) -> Result<explorer::hashing::FileHash, String> {
-    explorer::commands::hash_file(path)
-}
-
-#[tauri::command(async)]
-fn hash_file_md5(path: String) -> Result<String, String> {
-    explorer::commands::hash_file_md5(path)
-}
-
-#[tauri::command(async)]
-fn hash_file_sha256(path: String) -> Result<String, String> {
-    explorer::commands::hash_file_sha256(path)
-}
-
-#[tauri::command(async)]
-fn get_archive_info(path: String) -> Result<explorer::archive::ArchiveInfo, String> {
-    explorer::commands::get_archive_info(path)
-}
-
-#[tauri::command(async)]
-fn extract_archive(archive_path: String, dest_dir: String) -> Result<Vec<String>, String> {
-    explorer::commands::extract_archive(archive_path, dest_dir)
-}
-
-#[tauri::command(async)]
-fn extract_archive_entry(
-    archive_path: String,
-    entry_name: String,
-    dest_dir: String,
-) -> Result<String, String> {
-    explorer::commands::extract_archive_entry(archive_path, entry_name, dest_dir)
-}
-
-#[tauri::command(async)]
-fn create_zip_archive(files: Vec<String>, archive_path: String) -> Result<(), String> {
-    explorer::commands::create_zip_archive(files, archive_path)
-}
-
-#[tauri::command(async)]
-fn is_zip_file(path: String) -> bool {
-    explorer::commands::is_zip_file(path)
-}
-
-#[tauri::command(async)]
-fn get_file_preview(path: String) -> explorer::preview::FilePreview {
-    explorer::commands::get_file_preview(path)
-}
-
-#[tauri::command(async)]
-fn get_text_preview(path: String, max_bytes: usize) -> Option<String> {
-    explorer::commands::get_text_preview(path, max_bytes)
-}
-
-#[tauri::command(async)]
-fn get_file_icon(extension: String) -> String {
-    explorer::commands::get_file_icon(extension)
-}
-
-#[tauri::command(async)]
-fn open_path_default(path: String) -> Result<(), String> {
-    explorer::commands::open_path_default(path)
-}
-
-#[tauri::command(async)]
-fn create_directory(path: String) -> Result<(), String> {
-    explorer::commands::create_directory(path)
-}
-
-#[tauri::command(async)]
-fn create_empty_file(path: String) -> Result<(), String> {
-    explorer::commands::create_empty_file(path)
-}
-
-#[tauri::command(async)]
-fn rename_path(from: String, to: String) -> Result<(), String> {
-    explorer::commands::rename_path(from, to)
-}
-
-#[tauri::command(async)]
-fn copy_path(from: String, to: String) -> Result<(), String> {
-    explorer::commands::copy_path(from, to)
-}
-
-#[tauri::command(async)]
-fn open_terminal(path: String) -> Result<(), String> {
-    explorer::commands::open_terminal(path)
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// mp3-player module (music core) — the logic lives in `shell_mod_mp3_player::commands`;
-// these thin wrappers exist only because `generate_handler!` must live in the kernel.
-
-#[tauri::command(async)]
-fn get_config(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> music::library::config::AppConfig {
-    music::commands::get_config(&state)
-}
-
-#[tauri::command(async)]
-fn get_config_path(state: tauri::State<'_, music::commands::AppState>) -> String {
-    music::commands::get_config_path(&state)
-}
-
-#[tauri::command(async)]
-fn save_config(
-    state: tauri::State<'_, music::commands::AppState>,
-    config: music::library::config::AppConfig,
-) -> Result<music::library::config::AppConfig, String> {
-    music::commands::save_config(&state, config)
-}
-
-#[tauri::command]
-async fn list_tracks(
-    state: tauri::State<'_, music::commands::AppState>,
-    search: Option<String>,
-    sort_key: Option<String>,
-    sort_dir: Option<String>,
-) -> Result<Vec<music::library::db::Track>, String> {
-    music::commands::list_tracks(&state, search, sort_key, sort_dir).await
-}
-
-#[tauri::command]
-async fn get_track(
-    state: tauri::State<'_, music::commands::AppState>,
-    track_id: String,
-) -> Result<Option<music::library::db::Track>, String> {
-    music::commands::get_track(&state, track_id).await
-}
-
-#[tauri::command]
-async fn list_playlists(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<Vec<music::library::db::Playlist>, String> {
-    music::commands::list_playlists(&state).await
-}
-
-#[tauri::command]
-async fn list_playlist_tracks(
-    state: tauri::State<'_, music::commands::AppState>,
-    playlist_id: String,
-    sort_key: Option<String>,
-    sort_dir: Option<String>,
-) -> Result<Vec<music::library::db::Track>, String> {
-    music::commands::list_playlist_tracks(&state, playlist_id, sort_key, sort_dir).await
-}
-
-#[tauri::command]
-async fn sync_url(
-    state: tauri::State<'_, music::commands::AppState>,
-    url: String,
-    name: Option<String>,
-) -> Result<String, String> {
-    music::commands::sync_url(&state, url, name).await
-}
-
-#[tauri::command]
-async fn sync_playlist(
-    state: tauri::State<'_, music::commands::AppState>,
-    playlist_id: String,
-) -> Result<String, String> {
-    music::commands::sync_playlist(&state, playlist_id).await
-}
-
-#[tauri::command]
-async fn sync_all(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<Vec<String>, String> {
-    music::commands::sync_all(&state).await
-}
-
-#[tauri::command]
-async fn sync_tasks(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<Vec<music::sync::sync::SyncTask>, String> {
-    music::commands::sync_tasks(&state).await
-}
-
-#[tauri::command]
-async fn update_ytdlp(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<String, String> {
-    music::commands::update_ytdlp(&state).await
-}
-
-#[tauri::command]
-async fn player_load_queue(
-    state: tauri::State<'_, music::commands::AppState>,
-    track_ids: Vec<String>,
-    start_index: usize,
-) -> Result<music::playback::player::PlayerState, String> {
-    music::commands::player_load_queue(&state, track_ids, start_index).await
-}
-
-#[tauri::command]
-async fn player_load_view_queue(
-    state: tauri::State<'_, music::commands::AppState>,
-    playlist_id: Option<String>,
-    search: Option<String>,
-    sort_key: Option<String>,
-    sort_dir: Option<String>,
-    start_index: usize,
-) -> Result<music::playback::player::PlayerState, String> {
-    music::commands::player_load_view_queue(
-        &state,
-        playlist_id,
-        search,
-        sort_key,
-        sort_dir,
-        start_index,
-    )
-    .await
-}
-
-#[tauri::command]
-async fn player_toggle_pause(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<music::playback::player::PlayerState, String> {
-    music::commands::player_toggle_pause(&state).await
-}
-
-#[tauri::command]
-async fn player_set_pause(
-    state: tauri::State<'_, music::commands::AppState>,
-    paused: bool,
-) -> Result<music::playback::player::PlayerState, String> {
-    music::commands::player_set_pause(&state, paused).await
-}
-
-#[tauri::command]
-async fn player_seek(
-    state: tauri::State<'_, music::commands::AppState>,
-    seconds: f64,
-) -> Result<music::playback::player::PlayerState, String> {
-    music::commands::player_seek(&state, seconds).await
-}
-
-#[tauri::command]
-async fn player_set_volume(
-    state: tauri::State<'_, music::commands::AppState>,
-    volume: f64,
-) -> Result<music::playback::player::PlayerState, String> {
-    music::commands::player_set_volume(&state, volume).await
-}
-
-#[tauri::command]
-async fn player_next(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<music::playback::player::PlayerState, String> {
-    music::commands::player_next(&state).await
-}
-
-#[tauri::command]
-async fn player_previous(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<music::playback::player::PlayerState, String> {
-    music::commands::player_previous(&state).await
-}
-
-#[tauri::command(async)]
-fn player_status(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> music::playback::player::PlayerState {
-    music::commands::player_status(&state)
-}
-
-#[tauri::command]
-async fn toggle_ai_dj(
-    state: tauri::State<'_, music::commands::AppState>,
-    enabled: bool,
-) -> Result<bool, String> {
-    music::commands::toggle_ai_dj(&state, enabled).await
-}
-
-#[tauri::command(async)]
-fn ai_dj_status(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> music::commands::AiDjStatus {
-    music::commands::ai_dj_status(&state)
-}
-
-/// Resumable download of the AI DJ model: responds immediately, the work runs on the loader thread.
-#[tauri::command(async)]
-fn ai_dj_model_download() -> Result<serde_json::Value, String> {
-    music::commands::ai_dj_model_download()
-}
-
-#[tauri::command]
-async fn ai_dj_build_queue(
-    state: tauri::State<'_, music::commands::AppState>,
-    track_ids: Vec<String>,
-) -> Result<Vec<String>, String> {
-    music::commands::ai_dj_build_queue(&state, track_ids).await
-}
-
-#[tauri::command(async)]
-fn get_crossfade_duration(state: tauri::State<'_, music::commands::AppState>) -> f64 {
-    music::commands::get_crossfade_duration(&state)
-}
-
-#[tauri::command(async)]
-fn set_crossfade_duration(
-    state: tauri::State<'_, music::commands::AppState>,
-    seconds: f64,
-) -> Result<f64, String> {
-    music::commands::set_crossfade_duration(&state, seconds)
-}
-
-#[tauri::command]
-async fn check_track_finished(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<bool, String> {
-    music::commands::check_track_finished(&state).await
-}
-
-#[tauri::command]
-async fn analyze_tracks(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<usize, String> {
-    music::commands::analyze_tracks(&state).await
-}
-
-#[tauri::command]
-async fn reanalyze_tracks(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<usize, String> {
-    music::commands::reanalyze_tracks(&state).await
-}
-
-#[tauri::command(async)]
-fn ai_dj_history(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Vec<serde_json::Value> {
-    music::commands::ai_dj_history(&state)
-}
-
-#[tauri::command]
-async fn ai_dj_graph(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<music::ai::ai_dj::SimilarityGraph, String> {
-    music::commands::ai_dj_graph(&state).await
-}
-
-#[tauri::command]
-async fn ai_dj_undo(
-    state: tauri::State<'_, music::commands::AppState>,
-) -> Result<Option<music::playback::player::PlayerState>, String> {
-    music::commands::ai_dj_undo(&state).await
-}
-
-#[tauri::command]
-async fn ai_dj_set_mode(
-    state: tauri::State<'_, music::commands::AppState>,
-    mode: String,
-) -> Result<(), String> {
-    music::commands::ai_dj_set_mode(&state, mode).await
-}
-
-#[tauri::command(async)]
-fn ai_dj_get_mode(state: tauri::State<'_, music::commands::AppState>) -> String {
-    music::commands::ai_dj_get_mode(&state)
-}
-
-#[tauri::command(async)]
-fn get_submodules(state: tauri::State<'_, music::commands::AppState>) -> serde_json::Value {
-    music::commands::get_submodules(&state)
-}
-
-#[tauri::command]
-async fn rename_playlist(
-    state: tauri::State<'_, music::commands::AppState>,
-    playlist_id: String,
-    name: String,
-) -> Result<(), String> {
-    music::commands::rename_playlist(&state, playlist_id, name).await
-}
-
-#[tauri::command]
-async fn delete_playlist(
-    state: tauri::State<'_, music::commands::AppState>,
-    playlist_id: String,
-) -> Result<(), String> {
-    music::commands::delete_playlist(&state, playlist_id).await
-}
-
-#[tauri::command]
-async fn set_submodule_setting(
-    state: tauri::State<'_, music::commands::AppState>,
-    module: String,
-    key: String,
-    value: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    music::commands::set_submodule_setting(&state, module, key, value).await
-}
-
-#[tauri::command(async)]
 fn open_explorer(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {
     let target_path = path.unwrap_or_default();
     log_line(format!("open_explorer: path={target_path}"));
@@ -1554,11 +622,6 @@ fn hotkey_toggle(id: String, enabled: bool) -> Result<(), String> {
 #[tauri::command(async)]
 fn set_desktop_input_focus(app: tauri::AppHandle, focused: bool) -> Result<(), String> {
     hotkeys::set_input_focus(&app, focused)
-}
-
-#[tauri::command(async)]
-fn setup_registry_override() -> Result<(), String> {
-    explorer::registry::install_as_default_file_manager()
 }
 
 #[allow(dead_code)]
@@ -1862,20 +925,24 @@ mod frontend_contract_tests {
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
-    /// Every `invoke("…")` in the interface must be registered in `generate_handler!`.
+    /// Every `invoke("…")` in the interface must be served: by the kernel's
+    /// `generate_handler!` or by a module's command table.
     ///
-    /// Guards the failure mode where a command is renamed or deleted in the kernel while
-    /// the frontend keeps calling it — that surfaces at runtime as an empty widget, not
-    /// at build time. It is deliberately a *test*: `generate_handler!` is a macro, so
-    /// `build.rs` cannot read its contents structurally (see `docs/history/rfcs/udtk-migration.md`, H2).
+    /// Guards the failure mode where a command is renamed or deleted while the frontend
+    /// keeps calling it — that surfaces at runtime as an empty widget, not at build
+    /// time. It is deliberately a *test*: `generate_handler!` is a macro, so `build.rs`
+    /// cannot read its contents structurally (see `docs/history/rfcs/udtk-migration.md`, H2).
     #[test]
     fn frontend_invoke_names_are_registered() {
-        let registered = registered_commands();
+        let mut registered = registered_commands();
         assert!(
             registered.len() > 10,
             "could not read the command list from generate_handler! (found {} entries)",
             registered.len()
         );
+        let module_commands = crate::registry::all_module_commands();
+        assert!(module_commands.len() > 100, "the modules declare their commands");
+        registered.extend(module_commands.into_iter().map(|(_, spec)| spec.name.to_string()));
 
         let mut missing = Vec::new();
         for file in ui_scripts() {
@@ -1897,7 +964,9 @@ mod frontend_contract_tests {
         );
     }
 
-    /// Every command the manifest promises on the UI door must exist as a Tauri command.
+    /// Every kernel command the inventory promises on the UI door must exist as a Tauri
+    /// command. A module's command is served by construction: its table generates the
+    /// spec and the handler together.
     ///
     /// The manifest is what the CLI, the acceptance checks and the migration are read
     /// against, so a name no door serves is worse than a missing entry — it reads as a
@@ -2200,7 +1269,14 @@ fn main() {
         }))
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
+        // The Tauri door: a command a module declares goes to the module, every
+        // other name to the kernel's own handlers.
+        .invoke_handler({
+            // Names the runtime the generated handler is for; alone it cannot be inferred.
+            fn for_this_runtime<F: Fn(tauri::ipc::Invoke) -> bool>(handler: F) -> F {
+                handler
+            }
+            let kernel_commands = for_this_runtime(tauri::generate_handler![
             session_info,
             trim_process_memory,
             // wallpaper-only
@@ -2231,179 +1307,25 @@ fn main() {
             get_disabled_modules,
             set_module_enabled,
             refresh_display_layout,
-            vpn_list_servers,
-            vpn_refresh_servers,
-            vpn_status,
-            vpn_settings,
-            vpn_set_auto_connect,
-            vpn_set_subscription_url,
-            vpn_set_home_server_config,
-            vpn_connect,
-            vpn_disconnect,
-            vpn_select_server,
-            vpn_ping_all,
             get_folders,
             save_folder,
             delete_folder,
-            telegram_status,
-            telegram_chats,
-            telegram_chats_archive,
-            telegram_set_archived,
-            telegram_messages,
-            telegram_get_message,
-            telegram_mark_read,
-            telegram_open_chat,
-            telegram_close_chat,
-            telegram_older_messages,
-            telegram_messages_around,
-            telegram_send_message,
-            telegram_chat_members,
-            telegram_send_attachment,
-            telegram_set_phone,
-            telegram_check_code,
-            telegram_check_password,
-            telegram_set_email,
-            telegram_check_email_code,
-            telegram_register_user,
-            telegram_get_config,
-            telegram_debug,
-            telegram_restart,
-            telegram_save_config,
-            telegram_logout,
-            telegram_download_file,
-            telegram_edit_message,
-            telegram_delete_messages,
-            telegram_set_reaction,
-            telegram_get_custom_emoji_path,
-            telegram_pin_message,
-            telegram_unpin_message,
-            telegram_get_chat_pinned_message,
-            telegram_forward_messages,
-            telegram_delete_chat_history,
-            telegram_send_callback_query,
-            telegram_get_forum_topics,
-            telegram_list_accounts,
-            telegram_switch_account,
-            telegram_add_account,
-            telegram_remove_account,
-            get_system_volume,
-            set_system_volume,
-            set_system_mute,
-            // micrographics
-            weather_current,
             weather_location_request,
-            // music-core shared
-            get_config,
-            get_config_path,
-            save_config,
-            list_tracks,
-            get_track,
-            list_playlists,
-            list_playlist_tracks,
-            sync_url,
-            sync_playlist,
-            sync_all,
-            sync_tasks,
-            update_ytdlp,
-            player_load_queue,
-            player_load_view_queue,
-            player_toggle_pause,
-            player_set_pause,
-            player_seek,
-            player_set_volume,
-            player_next,
-            player_previous,
-            player_status,
-            toggle_ai_dj,
-            ai_dj_status,
-            ai_dj_model_download,
-            ai_dj_build_queue,
-            get_crossfade_duration,
-            set_crossfade_duration,
-            check_track_finished,
-            analyze_tracks,
-            reanalyze_tracks,
-            ai_dj_history,
-            ai_dj_graph,
-            ai_dj_undo,
-            ai_dj_set_mode,
-            ai_dj_get_mode,
-            get_submodules,
-            set_submodule_setting,
-            rename_playlist,
-            delete_playlist,
-            // explorer commands
-            scan_directory,
-            scan_directory_full,
-            get_drives,
-            get_user_places,
-            path_is_directory,
-            get_raw_drives,
-            get_unmounted_volumes,
-            is_drive_removable,
-            get_portable_devices,
-            get_portable_contents,
-            copy_to_clipboard,
-            paste_from_clipboard,
-            clear_clipboard,
-            file_exists,
-            get_file_info,
-            format_file_size,
-            get_file_type_name,
-            is_valid_filename,
-            delete_to_recycle_bin,
-            get_folder_size,
-            sort_files,
-            search_files,
-            build_search_index,
-            remove_from_search_index,
-            clear_search_index,
-            get_search_suggestions,
-            hash_file,
-            hash_file_md5,
-            hash_file_sha256,
-            get_archive_info,
-            extract_archive,
-            extract_archive_entry,
-            create_zip_archive,
-            is_zip_file,
-            get_file_preview,
-            get_text_preview,
-            get_file_icon,
-            open_path_default,
-            create_directory,
-            create_empty_file,
-            rename_path,
-            copy_path,
-            open_terminal,
-            // explorer navigation
             open_explorer,
-            setup_registry_override,
             // core hotkeys & focus
             hotkeys_list,
             hotkey_toggle,
             set_desktop_input_focus,
-        ])
+            ]);
+            move |invoke: tauri::ipc::Invoke| invoke_module_command(invoke).unwrap_or_else(|invoke| kernel_commands(invoke))
+        })
         .setup(move |app| {
             log_line("setup: start");
             log_line(format!("startup: Tauri entered setup at {} ms", startup_started.elapsed().as_millis()));
 
-            // The registry exists before anything can publish or exit: building a
-            // module starts nothing, `init` below does. The kernel keeps the typed
-            // halves only to register the commands' state after `init`.
-            let glyph_bar_module = Arc::new(glyph_bar::GlyphBarModule::new());
-            let explorer_module = Arc::new(explorer::commands::ExplorerModule::new());
-            let vpn_module = Arc::new(vpn::VpnModule::new());
-            let telegram_module = Arc::new(telegram::TelegramModule::new());
-            let micrographics_module = Arc::new(micrographics::MicrographicsModule::new());
-            let registry = registry::Registry::new(vec![
-                glyph_bar_module,
-                explorer_module.clone(),
-                vpn_module.clone(),
-                telegram_module.clone(),
-                Arc::new(commands::Mp3PlayerModule::new()),
-                micrographics_module.clone(),
-            ])?;
+            // The registry exists before anything can publish, exit or ask a module
+            // for a command: building a module starts nothing, `init` below does.
+            let registry = registry::Registry::new(registry::all_modules().into_iter().map(Arc::from).collect())?;
             app.manage(registry);
 
             // Modules publish through the contract; the kernel owns the transport
@@ -2510,22 +1432,13 @@ fn main() {
 
             // Modules start through the `unidtk-api` contract, in the registry's
             // order: the core gives each one its own database slice and AppHandle.
-            // mp3-player loads its library on a thread of its own and registers its
-            // state when ready, so the slow load stays off the wallpaper attach.
+            // mp3-player loads its library on a thread of its own, so the slow load
+            // stays off the wallpaper attach; until then its commands answer "not ready".
             for module in app.state::<registry::Registry>().in_start_order() {
                 let id = module.id();
                 module.init(module_context(app.handle(), id, !disabled_mods.contains(id)))?;
                 log_line(format!("setup: module {id} started"));
             }
-            // Init first, then register the state: a command arriving between the
-            // two would otherwise find "not ready" forever, because the managed
-            // clone is taken after `init` filled the shared cell.
-            app.manage(vpn_module.runtime());
-            if let Some(runtime) = telegram_module.runtime() {
-                app.manage(runtime);
-            }
-            app.manage(explorer_module.search());
-            app.manage(micrographics_module.runtime());
 
             // Localhost IPC server for CLI/agent debugging (r[ipc.socket-read-only]):
             // read-only module snapshots + core log/config commands.

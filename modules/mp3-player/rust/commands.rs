@@ -143,9 +143,8 @@ impl AppState {
 
 /// Player module: `init` starts the library and the player on a thread of
 /// their own (the library load is slow and must stay off the startup path);
-/// `shutdown` stops analysis, spectrum capture, and playback. The original state
-/// lives here (lifecycle); a copy is registered with the host for the command
-/// wrappers once the start is done.
+/// `shutdown` stops analysis, spectrum capture, and playback. The state lives
+/// here, and the commands read it from here once the start is done.
 pub struct Mp3PlayerModule {
     state: Arc<Mutex<Option<AppState>>>,
     /// Set while a start is under way, so a switch during it starts nothing twice.
@@ -164,6 +163,10 @@ impl Mp3PlayerModule {
         self.state.lock().expect("mp3-player module lock").clone()
     }
 
+    fn app_state(&self) -> Result<AppState, String> {
+        self.state().ok_or_else(|| "music core not ready yet".to_string())
+    }
+
     /// Builds the state in the background and publishes it under the module lock.
     /// The exit latch and the switch are read under the same lock that `shutdown`
     /// and `suspend` take, so a player stopped or switched off during its start
@@ -178,7 +181,6 @@ impl Mp3PlayerModule {
         let spawned = std::thread::Builder::new()
             .name("mp3-player-start".into())
             .spawn(move || {
-                let host = ctx.host::<tauri::AppHandle>().cloned();
                 match AppState::bootstrap(ctx) {
                     Ok(state) => {
                         let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -190,9 +192,6 @@ impl Mp3PlayerModule {
                             if is_suspended() {
                                 let _ = state.set_visualizer_enabled(false);
                                 let _ = state.player.set_pause(true);
-                            }
-                            if let Some(app) = host {
-                                tauri::Manager::manage(&app, state.clone());
                             }
                             *guard = Some(state);
                             unidtk_api::log("mp3-player: ready (auto-sync armed)");
@@ -206,6 +205,59 @@ impl Mp3PlayerModule {
             self.starting.store(false, Ordering::SeqCst);
             unidtk_api::log(format!("mp3-player: start thread failed: {error}"));
         }
+    }
+}
+
+// ── Commands ────────────────────────────────────────────────────────────────
+// The answers keep the shapes of the Tauri commands of the same names. A command
+// before the background start published the state fails as "music core not ready yet".
+
+/// Runs an async command body on the blocking thread the kernel dispatches on.
+fn block<F: std::future::Future>(future: F) -> F::Output {
+    tauri::async_runtime::block_on(future)
+}
+
+unidtk_api::module_commands! {
+    impl Mp3PlayerModule {
+        read_ui "get_config" "Player settings" |this| Ok(crate::commands::get_config(&this.app_state()?));
+        read_ui "get_config_path" "Where the player settings live" |this| Ok(crate::commands::get_config_path(&this.app_state()?));
+        write "save_config" "Save player settings" |this, config: crate::library::config::AppConfig| crate::commands::save_config(&this.app_state()?, config);
+        read_only "list_tracks" "Library tracks" |this, search: Option<String>, sort_key: Option<String>, sort_dir: Option<String>| block(crate::commands::list_tracks(&this.app_state()?, search, sort_key, sort_dir));
+        read_ui "get_track" "One track" |this, track_id: String| block(crate::commands::get_track(&this.app_state()?, track_id));
+        read_only "list_playlists" "Library playlists" |this| block(crate::commands::list_playlists(&this.app_state()?));
+        read_ui "list_playlist_tracks" "Tracks of a playlist" |this, playlist_id: String, sort_key: Option<String>, sort_dir: Option<String>| block(crate::commands::list_playlist_tracks(&this.app_state()?, playlist_id, sort_key, sort_dir));
+        write "sync_url" "Download a playlist or track from a URL" |this, url: String, name: Option<String>| block(crate::commands::sync_url(&this.app_state()?, url, name));
+        write "sync_playlist" "Sync one playlist with its source" |this, playlist_id: String| block(crate::commands::sync_playlist(&this.app_state()?, playlist_id));
+        write "sync_all" "Sync every playlist" |this| block(crate::commands::sync_all(&this.app_state()?));
+        read_ui "sync_tasks" "Running and finished sync tasks" |this| block(crate::commands::sync_tasks(&this.app_state()?));
+        write "update_ytdlp" "Update yt-dlp" |this| block(crate::commands::update_ytdlp(&this.app_state()?));
+        write "player_load_queue" "Play a list of tracks" |this, track_ids: Vec<String>, start_index: usize| block(crate::commands::player_load_queue(&this.app_state()?, track_ids, start_index));
+        write "player_load_view_queue" "Play the tracks of a library view" |this, playlist_id: Option<String>, search: Option<String>, sort_key: Option<String>, sort_dir: Option<String>, start_index: usize| block(crate::commands::player_load_view_queue( &this.app_state()?, playlist_id, search, sort_key, sort_dir, start_index, ) );
+        write "player_toggle_pause" "Pause or resume" |this| block(crate::commands::player_toggle_pause(&this.app_state()?));
+        write "player_set_pause" "Pause or resume explicitly" |this, paused: bool| block(crate::commands::player_set_pause(&this.app_state()?, paused));
+        write "player_seek" "Seek within the track" |this, seconds: f64| block(crate::commands::player_seek(&this.app_state()?, seconds));
+        write "player_set_volume" "Player volume" |this, volume: f64| block(crate::commands::player_set_volume(&this.app_state()?, volume));
+        write "player_next" "Next track" |this| block(crate::commands::player_next(&this.app_state()?));
+        write "player_previous" "Previous track" |this| block(crate::commands::player_previous(&this.app_state()?));
+        read_only "player_status" "Music player state" |this| Ok(crate::commands::player_status(&this.app_state()?));
+        write "toggle_ai_dj" "Turn the AI DJ on or off" |this, enabled: bool| block(crate::commands::toggle_ai_dj(&this.app_state()?, enabled));
+        read_only "ai_dj_status" "AI DJ state" |this| Ok(crate::commands::ai_dj_status(&this.app_state()?));
+        write "ai_dj_model_download" "Download the AI DJ model into the data directory" |this| crate::commands::ai_dj_model_download();
+        write "ai_dj_build_queue" "Order tracks with the AI DJ" |this, track_ids: Vec<String>| block(crate::commands::ai_dj_build_queue(&this.app_state()?, track_ids));
+        read_ui "get_crossfade_duration" "Crossfade length" |this| Ok(crate::commands::get_crossfade_duration(&this.app_state()?));
+        write "set_crossfade_duration" "Set the crossfade length" |this, seconds: f64| crate::commands::set_crossfade_duration(&this.app_state()?, seconds);
+        write "check_track_finished" "Advance when the track has ended" |this| block(crate::commands::check_track_finished(&this.app_state()?));
+        write "analyze_tracks" "Analyze tracks not analyzed yet" |this| block(crate::commands::analyze_tracks(&this.app_state()?));
+        write "reanalyze_tracks" "Analyze every track again" |this| block(crate::commands::reanalyze_tracks(&this.app_state()?));
+        read_ui "ai_dj_history" "AI DJ decisions so far" |this| Ok(crate::commands::ai_dj_history(&this.app_state()?));
+        read_ui "ai_dj_graph" "Similarity graph of the library" |this| block(crate::commands::ai_dj_graph(&this.app_state()?));
+        write "ai_dj_undo" "Undo the last AI DJ step" |this| block(crate::commands::ai_dj_undo(&this.app_state()?));
+        write "ai_dj_set_mode" "Set the AI DJ mode" |this, mode: String| block(crate::commands::ai_dj_set_mode(&this.app_state()?, mode));
+        read_ui "ai_dj_get_mode" "AI DJ mode" |this| Ok(crate::commands::ai_dj_get_mode(&this.app_state()?));
+        read_only "get_submodules" "Music submodule state" |this| Ok(crate::commands::get_submodules(&this.app_state()?));
+        write "set_submodule_setting" "Change a submodule setting" |this, module: String, key: String, value: serde_json::Value| block(crate::commands::set_submodule_setting(&this.app_state()?, module, key, value));
+        write "rename_playlist" "Rename a playlist" |this, playlist_id: String, name: String| block(crate::commands::rename_playlist(&this.app_state()?, playlist_id, name));
+        write "delete_playlist" "Delete a playlist" |this, playlist_id: String| block(crate::commands::delete_playlist(&this.app_state()?, playlist_id));
     }
 }
 
@@ -277,8 +329,16 @@ impl unidtk_api::Module for Mp3PlayerModule {
         Ok(())
     }
 
+    fn commands(&self) -> &'static [unidtk_api::commands::CommandSpec] {
+        Self::COMMANDS
+    }
+
+    fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
+        self.dispatch_command(cmd, args)
+    }
+
     /// `begin_shutdown` is one-way, so the switch stops the work by hand and
-    /// keeps the state the host already manages.
+    /// keeps the state.
     fn suspend(&self) -> Result<(), String> {
         SUSPENDED.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(state) = self.state() {

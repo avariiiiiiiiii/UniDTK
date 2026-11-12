@@ -21,18 +21,18 @@ A module is registered in [core/kernel/registry.rs](../../core/kernel/registry.r
 
 ## 15.3 Commands of a module
 
-A module answers for its commands through `ipc_call`, with the signature `ModuleIpcFn`:
+A module declares its commands in one table, with the `module_commands!` macro from [core/api/src/commands.rs](../../core/api/src/commands.rs):
 
 ```rust
-fn(cmd: &str, args: &serde_json::Value, host: Option<HostHandle<'_>>)
-    -> Option<Result<serde_json::Value, String>>
+unidtk_api::module_commands! {
+    impl VpnModule {
+        read_only "vpn_status" "VPN runtime status" |this| Ok(status(&this.runtime));
+        write "vpn_connect" "Connect to a server" |this, tag: Option<String>| connect(&this.runtime, tag);
+    }
+}
 ```
 
-It returns `None` when the command is not its own. The kernel then reports the module as registered but not handling the command, which is a build inconsistency and not a silent answer. To add a command, the module:
-
-1. declares it in [command_inventory.rs](../../core/kernel/command_inventory.rs), with `read_only`, `read_only_cli`, or `write`,
-2. implements it in its own `ipc_call`, with the name taken from the inventory constant,
-3. gets one line in `MODULE_ROUTES`, and, if the kernel must route it, one handler in `ROUTES`.
+Each line gives the access (`read_only`, `read_ui`, or `write`), the name, a summary, the arguments with their types, and a body that returns `Result<T, String>`. The macro generates the module's `COMMANDS` and its `dispatch_command`, which the module returns from `Module::commands` and `Module::dispatch`, so a declared command cannot lack a handler. To add a command, the module adds one line; the kernel does not change. The registry refuses at startup a name that two modules, or a module and the kernel, both declare, and the test `the_real_modules_claim_distinct_commands` fails before that.
 
 A write must also be listed in the facade's `WS_WRITES`, and a read in `WS_COMMANDS`, once it is verified. Chapter 4 explains why.
 
@@ -53,9 +53,9 @@ The rule for modules is narrower than it was. A module must not depend on the ke
 
 Some guarantees cannot be checked by a build script, because `generate_handler!` is a macro, and a build script cannot read it. These are tests:
 
-- `every_socket_command_has_a_handler` and `every_command_has_a_handler`: every declared command has a route.
-- `every_manifest_ui_command_is_registered`: every command declared for the UI door is registered in the kernel's `generate_handler!`.
-- `frontend_invoke_names_are_registered`: every literal name in `invoke("...")` in the interface is a registered command. Plugin commands, such as `plugin:fs|...`, are skipped.
+- `every_socket_command_has_a_handler` and `every_command_has_a_handler`: every kernel command has a route. A module command has one by construction.
+- `every_manifest_ui_command_is_registered`: every kernel command declared for the UI door is registered in the kernel's `generate_handler!`.
+- `frontend_invoke_names_are_registered`: every literal name in `invoke("...")` in the interface is a kernel command or a command in a module's table. Plugin commands, such as `plugin:fs|...`, are skipped.
 - `frontend_listen_names_exist_in_rust`: every literal name in `listen("...")` is a string literal in the Rust code. This proves the name exists, not that the event is emitted on every path. A text analysis cannot be stricter, because some names are built dynamically.
 - `simulate_probes_name_real_socket_commands`: the probes of `doctor -simulate` name real read-only socket commands.
 

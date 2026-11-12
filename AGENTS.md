@@ -141,7 +141,7 @@ The rules live in [the reference](docs/reference/README.md), each under a stable
 | Area | Rules | Chapter |
 | :--- | :--- | :--- |
 | Kernel and startup | `kernel.core-invisible`, `kernel.menu-in-core`, `kernel.stable-api`, `kernel.no-blocking-main-thread`, `kernel.main-thread-once`, `repo.flat-root` | [kernel.md](docs/reference/kernel.md) |
-| Modules | `modules.vertical-slice`, `modules.compiled-crates`, `modules.contract-only`, `modules.no-module-to-module`, `modules.commands-in-core`, `modules.idempotent`, `modules.lifecycle`, `modules.states`, `modules.metadata` | [modules.md](docs/reference/modules.md) |
+| Modules | `modules.vertical-slice`, `modules.compiled-crates`, `modules.contract-only`, `modules.no-module-to-module`, `modules.command-table`, `modules.idempotent`, `modules.lifecycle`, `modules.states`, `modules.metadata` | [modules.md](docs/reference/modules.md) |
 | Storage | `storage.redb-only`, `storage.two-files`, `storage.no-raw-db`, `storage.log-queue` | [storage.md](docs/reference/storage.md) |
 | IPC | `ipc.one-contract`, `ipc.socket-read-only`, `ipc.cdp-always-on` | [ipc.md](docs/reference/ipc.md) |
 | Install | `install.program-files-read-only`, `install.data-in-localappdata`, `install.paths-in-one-place`, `install.no-absolute-paths`, `install.one-build-command`, `install.native-tasks`, `install.embed-or-bundle` | [install.md](docs/reference/install.md) |

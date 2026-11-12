@@ -17,7 +17,8 @@
 //! 2. **Module data**: [`ModuleDb`]. The core itself allocates the module a key namespace
 //!    from its id, so "its own part of the database" exists automatically, and the module
 //!    cannot take someone else's name.
-//! 3. **Lifecycle**: [`Module`]: id, initialization, shutdown.
+//! 3. **Lifecycle and commands**: [`Module`]: id, initialization, shutdown, and the
+//!    commands the module serves, declared with [`module_commands!`].
 //!
 //! ## Why services are global rather than context-based
 //!
@@ -36,6 +37,10 @@ use serde_json::Value;
 pub mod commands;
 pub mod manifest;
 pub mod paths;
+
+// For `module_commands!`, so a module needs no `serde_json` of its own to use it.
+#[doc(hidden)]
+pub use serde_json as __serde_json;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Module identification
@@ -720,6 +725,19 @@ pub trait Module: Send + Sync {
     /// Enabling on the fly, including a module that was disabled since the last launch.
     fn resume(&self, ctx: ModuleContext) -> Result<(), String> {
         self.init(ctx)
+    }
+
+    /// The commands this module serves, usually the `COMMANDS` its
+    /// [`module_commands!`] table generates.
+    fn commands(&self) -> &'static [commands::CommandSpec] {
+        &[]
+    }
+
+    /// Runs one of [`Self::commands`], usually through the table's `dispatch_command`.
+    /// `None` means the name is not this module's. The kernel calls it on a blocking
+    /// thread, never on the main thread, and only after the door was checked.
+    fn dispatch(&self, _cmd: &str, _args: &Value) -> Option<Result<Value, String>> {
+        None
     }
 }
 

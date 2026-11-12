@@ -7,9 +7,9 @@
 //! It is deliberately free of kernel-only types (`tauri`, `redb`, Win32) — that is
 //! what makes the shared compilation possible.
 //!
-//! Scope: this inventory describes the **socket door** (what `udtk invoke` may ask
-//! for). The UI's own door is `generate_handler!` in the kernel and is expected to be
-//! folded into this table once the frontend moves off the Tauri transport.
+//! Scope: [`ALL`] describes the kernel's own commands. Each module declares its
+//! commands with its handlers, in the `unidtk_api::module_commands!` table of its own
+//! crate, and [`manifest`] lists both: the kernel's, then the modules'.
 
 use unidtk_api::commands::CommandSpec;
 
@@ -52,89 +52,8 @@ pub const COMMANDS: CommandSpec =
 pub const FRONTEND_LOG: CommandSpec =
     CommandSpec::write("frontend_log", "Append a frontend record to the journal", "{message, level?}");
 
-// ── Modules (read-only surface) ────────────────────────────────────────────────
+// ── Kernel-owned module data (moves to the Explorer module in step 4) ──────────
 
-pub const PLAYER_STATUS: CommandSpec =
-    CommandSpec::read_only("player_status", "Music player state", "");
-pub const AI_DJ_STATUS: CommandSpec =
-    CommandSpec::read_only("ai_dj_status", "AI DJ state", "");
-pub const LIST_TRACKS: CommandSpec = CommandSpec::read_only(
-    "list_tracks",
-    "Library tracks",
-    "{search, sort_key, sort_dir}",
-);
-pub const LIST_PLAYLISTS: CommandSpec =
-    CommandSpec::read_only("list_playlists", "Library playlists", "");
-pub const GET_SUBMODULES: CommandSpec =
-    CommandSpec::read_only("get_submodules", "Music submodule state", "");
-pub const GET_SYSTEM_VOLUME: CommandSpec =
-    CommandSpec::read_only("get_system_volume", "Windows master volume", "");
-
-/// The volume writes.
-///
-/// Declared as writes even though the effect is instantly visible and easily undone:
-/// `Access` is about **who may ask**, and anything that changes the machine stays off the
-/// unauthenticated socket by rule rather than by accident. They are also what makes the
-/// UI door's write path testable on real state instead of on a log record.
-pub const SET_SYSTEM_VOLUME: CommandSpec =
-    CommandSpec::write("set_system_volume", "Set the master volume", "{level}");
-pub const SET_SYSTEM_MUTE: CommandSpec =
-    CommandSpec::write("set_system_mute", "Mute or unmute the master volume", "{muted}");
-
-/// The mp3-player module's UI-door write: downloads the missing AI DJ model
-/// (~331 MB) into the data directory, explicitly commanded from the widget.
-///
-/// Declared `write` for the same policy as the other module actions — it changes
-/// the machine (writes megabytes to disk). The work is single-flight and idempotent:
-/// a call against a running or already-complete download answers `running`/`already_present`
-/// instead of starting a second chain.
-pub const AI_DJ_MODEL_DOWNLOAD: CommandSpec = CommandSpec::write(
-    "ai_dj_model_download",
-    "Download the AI DJ model into the data directory",
-    "",
-);
-pub const VPN_STATUS: CommandSpec =
-    CommandSpec::read_only("vpn_status", "VPN runtime status", "");
-pub const VPN_SETTINGS: CommandSpec =
-    CommandSpec::read_only("vpn_settings", "VPN settings", "");
-
-// ── VPN writes (the interface's own actions) ───────────────────────────────────
-
-pub const VPN_CONNECT: CommandSpec =
-    CommandSpec::write("vpn_connect", "Connect to a server (or the selected one)", "{tag?}");
-pub const VPN_DISCONNECT: CommandSpec =
-    CommandSpec::write("vpn_disconnect", "Drop the current connection", "");
-/// Not a read, though it answers with measurements: it takes a global in-progress guard
-/// and stores the results, so two callers cannot run it at once and the state it leaves
-/// behind is observable. `Access` describes what a command *does*, not how it answers.
-pub const VPN_PING_ALL: CommandSpec =
-    CommandSpec::write("vpn_ping_all", "Measure latency of every server", "");
-pub const VPN_SET_AUTO_CONNECT: CommandSpec =
-    CommandSpec::write("vpn_set_auto_connect", "Toggle connect-on-startup", "{enabled}");
-pub const VPN_LIST_SERVERS: CommandSpec =
-    CommandSpec::read_only("vpn_list_servers", "VPN servers", "");
-pub const TELEGRAM_STATUS: CommandSpec =
-    CommandSpec::read_only("telegram_status", "Telegram runtime status", "");
-pub const TELEGRAM_CHATS: CommandSpec =
-    CommandSpec::read_only("telegram_chats", "Telegram chats", "");
-pub const TELEGRAM_CHATS_ARCHIVE: CommandSpec =
-    CommandSpec::read_only("telegram_chats_archive", "Telegram archived chats", "");
-pub const TELEGRAM_SET_ARCHIVED: CommandSpec = CommandSpec::write(
-    "telegram_set_archived",
-    "Move a Telegram chat to or from Archive",
-    "{request: {chatId, archived}}",
-);
-pub const TELEGRAM_MESSAGES_AROUND: CommandSpec = CommandSpec::read_only(
-    "telegram_messages_around",
-    "Telegram messages centered around a target message ID",
-    "{chat_id, message_id, thread_id?, limit?}",
-);
-/// Named as the UI and the Tauri command name it, so one name works on both doors.
-pub const EXPLORER_DRIVES: CommandSpec =
-    CommandSpec::read_only("get_drives", "Mounted drives", "");
-/// See `EXPLORER_DRIVES`: the interface asks for `get_user_places`.
-pub const EXPLORER_PLACES: CommandSpec =
-    CommandSpec::read_only("get_user_places", "User shell folders", "");
 pub const EXPLORER_SORT_GET: CommandSpec =
     CommandSpec::read_only("explorer_sort_get", "Get explorer sort column and direction", "");
 pub const EXPLORER_SORT_SET: CommandSpec = CommandSpec::write(
@@ -143,20 +62,6 @@ pub const EXPLORER_SORT_SET: CommandSpec = CommandSpec::write(
     "{column, ascending}",
 );
 
-/// The ambient observation behind the micrographics panel.
-///
-/// `read_only`, not `read_only_cli`: the interface is what asks for this, every
-/// time it repaints. `read_only_cli` would mean "introspection of the kernel that
-/// the UI never calls" — and the refusal would be silent, because the gate test
-/// that compares the manifest with `generate_handler!` only inspects commands
-/// that claim the UI door.
-///
-/// The answer names the place it observed, which on the unauthenticated socket
-/// means any local process can ask where the user is. That is accepted for a
-/// current-conditions reading, and it is why the panel treats this as ambient
-/// context rather than as a location the user picked.
-pub const WEATHER_CURRENT: CommandSpec =
-    CommandSpec::read_only("weather_current", "Ambient weather observation", "");
 pub const WEATHER_LOCATION_REQUEST: CommandSpec =
     CommandSpec::write("weather_location_request", "Request Windows location permission for weather", "");
 
@@ -195,12 +100,12 @@ pub const SIMULATE_WIDGET_CONFIG: &str = GET_WIDGET_CONFIG.name;
 pub static SIMULATE_PROBES: &[SimulateProbe] = &[
     SimulateProbe {
         label: "Module VPN",
-        command: VPN_STATUS.name,
+        command: "vpn_status",
         args: "{}",
     },
     SimulateProbe {
         label: "Module Telegram",
-        command: TELEGRAM_STATUS.name,
+        command: "telegram_status",
         args: "{}",
     },
 ];
@@ -217,45 +122,26 @@ pub static ALL: &[&CommandSpec] = &[
     &GET_DISABLED_MODULES,
     &SET_MODULE_ENABLED,
     &COMMANDS,
-    &PLAYER_STATUS,
-    &AI_DJ_STATUS,
-    &LIST_TRACKS,
-    &LIST_PLAYLISTS,
-    &GET_SUBMODULES,
-    &GET_SYSTEM_VOLUME,
-    &SET_SYSTEM_VOLUME,
-    &SET_SYSTEM_MUTE,
-    &AI_DJ_MODEL_DOWNLOAD,
-    &VPN_STATUS,
-    &VPN_SETTINGS,
-    &VPN_LIST_SERVERS,
-    &VPN_CONNECT,
-    &VPN_DISCONNECT,
-    &VPN_PING_ALL,
-    &VPN_SET_AUTO_CONNECT,
-    &TELEGRAM_STATUS,
-    &TELEGRAM_CHATS,
-    &TELEGRAM_CHATS_ARCHIVE,
-    &TELEGRAM_SET_ARCHIVED,
-    &TELEGRAM_MESSAGES_AROUND,
-    &EXPLORER_DRIVES,
-    &EXPLORER_PLACES,
     &EXPLORER_SORT_GET,
     &EXPLORER_SORT_SET,
-    &WEATHER_CURRENT,
     &WEATHER_LOCATION_REQUEST,
 ];
 
-/// The subset actually served over the socket (the CLI's door).
-// The bridge binary only needs `ALL`: it describes the surface, it does not serve it.
-#[allow(dead_code)]
-pub fn socket_commands() -> Vec<&'static CommandSpec> {
-    ALL.iter().copied().filter(|spec| spec.on_socket()).collect()
+/// Every command of the application: the kernel's, then each module's.
+pub fn manifest() -> Vec<&'static CommandSpec> {
+    ALL.iter()
+        .copied()
+        .chain(crate::registry::all_module_commands().into_iter().map(|(_, spec)| spec))
+        .collect()
 }
 
-/// Look a command up by name.
-// Same: used by the kernel's router, not by the CLI.
+/// The subset actually served over the socket (the CLI's door).
 #[allow(dead_code)]
+pub fn socket_commands() -> Vec<&'static CommandSpec> {
+    manifest().into_iter().filter(|spec| spec.on_socket()).collect()
+}
+
+/// Look a kernel command up by name; a module's command is the registry's.
 pub fn find(name: &str) -> Option<&'static CommandSpec> {
     ALL.iter().copied().find(|spec| spec.name == name)
 }
@@ -266,14 +152,15 @@ mod tests {
 
     #[test]
     fn names_are_unique_and_described() {
-        for (index, spec) in ALL.iter().enumerate() {
+        let manifest = manifest();
+        for (index, spec) in manifest.iter().enumerate() {
             assert!(!spec.name.is_empty(), "command #{index} has no name");
             assert!(
                 !spec.summary.is_empty(),
                 "command '{}' has no summary — a command without a description is undocumented by construction",
                 spec.name
             );
-            let duplicates = ALL
+            let duplicates = manifest
                 .iter()
                 .filter(|other| other.name == spec.name)
                 .count();
@@ -317,7 +204,7 @@ mod tests {
     #[test]
     fn simulate_probes_name_real_socket_commands() {
         for probe in super::SIMULATE_PROBES {
-            let spec = find(probe.command).unwrap_or_else(|| {
+            let spec = manifest().into_iter().find(|spec| spec.name == probe.command).unwrap_or_else(|| {
                 panic!(
                     "simulate probe '{}' names '{}', which the inventory does not know",
                     probe.label, probe.command

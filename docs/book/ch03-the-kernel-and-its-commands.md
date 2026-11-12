@@ -27,13 +27,14 @@ pub struct CommandSpec {
 impl CommandSpec {
     pub const fn read_only(name, summary, args) -> Self { /* doors: Socket + Ui */ }
     pub const fn read_only_cli(name, summary, args) -> Self { /* doors: Socket only */ }
+    pub const fn read_ui(name, summary, args) -> Self { /* doors: Ui only */ }
     pub const fn write(name, summary, args) -> Self { /* doors: Ui only, Unsafe */ }
 }
 ```
 
-The three constructors encode the policy. A `write` is never served on the socket, and it is marked as not safe to retry, so a client that reconnects will not repeat it. A `read_only_cli` is a read that only the CLI needs, such as the `ping` or the log readers, so it does not claim the page's door. The constructor names carry the decision, and the code does not have to repeat it.
+The four constructors encode the policy. A `write` is never served on the socket, and it is marked as not safe to retry, so a client that reconnects will not repeat it. A `read_only_cli` is a read that only the CLI needs, such as the `ping` or the log readers, so it does not claim the page's door. A `read_ui` is the converse: a read only the page needs, such as a file preview, kept off the unauthenticated socket. The constructor names carry the decision, and the code does not have to repeat it.
 
-Next, the command is listed in one inventory, `core/kernel/command_inventory.rs`. Each command is a `const`, and the constant `ALL` lists them all.
+Next, the command is listed where its handler lives. A kernel command is a `const` in `core/kernel/command_inventory.rs`, and the constant `ALL` lists them all. A module's command is declared in the module's own crate, as section 4.5 shows, and `manifest()` in the same file lists both.
 
 Filename: core/kernel/command_inventory.rs (abridged)
 
@@ -41,19 +42,19 @@ Filename: core/kernel/command_inventory.rs (abridged)
 pub const PING: CommandSpec =
     CommandSpec::read_only_cli("ping", "Liveness probe; also reports the CDP port", "");
 
-pub const SET_SYSTEM_VOLUME: CommandSpec =
-    CommandSpec::write("set_system_volume", "Set the master volume", "{level}");
+pub const FRONTEND_LOG: CommandSpec =
+    CommandSpec::write("frontend_log", "Append a frontend record to the journal", "{message, level?}");
 
 pub static ALL: &[&CommandSpec] = &[
     &PING,
-    &SET_SYSTEM_VOLUME,
+    &FRONTEND_LOG,
     // ...
 ];
 ```
 
 The file says it is compiled into both binaries. `opt/cli/main.rs` includes it with a `#[path]` attribute, and so does the kernel, which declares it with `mod command_inventory;` in `core/kernel/main.rs`. The CLI therefore knows the same names the kernel serves, and a test in the file fails if a name is declared twice or has no summary.
 
-Note: the file `core/kernel/registry.rs` is included by the CLI in the same way, but it is not the command list. It holds `all_modules()`, the list of module factories, and it is named after the modules, not after commands. Commands are in `command_inventory.rs`.
+Note: the file `core/kernel/registry.rs` is included by the CLI in the same way. It holds `all_modules()`, the list of module factories, and `all_module_commands()`, which asks each module for its commands. That is how the CLI's offline manifest lists the modules' commands without the application running.
 
 ## Routing a socket request
 
@@ -68,17 +69,13 @@ static ROUTES: &[(&str, Handler)] = &[
     (crate::command_inventory::PING.name, handle_ping),
     (crate::command_inventory::LOGS.name, handle_logs),
     // ...
-    (crate::command_inventory::VPN_STATUS.name, handle_vpn_status),
+    // ...
 ];
-
-fn handle_vpn_status(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    call_module(server, "vpn", crate::command_inventory::VPN_STATUS.name, args)
-}
 ```
 
-Commands that belong to a module go one step further. The kernel does not know what the VPN does. The handler `handle_vpn_status()` calls `call_module()`, which looks up the module in `MODULE_ROUTES` and calls its `ipc_call` function. That function has the type `ModuleIpcFn` from `core/api/src/commands.rs`. It takes the command name, the arguments, and an opaque host handle, and it returns `None` when the module does not know the command. The module owns its own logic, and the kernel owns the names and the routing. The same division holds for Tauri commands, as [modules.commands-in-core](../reference/modules.md#r-modules.commands-in-core) states: a module exposes plain functions, and the kernel wraps them.
+A module's command has no entry here. The kernel does not know what the VPN does: `dispatch()` asks the module registry which module declares the name, and calls that module's `dispatch` through `serve_module()`. The module owns its logic and its names, and the kernel owns only the routing, as [modules.command-table](../reference/modules.md#r-modules.command-table) states.
 
-The page's own door works differently in one respect. The commands the page calls through Tauri's `invoke` are functions marked `#[tauri::command]` in `core/kernel/main.rs`, and they are listed in a `generate_handler!` macro inside `main()`. That is a second list, separate from the inventory. The comment in `command_inventory.rs` says it should be folded into the inventory later. Until then, a test in `main.rs` checks that every `invoke("...")` name in the page appears in the macro, so a page call cannot refer to a command that does not exist.
+The page's own door, Tauri's `invoke`, reaches the same two places. The kernel's commands are functions marked `#[tauri::command]` in `core/kernel/main.rs`, listed in a `generate_handler!` macro inside `main()`. The kernel wraps the handler that macro builds in its own `invoke_handler`: a name that a module declares goes to `serve_module()` on the blocking pool, and every other name to the generated handler. A test in `main.rs` checks that every `invoke("...")` name in the page is served by one of the two, so a page call cannot refer to a command that does not exist.
 
 Warning: a command can be declared in the inventory and still have no handler. The route tests in `ipc.rs` (`every_command_has_a_handler`) fail in that case, so a missing handler is caught by `cargo test`, not discovered at runtime.
 
@@ -95,7 +92,12 @@ pub fn dispatch(&self, req: &serde_json::Value, door: Door) -> Result<serde_json
     let cmd = req["cmd"].as_str().unwrap_or("");
     let args = req["args"].as_object().cloned().unwrap_or_default();
 
-    check_door(cmd, door)?;           // inventory: exists, and this door serves it
+    let Some(spec) = crate::command_inventory::find(cmd) else {
+        // not the kernel's: a module's command, or unknown
+        return serve_module(&self.app, cmd, &Value::Object(args), door)
+            .unwrap_or_else(|| check_door(cmd, None, door).map(|_| Value::Null));
+    };
+    check_door(cmd, Some(spec), door)?; // this door serves it
 
     match ROUTES.iter().find(|(name, _)| *name == cmd) {
         Some((_, handler)) => handler(self, &args),
@@ -104,7 +106,7 @@ pub fn dispatch(&self, req: &serde_json::Value, door: Door) -> Result<serde_json
 }
 ```
 
-`check_door()` is a free function, so it can be tested without a running application. It looks the name up in the inventory. An unknown name gives `unknown cmd: ...`. A known name that the door does not serve gives a refusal that says why. The refusal for a write on the socket is the message `command 'set_system_volume' is not available on the socket door: it changes state, and write commands stay on the UI door`. That is correct behavior, and the CLI shows it to the user as it is.
+`check_door()` is a free function, so it can be tested without a running application. It takes the spec the caller found, the kernel's or a module's. An unknown name gives `unknown cmd: ...`. A known name that the door does not serve gives a refusal that says why. The refusal for a write on the socket is the message `command 'set_system_volume' is not available on the socket door: it changes state, and write commands stay on the UI door`. That is correct behavior, and the CLI shows it to the user as it is.
 
 The reply is built by `respond()`, which puts the result or the error in an envelope with the protocol version `v`, and echoes the `id` if one was sent. A successful `ping` therefore returns a line like `{"ok":true,"result":{"pong":true,...},"v":1}`.
 
@@ -180,4 +182,4 @@ Warning: delivery to a subscriber is a `try_send` into a bounded channel of 64 f
 
 ## Summary
 
-A command is declared once, as a `CommandSpec` with a door policy, and listed in `command_inventory.rs`. It is routed to a handler in `ipc.rs` on the socket, or to a Tauri function on the page's door, and module commands are forwarded to the module's `ipc_call`. Every socket request passes the door check in `dispatch()` before it reaches a handler, so a write cannot be served there. Events go through `unidtk_api::emit`, which keeps the last value, notifies in-process subscribers, and hands the event to the kernel, which sends it to the page and to the numbered broker. The next chapter covers the modules that register their commands and events in this way: [Chapter 4, Modules](ch04-modules.md).
+A command is declared once, as a `CommandSpec` with a door policy, and listed in `command_inventory.rs`. A kernel command is routed to a handler in `ipc.rs` on the socket, or to a Tauri function on the page's door; a module command is declared in the module's own table and served by its `dispatch` through `serve_module()` on every door. Every request passes the door check before it reaches a handler, so a write cannot be served on the socket. Events go through `unidtk_api::emit`, which keeps the last value, notifies in-process subscribers, and hands the event to the kernel, which sends it to the page and to the numbered broker. The next chapter covers the modules that register their commands and events in this way: [Chapter 4, Modules](ch04-modules.md).

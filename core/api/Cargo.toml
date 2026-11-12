@@ -6,13 +6,15 @@ description = "Stable contract between the UniDTK kernel and its modules"
 
 # The contract is deliberately thin: no tauri, no redb, no Win32. A module must
 # be able to depend on this crate alone (r[kernel.stable-api] — updating the core
-# must not break modules). `serde_json` carries event payloads; `dirs` resolves
-# the shared data directory so modules do not need the kernel for that either.
+# must not break modules). `serde_json` carries event payloads and command
+# arguments, `serde` names their traits; `dirs` resolves the shared data
+# directory so modules do not need the kernel for that either.
 
 [lib]
 name = "unidtk_api"
 path = "src/lib.rs"
 
 [dependencies]
+serde = "1"
 serde_json = "1"
 dirs = "5"

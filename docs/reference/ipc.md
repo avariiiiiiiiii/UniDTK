@@ -4,7 +4,7 @@ The kernel can be asked to do things through two doors. This chapter states what
 
 r[ipc.one-contract]
 
-There is one command contract with two doors. Every command is declared once in `core/kernel/command_inventory.rs`, which both `unidtk.exe` and `udtk.exe` compile, so the names served and the names the CLI knows cannot drift apart.
+There is one command contract with two doors. Every command is declared once: a kernel command in `core/kernel/command_inventory.rs`, a module command in its module's table ([modules.command-table](modules.md#r-modules.command-table)). Both `unidtk.exe` and `udtk.exe` compile both, so the names served and the names the CLI knows cannot drift apart. Every door checks a command against the same spec, and a module command takes the same path, `serve_module` in `core/kernel/ipc.rs`, through every door.
 
 - **The interface door** is how the page in the window talks to the kernel: Tauri `invoke`, or an authenticated WebSocket.
 - **The socket door** is TCP on `127.0.0.1:26540`, used by `udtk`.
