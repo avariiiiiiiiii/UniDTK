@@ -393,6 +393,9 @@ pub(crate) fn end_layer(instances: &mut Vec<Instance>, surfaces: &mut [crate::na
     }
 }
 
+/// The views (textures, buffers) every bind group of a device may hold at once.
+const MAX_VIEW_DESCRIPTORS: u32 = 65_536;
+
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -518,6 +521,10 @@ impl Gpu {
                     .using_alignment(adapter_limits)
             }
         };
+        // DX12 sizes its shader-visible view heap by this limit, and the default of
+        // 1,000,000 commits it in full: 61 MB of process memory with Intel's 64-byte
+        // descriptors (UniDTK, core/rune/UPSTREAM.md). Rune's bind groups hold a few hundred.
+        let required_limits = wgpu::Limits { max_non_sampler_bindings: required_limits.max_non_sampler_bindings.min(MAX_VIEW_DESCRIPTORS), ..required_limits };
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rune"),
             required_features,
