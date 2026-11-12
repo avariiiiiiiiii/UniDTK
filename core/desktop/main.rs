@@ -7,7 +7,7 @@
 //! through DirectComposition, which is proven for top-level windows only.
 //!
 //! `unidtk-desktop --probe-transparency <report.json>` answers it on this machine: it reads
-//! a few screen pixels, attaches a full-screen transparent window with one half-transparent
+//! a few pixels of the desktop host as DWM composed it, attaches a full-screen transparent window with one half-transparent
 //! card, reads the same pixels again, writes the report and exits.
 
 mod desktop_host;
@@ -19,8 +19,14 @@ use std::time::Duration;
 use rune::el::{el, text};
 use rune::{App, AppSpec, Color, WindowOptions};
 
-/// The card the probe draws, in physical pixels of the primary display.
+/// The card the probe draws, in Rune's points; the screen has `scale()` pixels per point.
 const CARD: (i32, i32, i32, i32) = (120, 520, 320, 200);
+
+/// Physical pixels per point: Rune lays out in points, the reads are in pixels (1.5 at
+/// 150 %; the first probes sampled unscaled points and missed the card).
+fn scale() -> f32 {
+    unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() as f32 / 96.0 }
+}
 
 struct Probe;
 
@@ -49,17 +55,18 @@ fn main() {
 /// Points outside the card must not change; the point inside must.
 fn sample_points() -> Vec<(&'static str, i32, i32)> {
     let (x, y, w, h) = CARD;
+    let px = |points: i32| (points as f32 * scale()).round() as i32;
     vec![
-        ("inside", x + w / 2, y + h / 2),
-        ("outside-left", x - 60, y + h / 2),
-        ("outside-below", x + w / 2, y + h + 80),
-        ("outside-far", 1600, 900),
+        ("inside", px(x + w / 2), px(y + h / 2)),
+        ("outside-left", px(x - 60), px(y + h / 2)),
+        ("outside-above", px(x + w / 2), px(y - 60)),
+        ("outside-far", px(1000), px(600)),
     ]
 }
 
 fn probe_transparency(report: std::path::PathBuf) {
     let points = sample_points();
-    let before = desktop_host::read_pixels(&points);
+    let before = desktop_host::read_pixels(&points, "before");
     let attached = Arc::new(AtomicBool::new(false));
     let (width, height) = desktop_host::primary_size();
 
@@ -101,7 +108,7 @@ fn probe_transparency(report: std::path::PathBuf) {
         }
         let attach_ms = started.elapsed().as_millis();
         std::thread::sleep(Duration::from_millis(1500));
-        let after = desktop_host::read_pixels(&points);
+        let after = desktop_host::read_pixels(&points, "after");
         let rows: Vec<serde_json::Value> = points
             .iter()
             .zip(before.iter().zip(after.iter()))
@@ -128,6 +135,7 @@ fn probe_transparency(report: std::path::PathBuf) {
             "notes": rune::marks::notes(),
             "visible": handle.is_visible(),
             "host": desktop_host::host_description(),
+            "scale": scale(),
             "transparent": outside_kept && inside_changed,
             "outside_kept": outside_kept,
             "inside_changed": inside_changed,

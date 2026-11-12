@@ -1,15 +1,17 @@
 //! The host's own attach under the desktop (the kernel keeps its copy in
-//! `core/kernel/wallpaper.rs` for the WebView window until G5) and the screen reads the
-//! transparency probe compares.
+//! `core/kernel/wallpaper.rs` for the WebView window until G5) and the reads of the
+//! desktop host the transparency probe compares.
 
 use std::sync::Mutex;
 
 use windows::core::w;
 use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, GetPixel,
-    MonitorFromPoint, ReleaseDC, SelectObject, CAPTUREBLT, MONITORINFO, MONITOR_DEFAULTTOPRIMARY, SRCCOPY,
+    CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, GetMonitorInfoW, GetPixel,
+    MonitorFromPoint, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
+    MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetWindowLongW, GetWindowRect, SendMessageTimeoutW,
     SetLayeredWindowAttributes, SetParent, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
@@ -130,27 +132,69 @@ pub fn attach(hwnd: isize) -> Result<(), String> {
     Ok(())
 }
 
-/// The composed screen colour at each point, as `[r, g, b]`. `CAPTUREBLT` includes
-/// layered windows, which a plain screen copy leaves out.
-pub fn read_pixels(points: &[(&'static str, i32, i32)]) -> Vec<[u8; 3]> {
+/// The colour at each point of the desktop host as DWM composed it, children included,
+/// as `[r, g, b]`. `PrintWindow` with `PW_RENDERFULLCONTENT` reads the host even while
+/// other windows cover it, which a screen copy cannot. With `UNIDTK_PROBE_DUMP=<dir>` the
+/// whole image is also written there as `<label>.bmp`.
+pub fn read_pixels(points: &[(&'static str, i32, i32)], label: &str) -> Vec<[u8; 3]> {
+    let Ok(host) = desktop_host() else {
+        return vec![[0, 0, 0]; points.len()];
+    };
     unsafe {
+        let mut rect = RECT::default();
+        let _ = GetWindowRect(host, &mut rect);
+        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
         let screen = GetDC(HWND::default());
         let memory = CreateCompatibleDC(screen);
-        let (width, height) = primary_size();
         let bitmap = CreateCompatibleBitmap(screen, width, height);
         let old = SelectObject(memory, bitmap);
-        let _ = BitBlt(memory, 0, 0, width, height, screen, 0, 0, SRCCOPY | CAPTUREBLT);
+        let printed = PrintWindow(host, memory, PRINT_WINDOW_FLAGS(2)).as_bool(); // PW_RENDERFULLCONTENT
+        note(&format!("read {label}: PrintWindow {printed} {width}x{height}"));
         let pixels = points
             .iter()
             .map(|(_, x, y)| {
-                let color = GetPixel(memory, *x, *y).0;
+                let color = GetPixel(memory, *x - rect.left, *y - rect.top).0;
                 [(color & 0xFF) as u8, ((color >> 8) & 0xFF) as u8, ((color >> 16) & 0xFF) as u8]
             })
             .collect();
+        if let Ok(dir) = std::env::var("UNIDTK_PROBE_DUMP") {
+            dump_bmp(memory, bitmap, width, height, &std::path::Path::new(&dir).join(format!("{label}.bmp")));
+        }
         SelectObject(memory, old);
         let _ = DeleteObject(bitmap);
         let _ = DeleteDC(memory);
         ReleaseDC(HWND::default(), screen);
         pixels
     }
+}
+
+/// Writes a 32-bit top-down BMP of `bitmap`.
+unsafe fn dump_bmp(memory: HDC, bitmap: HBITMAP, width: i32, height: i32, path: &std::path::Path) {
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut data = vec![0u8; (width * height * 4) as usize];
+    let lines = GetDIBits(memory, bitmap, 0, height as u32, Some(data.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
+    if lines == 0 {
+        return;
+    }
+    let header_size = 14 + std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    let mut file = Vec::with_capacity(header_size as usize + data.len());
+    file.extend_from_slice(b"BM");
+    file.extend_from_slice(&(header_size + data.len() as u32).to_le_bytes());
+    file.extend_from_slice(&0u32.to_le_bytes());
+    file.extend_from_slice(&header_size.to_le_bytes());
+    let header = std::slice::from_raw_parts((&info.bmiHeader as *const BITMAPINFOHEADER).cast::<u8>(), std::mem::size_of::<BITMAPINFOHEADER>());
+    file.extend_from_slice(header);
+    file.extend_from_slice(&data);
+    let _ = std::fs::write(path, file);
 }
