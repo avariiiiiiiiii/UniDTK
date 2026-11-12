@@ -18,6 +18,8 @@ The order is from small and isolated to large: Win+E first, then shutdown, then 
 
 **Done when.** With a browser in front, Win+E opens the Windows Explorer and not the overlay; on the empty desktop it opens the overlay.
 
+**Reversed by the owner (session 138).** Tried live, the owner wants the opposite: Win+E always opens the shell's Explorer, over any window, and first minimises every window, so the overlay opens on the desktop and Windows' own Explorer never does. The Explorer's `HotkeySpec` has `desktop_only: false`, and `shows_desktop` minimises every window (the taskbar's "minimise all" command, `wallpaper::minimize_all_windows`) before the event. The `Desktop` scope stays in the hook for hotkeys that want it.
+
 ## Step 2. Shutdown (#326)
 
 ### 2a. A second shutdown waits for the first

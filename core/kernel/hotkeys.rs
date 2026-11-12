@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
     OnceLock, RwLock, mpsc::{sync_channel, SyncSender},
 };
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ pub struct HotkeyDefinition {
     /// What a match publishes. `None` for the kernel's own entries, which publish
     /// `hotkey-pressed` with their id; a module's entry names its own event.
     pub event: Option<String>,
-    /// Bring the desktop forward before publishing.
+    /// Minimise every window and attach the desk before publishing.
     pub shows_desktop: bool,
 }
 
@@ -242,6 +242,19 @@ thread_local! {
     };
 }
 static ACTIONS: OnceLock<SyncSender<String>> = OnceLock::new();
+/// The foreground window when the hook last queued a hotkey, so the action thread can say
+/// over what it fired. The hook only stores it: naming it is too slow for the hook.
+static TRIGGER_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
+
+/// `class pid=N` of a window, for the log.
+fn describe_window(hwnd: isize) -> String {
+    let hwnd = HWND(hwnd as _);
+    let mut class = [0u16; 128];
+    let len = unsafe { windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut class) };
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32)) };
+    format!("0x{:X} {} pid={pid}", hwnd.0 as usize, String::from_utf16_lossy(&class[..len.max(0) as usize]))
+}
 
 fn system_key(vk: u32) -> bool {
     matches!(vk, 0x10..=0x14 | 0x5B..=0x5C | 0x90..=0x91 | 0xA0..=0xA5)
@@ -345,6 +358,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         && key.ctrl_required == ctrl && key.alt_required == alt
         && key.shift_required == shift && key.scope.admits(foreground)).cloned());
     if let Some(key) = hotkey {
+        TRIGGER_FOREGROUND.store(GetForegroundWindow().0 as isize, Ordering::Relaxed);
         if ACTIONS.get().is_some_and(|tx| tx.try_send(key.id.clone()).is_ok()) {
             if key.swallow {
                 if key.win_required { mask_start_menu(); }
@@ -414,8 +428,10 @@ pub fn init(app: AppHandle) {
                 });
                 match action {
                     Some((Some(event), shows_desktop)) => {
-                        crate::log_line(format!("hotkeys: {id} triggered, publishing {event}"));
+                        let over = describe_window(TRIGGER_FOREGROUND.load(Ordering::Relaxed));
+                        crate::log_line(format!("hotkeys: {id} triggered over {over} (ours: pid={}), publishing {event}", std::process::id()));
                         if shows_desktop {
+                            crate::wallpaper::minimize_all_windows();
                             crate::request_wallpaper_visible(app);
                         }
                         unidtk_api::emit(&event, serde_json::json!(""));
@@ -511,9 +527,19 @@ mod input_safety_tests {
         TEST_FOREGROUND.with(|slot| slot.set(None));
     }
 
-    // Win+E belongs to Windows outside the shell: no action, no Start mask, no owned key.
+    // A desktop-scoped hotkey still leaves a foreign application's keys to Windows.
     #[test]
-    fn desktop_hotkey_fires_only_on_the_desktop_or_the_shell() {
+    fn a_desktop_scope_admits_the_desktop_and_the_shell_only() {
+        assert!(HotkeyScope::Desktop.admits(ForegroundClass::Desktop));
+        assert!(HotkeyScope::Desktop.admits(ForegroundClass::Shell));
+        assert!(!HotkeyScope::Desktop.admits(ForegroundClass::Foreign));
+        assert!(HotkeyScope::Global.admits(ForegroundClass::Foreign));
+    }
+
+    // Win+E opens the shell's Explorer whatever is in front (the owner's decision,
+    // session 138): consumed, one action, the Start menu masked, the release kept.
+    #[test]
+    fn win_e_opens_the_shell_explorer_over_every_window() {
         // Win+E is the Explorer module's, not the kernel's.
         let explorer = unidtk_mod_explorer::create_module();
         register_module_hotkeys(explorer.hotkeys());
@@ -527,19 +553,13 @@ mod input_safety_tests {
             keyboard_hook_proc(0, WPARAM(msg as usize), LPARAM(&record as *const _ as isize)).0
         };
 
-        TEST_FOREGROUND.with(|slot| slot.set(Some(ForegroundClass::Foreign)));
-        assert_ne!(callback(WM_KEYDOWN), 1, "Win+E stolen from a foreign application");
-        assert!(rx.try_recv().is_err(), "overlay opened over a foreign application");
-        assert_eq!(START_MASKS.with(|n| n.get()), 0, "Start menu masked for a key we passed on");
-        assert_ne!(callback(WM_KEYUP), 1, "release of a passed key stolen");
-
-        for class in [ForegroundClass::Desktop, ForegroundClass::Shell] {
+        for class in [ForegroundClass::Foreign, ForegroundClass::Desktop, ForegroundClass::Shell] {
             TEST_FOREGROUND.with(|slot| slot.set(Some(class)));
-            assert_eq!(callback(WM_KEYDOWN), 1, "Win+E not consumed in the shell");
+            assert_eq!(callback(WM_KEYDOWN), 1, "Win+E reached Windows, which opens its own Explorer");
             assert_eq!(rx.try_recv().as_deref(), Ok("win_e"));
             assert_eq!(callback(WM_KEYUP), 1, "release of a consumed key leaked");
         }
-        assert_eq!(START_MASKS.with(|n| n.get()), 2);
+        assert_eq!(START_MASKS.with(|n| n.get()), 3);
 
         KEY_OWNERS.with(|keys| *keys.borrow_mut() = [None; 256]);
         TEST_MODIFIERS.with(|slot| slot.set(None));

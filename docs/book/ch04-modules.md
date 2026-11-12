@@ -59,7 +59,7 @@ Each method has one job:
 - `shutdown` stops the module's threads and processes. It receives a time budget, and the module must finish within it. A zero budget means "do not wait at all", because the caller is the main thread.
 - `commands` and `dispatch` are the module's commands: what it serves, and the call that serves one. Both usually come from the module's command table, section 4.5.
 - `state_events` names the events whose newest value is all that matters, such as the volume or the VPN state. The kernel's event broker keeps one frame of each, so a page that subscribes gets the current value at once.
-- `hotkeys` lists key combinations the module wants, such as Win+E for the Explorer. The kernel's keyboard hook matches them and publishes the event each one names, so the kernel never learns what a key means.
+- `hotkeys` lists key combinations the module wants, such as Win+E for the Explorer, which minimises every window and opens the overlay over whatever is in front. The kernel's keyboard hook matches them and publishes the event each one names, so the kernel never learns what a key means.
 - `suspend` and `resume` are the switch for a running app. Their defaults call `shutdown` and `init`, so most modules get switching for free. A module that overrides them must not set a global flag that means "the app is exiting", because the app keeps running.
 
 The trait requires `Send + Sync`, because the kernel keeps each module in its registry, which Tauri's managed state holds and every thread can reach.

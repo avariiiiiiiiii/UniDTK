@@ -687,9 +687,9 @@ impl DiagnosticContext {
 
 /// A key combination a module asks the kernel to listen for.
 ///
-/// The kernel's low-level keyboard hook matches it. On a match it brings the desktop
-/// forward when `shows_desktop` is set and publishes `event` with an empty string as
-/// the payload, so the module's page reacts without the kernel knowing what it means.
+/// The kernel's low-level keyboard hook matches it. On a match it minimises every window
+/// when `shows_desktop` is set and publishes `event` with an empty string as the payload,
+/// so the module's page reacts without the kernel knowing what it means.
 #[derive(Clone, Copy, Debug)]
 pub struct HotkeySpec {
     pub id: &'static str,
@@ -709,6 +709,8 @@ pub struct HotkeySpec {
     /// stays with Windows.
     pub desktop_only: bool,
     pub event: &'static str,
+    /// Minimise every window and make sure the desk is attached before publishing, so
+    /// what the event opens appears on the desktop.
     pub shows_desktop: bool,
 }
 

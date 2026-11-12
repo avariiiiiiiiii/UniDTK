@@ -106,8 +106,9 @@ impl unidtk_api::Module for ExplorerModule {
         self.dispatch_command(cmd, args)
     }
 
-    /// Win+E opens the overlay, but only on the desktop or over the shell: with a
-    /// browser in front, Windows opens its own Explorer.
+    /// Win+E opens the shell's Explorer over whatever is in front: every window is
+    /// minimised first, so the overlay opens on the desktop, and Windows' own Explorer
+    /// never opens.
     fn hotkeys(&self) -> &'static [unidtk_api::HotkeySpec] {
         &[unidtk_api::HotkeySpec {
             id: "win_e",
@@ -120,7 +121,7 @@ impl unidtk_api::Module for ExplorerModule {
             alt: false,
             shift: false,
             swallow: true,
-            desktop_only: true,
+            desktop_only: false,
             event: "explorer-open",
             shows_desktop: true,
         }]

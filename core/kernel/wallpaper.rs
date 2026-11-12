@@ -156,6 +156,16 @@ fn make_child_window(hwnd: HWND) {
     }
 }
 
+/// Minimises every window, as Win+M does: the taskbar's "minimise all" command (419).
+/// Posted, so a busy Explorer never holds the caller.
+pub fn minimize_all_windows() {
+    unsafe {
+        if let Ok(tray) = WindowsAndMessaging::FindWindowW(w!("Shell_TrayWnd"), None) {
+            let _ = WindowsAndMessaging::PostMessageW(tray, WindowsAndMessaging::WM_COMMAND, WPARAM(419), LPARAM(0));
+        }
+    }
+}
+
 /// Resolve on a worker thread; the UI only validates and reparents.
 pub fn resolve_desktop_host(allow_progman_fallback: bool) -> Result<(isize, u32), String> {
     let host = find_worker_w_internal(true, allow_progman_fallback)?;
