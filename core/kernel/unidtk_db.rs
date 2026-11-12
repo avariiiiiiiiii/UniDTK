@@ -4,7 +4,9 @@
 //! to it. What the core itself persists here:
 //! - `widget_settings` — the widget layout/config JSON (frontend reads and
 //!   writes it through the `get_widget_config` / `save_widget_config` commands);
-//! - `explorer_tabs` — the explorer's open tabs.
+//!
+//! The Explorer's tabs and sort lived in a table `explorer_tabs` here; they are
+//! the Explorer module's now (`explorer_migration.rs` moved them once).
 //!
 //! The music library lives in the same file inside the mp3-player key slice of
 //! the module KV table (`module_db.rs`); the kernel moves the old `tracks` /
@@ -23,7 +25,6 @@ use serde::{Deserialize, Serialize};
 const LEGACY_FOLDERS_MARKER: &str = "legacy_folders_imported";
 
 const WIDGET_SETTINGS: TableDefinition<&str, &[u8]> = TableDefinition::new("widget_settings");
-const EXPLORER_TABS: TableDefinition<&str, &[u8]> = TableDefinition::new("explorer_tabs");
 const FOLDERS: TableDefinition<&str, &[u8]> = TableDefinition::new("folders");
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,7 +69,6 @@ impl UniDtkDatabase {
         let txn = db.begin_write().map_err(|e| format!("Failed to begin write: {e}"))?;
         {
             let _ = txn.open_table(WIDGET_SETTINGS).map_err(|e| e.to_string())?;
-            let _ = txn.open_table(EXPLORER_TABS).map_err(|e| e.to_string())?;
             let _ = txn.open_table(FOLDERS).map_err(|e| e.to_string())?;
         }
         txn.commit().map_err(|e| format!("Failed to commit: {e}"))?;
@@ -110,66 +110,6 @@ impl UniDtkDatabase {
             let mut table = txn.open_table(WIDGET_SETTINGS).map_err(|e| e.to_string())?;
             let bytes = serde_json::to_vec(config).map_err(|e| e.to_string())?;
             table.insert("config", bytes.as_slice()).map_err(|e| e.to_string())?;
-        }
-        txn.commit().map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    // ─── Explorer tabs ───────────────────────────────────────────────────────
-
-    pub fn get_explorer_tabs(&self) -> Result<Vec<(String, String)>, String> {
-        let txn = self.db.begin_read().map_err(|e| e.to_string())?;
-        let table = txn.open_table(EXPLORER_TABS).map_err(|e| e.to_string())?;
-        match table.get("tabs").map_err(|e| e.to_string())? {
-            Some(value) => {
-                let bytes = value.value();
-                bincode::deserialize(bytes).map_err(|e| format!("Failed to deserialize tabs: {e}"))
-            }
-            None => Ok(Vec::new()),
-        }
-    }
-
-    pub fn set_explorer_tabs(&self, tabs: &[(String, String)]) -> Result<(), String> {
-        let txn = self.db.begin_write().map_err(|e| e.to_string())?;
-        {
-            let mut table = txn.open_table(EXPLORER_TABS).map_err(|e| e.to_string())?;
-            let bytes = bincode::serialize(tabs).map_err(|e| e.to_string())?;
-            table.insert("tabs", bytes.as_slice()).map_err(|e| e.to_string())?;
-        }
-        txn.commit().map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    // ─── Explorer sorting ─────────────────────────────────────────────────────
-
-    pub fn get_explorer_sort(&self) -> Result<(String, bool), String> {
-        let txn = self.db.begin_read().map_err(|e| e.to_string())?;
-        let table = txn.open_table(EXPLORER_TABS).map_err(|e| e.to_string())?;
-        match table.get("sort").map_err(|e| e.to_string())? {
-            Some(value) => {
-                let bytes = value.value();
-                match bincode::deserialize(bytes) {
-                    Ok(val) => Ok(val),
-                    Err(e) => {
-                        eprintln!("WARN: Failed to deserialize sort, falling back to default: {e}");
-                        Ok(("name".to_string(), true))
-                    }
-                }
-            }
-            None => Ok(("name".to_string(), true)),
-        }
-    }
-
-    pub fn set_explorer_sort(&self, column: &str, ascending: bool) -> Result<(), String> {
-        let safe_column = match column {
-            "name" | "size" | "type" | "modified" => column,
-            _ => "name",
-        };
-        let txn = self.db.begin_write().map_err(|e| e.to_string())?;
-        {
-            let mut table = txn.open_table(EXPLORER_TABS).map_err(|e| e.to_string())?;
-            let bytes = bincode::serialize(&(safe_column.to_string(), ascending)).map_err(|e| e.to_string())?;
-            table.insert("sort", bytes.as_slice()).map_err(|e| e.to_string())?;
         }
         txn.commit().map_err(|e| e.to_string())?;
         Ok(())
@@ -506,17 +446,6 @@ mod tests {
         assert!(db.get_widget_config().unwrap().is_none());
         db.set_widget_config(&config).unwrap();
         assert_eq!(db.get_widget_config().unwrap().unwrap(), config);
-
-        let tabs = vec![
-            ("C:\\Music".to_string(), "Music".to_string()),
-            ("C:\\Games".to_string(), "Games".to_string()),
-        ];
-        db.set_explorer_tabs(&tabs).unwrap();
-        assert_eq!(db.get_explorer_tabs().unwrap(), tabs);
-
-        assert_eq!(db.get_explorer_sort().unwrap(), ("name".to_string(), true));
-        db.set_explorer_sort("modified", false).unwrap();
-        assert_eq!(db.get_explorer_sort().unwrap(), ("modified".to_string(), false));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

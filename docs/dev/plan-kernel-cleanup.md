@@ -68,13 +68,13 @@ Not all 176 Tauri commands in `main.rs` belong to modules: kernel commands such 
 
 ## Step 4. Module data and events leave the kernel (#331)
 
-1. **State events.** `STATE_EVENTS` in `core/kernel/events.rs` is a delivery property of the broker (a ring of one, the newest value). It becomes a `coalesce` flag in each module's event declarations, a compile-time constant. The broker collects the flags into a `OnceLock` table before `set_emitter`, so the first frame of a state event is never stored as a stream.
+1. **State events.** `STATE_EVENTS` in `core/kernel/events.rs` is a delivery property of the broker (a ring of one, the newest value). A module declares its state events itself (`Module::state_events`, a static list). The kernel hands the registry's list to the broker (`events::declare_state_events`, a `OnceLock` set once) before `set_emitter`, so the first frame of a state event is never stored as a stream. A registry test pins the six names the old constant held.
 2. **Explorer tabs.** `explorer_tabs` (`tabs` and `sort`) in `core/kernel/unidtk_db.rs` moves to the Explorer module through `ModuleDb`, which stores under `mods/explorer/` in `module_kv` — a different table and key. So the move is a one-time migration: copy both values and write a marker in one transaction, then stop opening the old table. A test on a database with old records checks that tabs and sort survive. `FOLDERS` stays: desk folders belong to the kernel ([desk.folders](../reference/desk.md#r-desk.folders)).
 3. **The player migration stays.** `core/kernel/library_migration.rs` works on the raw database on purpose (modules never get it, [storage.no-raw-db](../reference/storage.md#r-storage.no-raw-db)), and an installation restored from an old backup still needs it. Only its comments are corrected: they name `shell.redb`, the file is `unidtk.redb`.
 4. **The weather permission window** (`core/kernel/weather_location.rs`) is a WebView window and leaves with the WebView. It is not moved.
-5. **The Explorer hotkey.** The "Shell Explorer" entry in `hotkeys.rs` becomes a hotkey contributed by the Explorer module.
+5. **The Explorer hotkey.** The "Shell Explorer" entry in `hotkeys.rs` becomes a hotkey contributed by the Explorer module: `Module::hotkeys` returns `HotkeySpec`s (key, scope, the event to publish, whether to bring the desktop forward), and `hotkeys::register_module_hotkeys` adds them to the hook's table at setup. The kernel no longer names `win_e` or `explorer-open` in its hook.
 
-**Done when.** A search of `core/kernel` finds no module id, table, or event name outside `registry.rs` and the two migrations.
+**Done when.** A search of `core/kernel` finds no module id, table, or event name outside `registry.rs` and the two migrations. What remains after this step, and why: `weather_location.rs` (item 4, leaves with the WebView); `open_explorer`, the `--open` launch argument and the single-instance hand-off, which emit `explorer-open` and call `explorer::window::parse_open_arg`, and the startup call to `explorer::registry::install_as_default_file_manager` (the kernel owns the process entry; they move with the host, `plan-rune-host.md`); `explorer::clipboard` in the desk's own clipboard commands; and the migration in `widgets-api.js` that names `vpn` and `clock`.
 
 ## Verification of every step
 

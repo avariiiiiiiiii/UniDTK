@@ -337,6 +337,11 @@ impl unidtk_api::Module for Mp3PlayerModule {
         self.dispatch_command(cmd, args)
     }
 
+    /// A spectrum frame and the sync task list are readings: only the newest matters.
+    fn state_events(&self) -> &'static [&'static str] {
+        &["audio-bands", "sync-tasks"]
+    }
+
     /// `begin_shutdown` is one-way, so the switch stops the work by hand and
     /// keeps the state.
     fn suspend(&self) -> Result<(), String> {

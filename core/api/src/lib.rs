@@ -685,6 +685,33 @@ impl DiagnosticContext {
     }
 }
 
+/// A key combination a module asks the kernel to listen for.
+///
+/// The kernel's low-level keyboard hook matches it. On a match it brings the desktop
+/// forward when `shows_desktop` is set and publishes `event` with an empty string as
+/// the payload, so the module's page reacts without the kernel knowing what it means.
+#[derive(Clone, Copy, Debug)]
+pub struct HotkeySpec {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    /// The combination as people write it, such as `Win+E`.
+    pub key: &'static str,
+    /// The Windows virtual-key code of the non-modifier key.
+    pub vk_code: u32,
+    pub win: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    /// The key is consumed, so Windows does not act on it too.
+    pub swallow: bool,
+    /// Only while the desktop or a shell window is in front; anywhere else the key
+    /// stays with Windows.
+    pub desktop_only: bool,
+    pub event: &'static str,
+    pub shows_desktop: bool,
+}
+
 /// A UniDTK module. The core holds a set of these and calls them on startup and shutdown.
 pub trait Module: Send + Sync {
     /// Stable identifier: matches the folder `modules/<id>/`.
@@ -738,6 +765,19 @@ pub trait Module: Send + Sync {
     /// thread, never on the main thread, and only after the door was checked.
     fn dispatch(&self, _cmd: &str, _args: &Value) -> Option<Result<Value, String>> {
         None
+    }
+
+    /// The events this module publishes whose newest value is all that matters: a
+    /// state, not a stream. The kernel's event broker keeps one frame of each and
+    /// coalesces a burst into the newest, so a subscriber gets the current value at
+    /// once instead of a replay of samples.
+    fn state_events(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The hotkeys this module contributes to the kernel's keyboard hook.
+    fn hotkeys(&self) -> &'static [HotkeySpec] {
+        &[]
     }
 }
 

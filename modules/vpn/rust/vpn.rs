@@ -2256,6 +2256,11 @@ impl unidtk_api::Module for VpnModule {
         self.dispatch_command(cmd, args)
     }
 
+    /// The connection state, not a log of transitions.
+    fn state_events(&self) -> &'static [&'static str] {
+        &["vpn"]
+    }
+
     /// A non-zero budget waits for the elevated helper to confirm that sing-box
     /// is gone: the exit paths off the main thread (`quit_app`, session end) pass
     /// one, because a surviving TUN black-holes the network after the next boot.

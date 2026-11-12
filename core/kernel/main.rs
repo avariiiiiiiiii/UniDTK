@@ -15,6 +15,7 @@ mod input;
 mod touchpad;
 mod ipc;
 mod library_migration;
+mod explorer_migration;
 mod log_store;
 mod logging;
 mod module_db;
@@ -443,35 +444,6 @@ fn log_clear() -> Result<u64, String> {
 #[tauri::command(async)]
 fn log_stats() -> Result<serde_json::Value, String> {
     crate::logging::stats()
-}
-
-/// Explorer tabs persisted in the unified redb (table EXPLORER_TABS) —
-/// survives app restarts and is queryable via CLI (`shell invoke explorer_tabs_get`).
-#[tauri::command(async)]
-fn explorer_tabs_get(state: tauri::State<Arc<UniDtkDatabase>>) -> Result<Vec<(String, String)>, String> {
-    state.get_explorer_tabs()
-}
-
-#[tauri::command(async)]
-fn explorer_tabs_set(
-    state: tauri::State<Arc<UniDtkDatabase>>,
-    tabs: Vec<(String, String)>,
-) -> Result<(), String> {
-    state.set_explorer_tabs(&tabs)
-}
-
-#[tauri::command(async)]
-fn explorer_sort_get(state: tauri::State<Arc<UniDtkDatabase>>) -> Result<(String, bool), String> {
-    state.get_explorer_sort()
-}
-
-#[tauri::command(async)]
-fn explorer_sort_set(
-    state: tauri::State<Arc<UniDtkDatabase>>,
-    column: String,
-    ascending: bool,
-) -> Result<(), String> {
-    state.set_explorer_sort(&column, ascending)
 }
 
 #[tauri::command(async)]
@@ -1161,6 +1133,11 @@ fn main() {
                 Ok(None) => {},
                 Err(error) => log_line(format!("library: module-kv migration failed: {error}")),
             }
+            match explorer_migration::migrate_if_needed(&db.raw_db()) {
+                Ok(true) => log_line("explorer: tabs and sort moved into mods/explorer"),
+                Ok(false) => {},
+                Err(error) => log_line(format!("explorer: tabs migration failed: {error}")),
+            }
         }
         log_line(format!("startup: data open {} ms", started.elapsed().as_millis()));
         result
@@ -1259,10 +1236,6 @@ fn main() {
             log_list,
             log_clear,
             log_stats,
-            explorer_tabs_get,
-            explorer_tabs_set,
-            explorer_sort_get,
-            explorer_sort_set,
             get_widget_config,
             save_widget_config,
             get_disabled_modules,
@@ -1287,6 +1260,9 @@ fn main() {
             // The registry exists before anything can publish, exit or ask a module
             // for a command: building a module starts nothing, `init` below does.
             let registry = registry::Registry::new(registry::all_modules().into_iter().map(Arc::from).collect())?;
+            // Before the emitter: a state's first frame must not be kept as a stream.
+            events::declare_state_events(registry.state_events())?;
+            hotkeys::register_module_hotkeys(registry.in_start_order().iter().flat_map(|module| module.hotkeys()));
             app.manage(registry);
 
             // Modules publish through the contract; the kernel owns the transport

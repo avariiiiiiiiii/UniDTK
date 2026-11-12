@@ -47,7 +47,6 @@ Filename: core/kernel/unidtk_db.rs (abridged)
 
 ```rust
 const WIDGET_SETTINGS: TableDefinition<&str, &[u8]> = TableDefinition::new("widget_settings");
-const EXPLORER_TABS: TableDefinition<&str, &[u8]> = TableDefinition::new("explorer_tabs");
 const FOLDERS: TableDefinition<&str, &[u8]> = TableDefinition::new("folders");
 
 impl UniDtkDatabase {
@@ -56,7 +55,6 @@ impl UniDtkDatabase {
         let txn = db.begin_write().map_err(|e| format!("Failed to begin write: {e}"))?;
         {
             let _ = txn.open_table(WIDGET_SETTINGS).map_err(|e| e.to_string())?;
-            let _ = txn.open_table(EXPLORER_TABS).map_err(|e| e.to_string())?;
             let _ = txn.open_table(FOLDERS).map_err(|e| e.to_string())?;
         }
         txn.commit().map_err(|e| format!("Failed to commit: {e}"))?;

@@ -309,6 +309,11 @@ impl unidtk_api::Module for GlyphBarModule {
     fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
         self.dispatch_command(cmd, args)
     }
+
+    /// The volume is a reading: only the newest level matters.
+    fn state_events(&self) -> &'static [&'static str] {
+        &["system-volume"]
+    }
 }
 
 #[cfg(test)]

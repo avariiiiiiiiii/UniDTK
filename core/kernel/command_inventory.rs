@@ -52,16 +52,6 @@ pub const COMMANDS: CommandSpec =
 pub const FRONTEND_LOG: CommandSpec =
     CommandSpec::write("frontend_log", "Append a frontend record to the journal", "{message, level?}");
 
-// ── Kernel-owned module data (moves to the Explorer module in step 4) ──────────
-
-pub const EXPLORER_SORT_GET: CommandSpec =
-    CommandSpec::read_only("explorer_sort_get", "Get explorer sort column and direction", "");
-pub const EXPLORER_SORT_SET: CommandSpec = CommandSpec::write(
-    "explorer_sort_set",
-    "Set explorer sort column and direction",
-    "{column, ascending}",
-);
-
 pub const WEATHER_LOCATION_REQUEST: CommandSpec =
     CommandSpec::write("weather_location_request", "Request Windows location permission for weather", "");
 
@@ -122,8 +112,6 @@ pub static ALL: &[&CommandSpec] = &[
     &GET_DISABLED_MODULES,
     &SET_MODULE_ENABLED,
     &COMMANDS,
-    &EXPLORER_SORT_GET,
-    &EXPLORER_SORT_SET,
     &WEATHER_LOCATION_REQUEST,
 ];
 

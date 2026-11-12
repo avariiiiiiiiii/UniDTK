@@ -1,4 +1,4 @@
-//! One-off migration of the mp3-player library from the old `shell.redb` tables
+//! One-off migration of the mp3-player library from the old tables of `unidtk.redb`
 //! (`tracks`, `playlists`, `playlist_tracks`) into the contract slice
 //! `mods/mp3_player/…` (see `module_db.rs`).
 //!
@@ -9,7 +9,7 @@
 //! will not leave a half-done state); deletion is a second one, only after the counts are verified.
 //!
 //! Before opening the database, the core makes a safety copy of the file
-//! (`shell.redb.pre-module-kv.bak`) and never overwrites it.
+//! (`unidtk.redb.pre-module-kv.bak`) and never overwrites it.
 
 use redb::{Database, ReadableTable, TableDefinition};
 use std::path::{Path, PathBuf};
@@ -58,7 +58,7 @@ struct Legacy {
     skipped_links: usize,
 }
 
-/// Safety copy of `shell.redb` made before the first launch with module-kv.
+/// Safety copy of `unidtk.redb` made before the first launch with module-kv.
 /// The copy is made before the database is opened and is never overwritten.
 pub fn backup_before_migration(db_path: &Path) -> Result<Option<PathBuf>, String> {
     if !db_path.is_file() {
@@ -69,7 +69,7 @@ pub fn backup_before_migration(db_path: &Path) -> Result<Option<PathBuf>, String
         db_path
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("shell.redb")
+            .unwrap_or("unidtk.redb")
     ));
     if backup.exists() {
         return Ok(None);
@@ -249,10 +249,10 @@ mod tests {
 
     fn scratch_db(name: &str) -> (Arc<Database>, PathBuf) {
         let dir =
-            std::env::temp_dir().join(format!("shell_migrate_{name}_{}", std::process::id()));
+            std::env::temp_dir().join(format!("unidtk_migrate_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("shell.redb");
+        let path = dir.join("unidtk.redb");
         let db = Database::create(&path).unwrap();
         (Arc::new(db), dir)
     }
@@ -369,7 +369,7 @@ mod tests {
     fn backup_is_created_once_and_never_overwritten() {
         let (db, dir) = scratch_db("backup");
         drop(db);
-        let path = dir.join("shell.redb");
+        let path = dir.join("unidtk.redb");
 
         let first = backup_before_migration(&path).unwrap().expect("backup");
         assert!(first.is_file());

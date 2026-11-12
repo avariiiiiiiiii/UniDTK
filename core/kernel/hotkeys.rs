@@ -9,7 +9,7 @@ use windows::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, GetKeyboardLayout,
-            GetKeyboardState, GetKeyState, ToUnicodeEx, VK_CONTROL, VK_D, VK_E, VK_ESCAPE, VK_LWIN,
+            GetKeyboardState, GetKeyState, ToUnicodeEx, VK_CONTROL, VK_D, VK_ESCAPE, VK_LWIN,
             VK_MENU, VK_R, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
@@ -37,6 +37,11 @@ pub struct HotkeyDefinition {
     pub swallow: bool,
     pub enabled: bool,
     pub scope: HotkeyScope,
+    /// What a match publishes. `None` for the kernel's own entries, which publish
+    /// `hotkey-pressed` with their id; a module's entry names its own event.
+    pub event: Option<String>,
+    /// Bring the desktop forward before publishing.
+    pub shows_desktop: bool,
 }
 
 /// Where a hotkey belongs. A `Desktop` hotkey fires only while the desktop or a
@@ -66,22 +71,9 @@ thread_local! {
     static ESC_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The kernel's own entries; a module adds its own through [`register_module_hotkeys`].
 fn default_hotkeys() -> Vec<HotkeyDefinition> {
     vec![
-        HotkeyDefinition {
-            id: "win_e".to_string(),
-            name: "Shell Explorer".to_string(),
-            description: "Open in-shell file manager overlay".to_string(),
-            key: "Win+E".to_string(),
-            vk_code: VK_E.0 as u32,
-            win_required: true,
-            ctrl_required: false,
-            alt_required: false,
-            shift_required: false,
-            swallow: true,
-            enabled: true,
-            scope: HotkeyScope::Desktop,
-        },
         HotkeyDefinition {
             id: "win_d".to_string(),
             name: "Show Desktop".to_string(),
@@ -95,6 +87,8 @@ fn default_hotkeys() -> Vec<HotkeyDefinition> {
             swallow: false,
             enabled: false,
             scope: HotkeyScope::Global,
+            event: None,
+            shows_desktop: false,
         },
         HotkeyDefinition {
             id: "win_r".to_string(),
@@ -109,8 +103,39 @@ fn default_hotkeys() -> Vec<HotkeyDefinition> {
             swallow: false,
             enabled: false,
             scope: HotkeyScope::Global,
+            event: None,
+            shows_desktop: false,
         },
     ]
+}
+
+/// Adds the modules' hotkeys (`Module::hotkeys`) to the table the hook reads. An id
+/// already present is left as it is, so a second call changes nothing.
+pub fn register_module_hotkeys<'a>(specs: impl IntoIterator<Item = &'a unidtk_api::HotkeySpec>) {
+    let Ok(mut table) = get_registry().write() else {
+        return;
+    };
+    for spec in specs {
+        if table.iter().any(|entry| entry.id == spec.id) {
+            continue;
+        }
+        table.push(HotkeyDefinition {
+            id: spec.id.to_string(),
+            name: spec.name.to_string(),
+            description: spec.description.to_string(),
+            key: spec.key.to_string(),
+            vk_code: spec.vk_code,
+            win_required: spec.win,
+            ctrl_required: spec.ctrl,
+            alt_required: spec.alt,
+            shift_required: spec.shift,
+            swallow: spec.swallow,
+            enabled: true,
+            scope: if spec.desktop_only { HotkeyScope::Desktop } else { HotkeyScope::Global },
+            event: Some(spec.event.to_string()),
+            shows_desktop: spec.shows_desktop,
+        });
+    }
 }
 
 fn get_registry() -> &'static RwLock<Vec<HotkeyDefinition>> {
@@ -384,12 +409,18 @@ pub fn init(app: AppHandle) {
         while let Ok(id) = rx.recv() {
             if crate::is_shutting_down() { break; }
             if let Some(app) = APP_HANDLE.get() {
-                if id == "win_e" {
-                    crate::log_line("hotkeys: Win+E triggered, opening shell explorer");
-                    crate::request_wallpaper_visible(app);
-                    unidtk_api::emit("explorer-open", serde_json::json!(""));
-                } else {
-                    unidtk_api::emit("hotkey-pressed", serde_json::json!(id));
+                let action = get_registry().read().ok().and_then(|table| {
+                    table.iter().find(|entry| entry.id == id).map(|entry| (entry.event.clone(), entry.shows_desktop))
+                });
+                match action {
+                    Some((Some(event), shows_desktop)) => {
+                        crate::log_line(format!("hotkeys: {id} triggered, publishing {event}"));
+                        if shows_desktop {
+                            crate::request_wallpaper_visible(app);
+                        }
+                        unidtk_api::emit(&event, serde_json::json!(""));
+                    }
+                    _ => unidtk_api::emit("hotkey-pressed", serde_json::json!(id)),
                 }
             }
         }
@@ -483,11 +514,16 @@ mod input_safety_tests {
     // Win+E belongs to Windows outside the shell: no action, no Start mask, no owned key.
     #[test]
     fn desktop_hotkey_fires_only_on_the_desktop_or_the_shell() {
+        // Win+E is the Explorer module's, not the kernel's.
+        let explorer = unidtk_mod_explorer::create_module();
+        register_module_hotkeys(explorer.hotkeys());
+        register_module_hotkeys(explorer.hotkeys());
+        assert_eq!(list_hotkeys().iter().filter(|entry| entry.id == "win_e").count(), 1, "registered once");
         let (tx, rx) = sync_channel::<String>(8);
         assert!(ACTIONS.set(tx).is_ok(), "only this test owns the action channel");
         TEST_MODIFIERS.with(|slot| slot.set(Some(Modifiers { win: true, ..Modifiers::default() })));
         let callback = |msg| unsafe {
-            let record = KBDLLHOOKSTRUCT { vkCode: VK_E.0 as u32, scanCode: 18, ..Default::default() };
+            let record = KBDLLHOOKSTRUCT { vkCode: 0x45 /* VK_E */, scanCode: 18, ..Default::default() };
             keyboard_hook_proc(0, WPARAM(msg as usize), LPARAM(&record as *const _ as isize)).0
         };
 

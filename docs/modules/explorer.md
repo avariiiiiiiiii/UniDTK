@@ -133,7 +133,7 @@ Image files use the image itself as their icon, through `convertFileSrc(item.pat
 
 `TabManager` ([tabs.js](../../modules/explorer/ui/tabs.js)) keeps the tabs. A tab holds `id`, `path`, `title`, `history`, `historyIndex`, `items`, and `scrollTop`. The path `::MY_PC::` is the `This PC` tab.
 
-- **Restore.** `restoreTabs()` calls `explorer_tabs_get`, which reads the saved list from the kernel's redb store. If nothing is saved, one `This PC` tab is opened.
+- **Restore.** `restoreTabs()` calls `explorer_tabs_get`, which reads the saved list from the module's own slice of the database (`mods/explorer/tabs`). If nothing is saved, one `This PC` tab is opened.
 - **Save.** `_saveTabs()` runs after every add, switch, close, and navigation. It sends `[path, title]` pairs with `explorer_tabs_set`. It does nothing before the restore has finished, so an early `addTab` cannot overwrite the saved list.
 - **Close.** Closing the last tab opens `This PC`. Closing the active tab activates the tab that takes its index.
 - **Back, forward, up.** `goBack` and `goForward` move `historyIndex`. `goUp` removes the last segment, and at a drive root it goes to `This PC`. Keys: Alt+Left, Alt+Right, Backspace.

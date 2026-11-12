@@ -45,7 +45,7 @@ Commands must be safe to repeat. The interface, the CLI, and tests call them fro
 
 The contract crate is `core/api` (package `unidtk-api`). It must not depend on `tauri`, `redb`, or Win32.
 
-- `Module` trait: `id`, `dependencies`, `starts_after`, `init(ModuleContext)`, `begin_shutdown`, `shutdown(budget)`, `suspend`, `resume(ModuleContext)`, `commands`, `dispatch`.
+- `Module` trait: `id`, `dependencies`, `starts_after`, `init(ModuleContext)`, `begin_shutdown`, `shutdown(budget)`, `suspend`, `resume(ModuleContext)`, `commands`, `dispatch`, `state_events` (events whose newest value is all that matters; the broker keeps one frame of each), `hotkeys` (`HotkeySpec`s the kernel's keyboard hook listens for, publishing the spec's event on a match).
 - Commands: `CommandSpec` and the `module_commands!` table (`unidtk_api::commands`).
 - Services: `log`, `emit`, `subscribe`, `state`, and `paths`.
 - Storage: `ModuleContext::store(StoreSpec)` returns a `ModuleDb`. See [Storage](storage.md).

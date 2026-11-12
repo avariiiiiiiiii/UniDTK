@@ -108,7 +108,7 @@ unidtk_api::set_emitter(move |event, payload| {
 So each reading goes to two places:
 
 1. **The Tauri door.** `handle.emit` sends the event to the WebView. This is the path the page uses by default.
-2. **The event broker.** `events::publish` in [core/kernel/events.rs](../../core/kernel/events.rs) numbers the frame. `system-volume` is in `STATE_EVENTS`, so the broker keeps only the newest frame. A socket client that subscribes is sent that frame at once, and a short reconnect does not replay old samples.
+2. **The event broker.** `events::publish` in [core/kernel/events.rs](../../core/kernel/events.rs) numbers the frame. The module declares `system-volume` a state (`Module::state_events`), so the broker keeps only the newest frame. A socket client that subscribes is sent that frame at once, and a short reconnect does not replay old samples.
 
 No Rust module subscribes to `system-volume`; the micrographics page subscribes in JavaScript.
 

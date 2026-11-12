@@ -1975,6 +1975,11 @@ impl unidtk_api::Module for MicrographicsModule {
     fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
         self.dispatch_command(cmd, args)
     }
+
+    /// A current-conditions reading: an observer wants the latest, never the history.
+    fn state_events(&self) -> &'static [&'static str] {
+        &["weather-update"]
+    }
 }
 
 #[cfg(test)]

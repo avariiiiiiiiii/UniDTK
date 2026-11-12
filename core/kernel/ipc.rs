@@ -282,14 +282,6 @@ static ROUTES: &[(&str, Handler)] = &[
     ),
     (crate::command_inventory::COMMANDS.name, handle_commands),
     (
-        crate::command_inventory::EXPLORER_SORT_GET.name,
-        handle_explorer_sort_get,
-    ),
-    (
-        crate::command_inventory::EXPLORER_SORT_SET.name,
-        handle_explorer_sort_set,
-    ),
-    (
         crate::command_inventory::WEATHER_LOCATION_REQUEST.name,
         handle_weather_location_request,
     ),
@@ -437,18 +429,6 @@ fn handle_frontend_log(_server: &IpcServer, args: &Args) -> Result<serde_json::V
     let level = args.get("level").and_then(|value| value.as_str());
     crate::logging::log_frontend(message, level);
     Ok(serde_json::Value::Null)
-}
-
-fn handle_explorer_sort_get(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
-    let (col, asc) = server.db.get_explorer_sort()?;
-    Ok(serde_json::json!({ "column": col, "ascending": asc }))
-}
-
-fn handle_explorer_sort_set(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    let col = args.get("column").and_then(|v| v.as_str()).unwrap_or("name");
-    let asc = args.get("ascending").and_then(|v| v.as_bool()).unwrap_or(true);
-    server.db.set_explorer_sort(col, asc)?;
-    Ok(serde_json::json!({ "ok": true }))
 }
 
 fn handle_weather_location_request(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {

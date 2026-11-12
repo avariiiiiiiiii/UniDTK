@@ -45,7 +45,7 @@ Events are pushed by the **broker** in [core/kernel/events.rs](../../core/kernel
 
 Events come in two classes:
 
-- **State events** (`system-volume`, `audio-bands`, `vpn`, `telegram-connection-state`, `sync-tasks`, `weather-update`, six names in `STATE_EVENTS`). Only the newest frame matters, so the ring keeps one value. The writer merges all pending frames of a state event into the newest one per pass.
+- **State events** (`system-volume`, `audio-bands`, `vpn`, `telegram-connection-state`, `sync-tasks`, `weather-update`, six names the modules declare (`Module::state_events`) and the kernel hands to the broker before the first event). Only the newest frame matters, so the ring keeps one value. The writer merges all pending frames of a state event into the newest one per pass.
 - **Stream events** (for example the Telegram messages). Their order matters, so every frame is kept in the ring and delivered in order.
 
 A subscriber gets a frame in this shape:

@@ -6401,5 +6401,10 @@ impl unidtk_api::Module for TelegramModule {
     fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
         self.dispatch_command(cmd, args)
     }
+
+    /// The connection state, not a log of transitions.
+    fn state_events(&self) -> &'static [&'static str] {
+        &["telegram-connection-state"]
+    }
 }
 

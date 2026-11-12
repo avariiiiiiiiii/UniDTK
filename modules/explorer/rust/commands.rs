@@ -12,19 +12,61 @@ pub fn create_shared_search() -> SharedSearch {
     Arc::new(Mutex::new(SearchEngine::new(100)))
 }
 
-/// Explorer module: its only state is the search index, which its commands
-/// read from here.
+/// Explorer module: the search index, and its slice of the database, where the
+/// open tabs and the sort live. Its commands read both from here.
 pub struct ExplorerModule {
     search: SharedSearch,
+    store: std::sync::OnceLock<Arc<dyn unidtk_api::ModuleDb>>,
 }
 
 impl ExplorerModule {
     pub fn new() -> Self {
         Self {
             search: create_shared_search(),
+            store: std::sync::OnceLock::new(),
         }
     }
+
+    fn store(&self) -> Result<&Arc<dyn unidtk_api::ModuleDb>, String> {
+        self.store.get().ok_or_else(|| "explorer is not ready".to_string())
+    }
+
+    /// The open tabs as `(path, title)` pairs; none stored is no tabs.
+    fn tabs(&self) -> Result<Vec<(String, String)>, String> {
+        match self.store()?.kv_get(KEY_TABS)? {
+            Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("explorer tabs: {e}")),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn set_tabs(&self, tabs: &[(String, String)]) -> Result<(), String> {
+        let bytes = serde_json::to_vec(tabs).map_err(|e| e.to_string())?;
+        self.store()?.kv_set(KEY_TABS, &bytes)
+    }
+
+    /// The sort column and direction. A missing or unreadable value is the
+    /// default, by name ascending, as it always was.
+    fn sort(&self) -> Result<(String, bool), String> {
+        let stored = self.store()?.kv_get(KEY_SORT)?;
+        Ok(stored
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_else(|| ("name".to_string(), true)))
+    }
+
+    fn set_sort(&self, column: &str, ascending: bool) -> Result<(), String> {
+        let column = match column {
+            "name" | "size" | "type" | "modified" => column,
+            _ => "name",
+        };
+        let bytes = serde_json::to_vec(&(column, ascending)).map_err(|e| e.to_string())?;
+        self.store()?.kv_set(KEY_SORT, &bytes)
+    }
 }
+
+/// Keys in the module's slice; the kernel moved the old values here once
+/// (`core/kernel/explorer_migration.rs`), so the names must stay.
+const KEY_TABS: &str = "tabs";
+const KEY_SORT: &str = "sort";
 
 pub fn create_module() -> Box<dyn unidtk_api::Module> {
     Box::new(ExplorerModule::new())
@@ -44,6 +86,8 @@ impl unidtk_api::Module for ExplorerModule {
             let _ = get_user_places();
             return Ok(());
         }
+        // The tabs and sort are readable while the module is switched off too.
+        let _ = self.store.set(ctx.db());
         if !ctx.enabled() {
             unidtk_api::log("explorer: disabled — search engine stays empty");
         }
@@ -61,6 +105,26 @@ impl unidtk_api::Module for ExplorerModule {
     fn dispatch(&self, cmd: &str, args: &serde_json::Value) -> Option<Result<serde_json::Value, String>> {
         self.dispatch_command(cmd, args)
     }
+
+    /// Win+E opens the overlay, but only on the desktop or over the shell: with a
+    /// browser in front, Windows opens its own Explorer.
+    fn hotkeys(&self) -> &'static [unidtk_api::HotkeySpec] {
+        &[unidtk_api::HotkeySpec {
+            id: "win_e",
+            name: "Shell Explorer",
+            description: "Open in-shell file manager overlay",
+            key: "Win+E",
+            vk_code: 0x45, // VK_E
+            win: true,
+            ctrl: false,
+            alt: false,
+            shift: false,
+            swallow: true,
+            desktop_only: true,
+            event: "explorer-open",
+            shows_desktop: true,
+        }]
+    }
 }
 
 // The answers keep the shapes of the Tauri commands of the same names.
@@ -72,6 +136,10 @@ fn block<F: std::future::Future>(future: F) -> F::Output {
 
 unidtk_api::module_commands! {
     impl ExplorerModule {
+        read_ui "explorer_tabs_get" "Open Explorer tabs" |this| this.tabs();
+        write "explorer_tabs_set" "Store the open Explorer tabs" |this, tabs: Vec<(String, String)>| this.set_tabs(&tabs);
+        read_only "explorer_sort_get" "Explorer sort column and direction" |this| this.sort();
+        write "explorer_sort_set" "Set the Explorer sort column and direction" |this, column: String, ascending: bool| this.set_sort(&column, ascending);
         read_ui "scan_directory" "Entries of a folder" |this, path: String| block(crate::commands::scan_directory(path));
         read_ui "scan_directory_full" "Entries of a folder with sizes and details" |this, path: String| block(crate::commands::scan_directory_full(path));
         read_only "get_drives" "Mounted drives" |this| block(crate::commands::get_drives());
@@ -432,4 +500,39 @@ pub fn get_text_preview(path: String, max_bytes: usize) -> Option<String> {
 
 pub fn get_file_icon(extension: String) -> String {
     preview::get_file_icon(&extension).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn module_with_store() -> ExplorerModule {
+        let module = ExplorerModule::new();
+        let store: Arc<dyn unidtk_api::ModuleDb> = Arc::new(unidtk_api::InMemoryModuleDb::new());
+        assert!(module.store.set(store).is_ok());
+        module
+    }
+
+    #[test]
+    fn tabs_and_sort_round_trip_through_the_commands() {
+        let module = module_with_store();
+        let call = |cmd: &str, args: serde_json::Value| module.dispatch_command(cmd, &args).unwrap().unwrap();
+        assert_eq!(call("explorer_tabs_get", json!({})), json!([]));
+        assert_eq!(call("explorer_sort_get", json!({})), json!(["name", true]));
+
+        call("explorer_tabs_set", json!({ "tabs": [["C:/Music", "Music"]] }));
+        assert_eq!(call("explorer_tabs_get", json!({})), json!([["C:/Music", "Music"]]));
+        call("explorer_sort_set", json!({ "column": "modified", "ascending": false }));
+        assert_eq!(call("explorer_sort_get", json!({})), json!(["modified", false]));
+        call("explorer_sort_set", json!({ "column": "nonsense", "ascending": true }));
+        assert_eq!(call("explorer_sort_get", json!({})), json!(["name", true]));
+    }
+
+    #[test]
+    fn the_commands_wait_for_init() {
+        let module = ExplorerModule::new();
+        let reply = module.dispatch_command("explorer_tabs_get", &json!({})).unwrap();
+        assert_eq!(reply, Err("explorer is not ready".to_string()));
+    }
 }

@@ -12,10 +12,9 @@ UniDTK uses several redb files. Each has one job.
 
 | File | Location | Owner | What it holds |
 |------|----------|-------|---------------|
-| `unidtk.redb` | `%LOCALAPPDATA%\UniDTK` | the core (`core/kernel/unidtk_db.rs`) | widget layout, explorer state, folders, and the `mods/<id>/` slices of the modules |
+| `unidtk.redb` | `%LOCALAPPDATA%\UniDTK` | the core (`core/kernel/unidtk_db.rs`) | widget layout, folders, and the `mods/<id>/` slices of the modules |
 | `unidtk_logs.redb` | `%LOCALAPPDATA%\UniDTK` | the log store (`core/kernel/log_store.rs`) | system and frontend log records |
 | `cache/mp3_player/ai_dj.redb` | the module's cache root | the mp3 player's AI DJ | the AI DJ store, declared as a cache store |
-| `shell.redb` | the old data directory | legacy | the pre-module library, read once by the migration |
 
 The core gives each file its own path, and its own test checks that the two core files never coincide:
 
@@ -54,7 +53,6 @@ The core declares its own tables at the top of `unidtk_db.rs`:
 // Filename: core/kernel/unidtk_db.rs (table declarations)
 // --- Widgets ---
 const WIDGET_SETTINGS: TableDefinition<&str, &[u8]> = TableDefinition::new("widget_settings");
-const EXPLORER_TABS: TableDefinition<&str, &[u8]> = TableDefinition::new("explorer_tabs");
 const FOLDERS: TableDefinition<&str, &[u8]> = TableDefinition::new("folders");
 ```
 
@@ -64,10 +62,10 @@ Each table holds a set of named keys. The encoding of each value is fixed by the
 |-------|-----|-------|----------|------------|
 | `widget_settings` | `config` | the widget layout | JSON (`serde_json`) | `set_widget_config` |
 | `widget_settings` | `disabled_modules` | list of module ids | bincode | `set_disabled_modules` |
-| `explorer_tabs` | `tabs` | open tabs as `(path, title)` pairs | bincode | `set_explorer_tabs` |
-| `explorer_tabs` | `sort` | `(column, ascending)` | bincode | `set_explorer_sort` |
 | `folders` | the folder `id` | a folder record with its items | JSON (`serde_json`) | `save_folder` |
 | `module_kv` | `mods/<slug>/<key>` | the module's bytes | opaque to the core | `RedbModuleDb` (section 6) |
+
+The Explorer's open tabs and sort lived in a kernel table `explorer_tabs` (bincode). They are the Explorer module's now, as JSON under `mods/explorer/tabs` and `mods/explorer/sort`: `core/kernel/explorer_migration.rs` copied the old values there once, with its marker in the same transaction, and left the old table as it was.
 
 The `module_kv` table is declared in `module_db.rs`, and it is not created at startup. The comment on its read path says so: the table is created lazily, at the first write, and until then a read sees an empty list.
 
@@ -271,7 +269,7 @@ Every operation in the batch is either committed or not. A playlist update that 
 
 ## 7. The Library Migration
 
-Before the module slice existed, the mp3 library lived in its own tables inside `shell.redb`: `tracks`, `playlists` and `playlist_tracks`, plus two indexes. `library_migration.rs` moves that data into the module slice, once, at startup.
+Before the module slice existed, the mp3 library lived in its own tables inside the database file (`unidtk.redb`, named `shell.redb` before the rename): `tracks`, `playlists` and `playlist_tracks`, plus two indexes. `library_migration.rs` moves that data into the module slice, once, at startup.
 
 The migration declares the old tables with their old names and types, because redb refuses to open a table with a different definition:
 
@@ -286,7 +284,7 @@ const LEGACY_PLAYLIST_TRACKS: TableDefinition<&str, &[u8]> = TableDefinition::ne
 
 The module header lists the steps:
 
-1. **Back up first.** Before the database is opened, the file is copied to `shell.redb.pre-module-kv.bak`. An existing backup is never overwritten (`backup_before_migration`).
+1. **Back up first.** Before the database is opened, the file is copied to `unidtk.redb.pre-module-kv.bak`. An existing backup is never overwritten (`backup_before_migration`).
 2. **Write the data and the schema marker in one transaction.** The new keys use the prefixes `track/`, `playlist/` and `pt/` (for playlist links), and the marker `schema` is set to `2`. The marker says the library now lives in the module slice.
 3. **Delete the source tables in a second transaction.** This runs only after the counts are checked, as the module comment states.
 

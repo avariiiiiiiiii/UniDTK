@@ -27,17 +27,18 @@ const RING_CAPACITY: usize = 64;
 
 /// Events whose value is a *state*, not a stream of events. For these only the newest
 /// frame matters, so the ring holds one entry and a subscriber gets the latest value
-/// immediately on subscribe.
-const STATE_EVENTS: &[&str] = &[
-    "system-volume",
-    "audio-bands",
-    "vpn",
-    "telegram-connection-state",
-    "sync-tasks",
-    // A current-conditions reading is a state, not a stream: an observer wants
-    // the latest, never all fifteen minutes of history.
-    "weather-update",
-];
+/// immediately on subscribe. The modules declare them (`Module::state_events`), and the
+/// kernel hands the list over once, before the first event is published.
+static STATE_EVENTS: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+/// Records which events are states. Called once, from `setup`, before `set_emitter`:
+/// a state's first frame published earlier would be kept as a stream. A second call
+/// is refused, so the table cannot change under a running broker.
+pub fn declare_state_events(events: Vec<&'static str>) -> Result<(), String> {
+    STATE_EVENTS
+        .set(events)
+        .map_err(|_| "the state events are already declared".to_string())
+}
 
 /// One delivered frame. `seq` is assigned by the broker before fan-out, which is what
 /// makes ordering claims possible.
@@ -62,7 +63,7 @@ fn broker() -> &'static Broker {
 }
 
 fn is_state_event(event: &str) -> bool {
-    STATE_EVENTS.contains(&event)
+    STATE_EVENTS.get().is_some_and(|events| events.contains(&event))
 }
 
 /// Whether only the newest value of this event matters (see `STATE_EVENTS`).
@@ -171,15 +172,29 @@ mod tests {
         assert!(second > first, "seq must keep increasing across events");
     }
 
+    /// The broker's table is set once per process, so every test that needs it
+    /// declares the same list.
+    fn declare_test_states() {
+        let _ = declare_state_events(vec!["state-test"]);
+    }
+
     #[test]
     fn state_events_keep_only_the_newest_frame() {
+        declare_test_states();
         for value in 0..5 {
-            publish("system-volume", serde_json::json!({ "level": value }));
+            publish("state-test", serde_json::json!({ "level": value }));
         }
-        let newest = snapshot("system-volume").unwrap();
+        let newest = snapshot("state-test").unwrap();
         assert_eq!(newest.payload["level"], 4);
-        let replayed = replay("system-volume", 0).unwrap();
+        let replayed = replay("state-test", 0).unwrap();
         assert_eq!(replayed.len(), 1, "a state event must not replay a stream");
+    }
+
+    #[test]
+    fn the_state_table_is_declared_once() {
+        declare_test_states();
+        assert!(declare_state_events(vec!["other"]).is_err());
+        assert!(is_state("state-test") && !is_state("other"));
     }
 
     #[test]

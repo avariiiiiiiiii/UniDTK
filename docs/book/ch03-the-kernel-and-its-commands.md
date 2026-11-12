@@ -174,7 +174,7 @@ unidtk_api::set_emitter(move |event, payload| {
 });
 ```
 
-The broker is `core/kernel/events.rs`. It exists so that the WebSocket door can carry events too, with numbers. Each published event gets a global sequence number `seq`, and the last 64 frames of each event are kept in a ring. For a state event, listed in `STATE_EVENTS`, such as `system-volume` or `vpn`, the ring keeps only the newest frame, because an older value has no meaning for a client that connects late.
+The broker is `core/kernel/events.rs`. It exists so that the WebSocket door can carry events too, with numbers. Each published event gets a global sequence number `seq`, and the last 64 frames of each event are kept in a ring. For a state event, one the modules declare (`Module::state_events`), such as `system-volume` or `vpn`, the ring keeps only the newest frame, because an older value has no meaning for a client that connects late.
 
 A page subscribes over the socket with a message such as `{"type":"subscribe","event":"vpn","since":41}`. Without `since`, the client receives the newest value of the event, marked as a snapshot. With `since`, it receives the frames after that number. If the ring no longer holds them, the client receives a `gap` message and must resynchronize, instead of a silently incomplete stream.
 

@@ -114,6 +114,11 @@ impl Registry {
         &self.modules
     }
 
+    /// Every event a module declares as a state (`Module::state_events`).
+    pub fn state_events(&self) -> Vec<&'static str> {
+        self.modules.iter().flat_map(|module| module.state_events().iter().copied()).collect()
+    }
+
     /// The module that serves `name`, with the command's spec.
     pub fn command(&self, name: &str) -> Option<(&Arc<dyn Module>, &'static CommandSpec)> {
         self.modules
@@ -253,6 +258,17 @@ mod tests {
         for (id, spec) in commands {
             assert_eq!(registry.command(spec.name).unwrap().0.id(), id);
         }
+    }
+
+    #[test]
+    fn the_real_modules_declare_their_state_events() {
+        let modules: Vec<Arc<dyn Module>> = all_modules().into_iter().map(Arc::from).collect();
+        let mut states = Registry::new(modules).unwrap().state_events();
+        states.sort_unstable();
+        assert_eq!(
+            states,
+            ["audio-bands", "sync-tasks", "system-volume", "telegram-connection-state", "vpn", "weather-update"]
+        );
     }
 
     #[test]
