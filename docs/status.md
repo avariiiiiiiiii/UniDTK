@@ -4,14 +4,14 @@ This is the first file an agent reads. It says what is true today and where to r
 
 ## Current state
 
-- **Focus:** the native desktop host on Rune source code ([plan](dev/plan-rune-host.md)), on the branch `rune-transition`. The kernel cleanup ([plan](dev/plan-kernel-cleanup.md)) is done there (session 138): the registry starts, switches and stops the modules, each module declares its commands, state events, hotkeys and default placement itself; what the kernel still names is listed in the plan's step 4. The host stands at G0: the probe (`unidtk-desktop --probe-transparency`) proved that a transparent Rune window under the desktop host composites per pixel, with its first frame at 233-576 ms and 67 MB of Working Set (the G0 threshold is 80 MB). Win+E always opens the shell's Explorer and minimises every window (the owner's decision). Open physical check: three real sign-outs (#326).
-- **Production:** `C:\Program Files\UniDTK` (Tauri v2 + WebView2), built by `udtk build`.
+- **Focus:** the native desktop host on Rune source code ([plan](dev/plan-rune-host.md)), on the branch `rune-transition`. The kernel cleanup ([plan](dev/plan-kernel-cleanup.md)) is done there (session 138): the registry starts, switches and stops the modules, each module declares its commands, state events, hotkeys and default placement itself; what the kernel still names is listed in the plan's step 4. G0 now ships the standalone binary `unidtk-desktop.exe` (43.2 MB Working Set, 0 Rune timer wakes at rest, click-through `SetWindowRgn`) and its `127.0.0.1:26541` inspector door ([`ipc.host-inspector`](reference/ipc.md#r-ipc.host-inspector), session 139, `f177b16`); remaining for G0 are the `occlusion.rs` reparented-child redraw fix, kernel lifecycle ownership (`desk.host`, stdin WS token), keyboard forwarding, true-alpha `wgpu` readback, and 5-min idle verification. Win+E always opens the shell's Explorer and minimises every window (the owner's decision). Open physical check: three real sign-outs (#326).
+- **Production:** `C:\Program Files\UniDTK` (Tauri v2 + WebView2, plus standalone `unidtk-desktop.exe`), built by `udtk build`.
 
 | Subsystem / Metric | Value / Status | Technology stack | Primary document |
 | :--- | :---: | :--- | :--- |
-| **Active branch** | `main`; the kernel cleanup (done, session 138) and the Rune host live on `rune-transition`, not merged: `main`'s checkout holds uncommitted changes of another session in the same files | Git | [Rune host plan](dev/plan-rune-host.md) |
+| **Active branch** | `main`; the kernel cleanup (session 138) and the Rune host live on `rune-transition`, not merged: `main`'s checkout holds uncommitted changes of another session in the same files | Git | [Rune host plan](dev/plan-rune-host.md) |
 | **Design tokens / themes** | 🟢 Two built-in presets: Classic (flat) + Sea Glass (jelly), schema v4: colors, fonts, geometry, material, palette + tintMap, optics | CSS custom properties, `data-material`, `unidtk-theme-changed`, OKLCH ink, pre-paint from the `paint` cache | [desk.md](reference/desk.md), session 125 |
-| **Core (kernel)** | 🟢 Stable; on `rune-transition` module commands come from the modules' tables ([modules.command-table](reference/modules.md#r-modules.command-table)), 333/333 tests | Headless Rust, `unidtk-api`, TCP IPC `127.0.0.1:26540` | [kernel.md](reference/kernel.md) |
+| **Core (kernel)** | 🟢 Stable; on `rune-transition` module commands come from the modules' tables ([modules.command-table](reference/modules.md#r-modules.command-table)), 339 passed (1 doctest ignored) | Headless Rust, `unidtk-api`, TCP IPC `127.0.0.1:26540`, `unidtk-desktop` inspector `26541` | [kernel.md](reference/kernel.md) |
 | **Storage (DB)** | 🟢 Stable | Clean `redb` transactions (`unidtk.redb`, `unidtk_logs.redb`) | [storage.md](reference/storage.md) |
 | **CLI bridge (`udtk`)** | 🟢 Stable | Rust CLI, CDP WebSocket, TCP IPC; `doctor -simulate` measures a motion budget (real click/Escape, frame and task ≤ 50 ms) | [udtk book](udtk/ch11-doctor-the-diagnostic-loop.md), session 136 |
 | **Production GUI** | 🟢 Stable | Tauri v2, WebView2 (Working Set of the process tree: 571 MB after a test run, session 136) | [the page](book/ch06-the-page.md) |
@@ -46,7 +46,9 @@ Load only what the task needs. The whole book is listed in [SUMMARY.md](SUMMARY.
 UniDTK Repository
 ├── core/                       # Core system (invariants that cannot be turned off)
 │   ├── api/                    # unidtk-api: stable contract (Module trait, ModuleDb, StoreSpec)
+│   ├── desktop/                # unidtk-desktop: native Rune desktop host and G0 inspector (26541)
 │   ├── kernel/                 # unidtk: microkernel, IPC (26540), tray, redb stores, WorkerW attachment
+│   ├── rune/                   # Local Rune engine source tree (workspace crates)
 │   └── ui/                     # WebView2 frontend: menu.js, surface-manager.js, motion.js, styles.css
 │
 ├── modules/                    # Vertical feature slices (can be turned off)
