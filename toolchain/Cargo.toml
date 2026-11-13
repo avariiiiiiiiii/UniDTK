@@ -55,10 +55,12 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 mimalloc = { version = "0.1", default-features = false }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
-# The desktop host's engine, our copy of Rune (core/rune/UPSTREAM.md), and the window
-# handle type Rune lends out.
+# The desktop host's engine, our copy of Rune (core/rune/UPSTREAM.md), the window
+# handle type Rune lends out, and the encoder of the host's inspector shots.
 rune = { path = "../core/rune/rune" }
 raw-window-handle = "0.6"
+png = "0.18"
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
@@ -71,6 +73,10 @@ features = [
   "Win32_Graphics_Gdi",
   "Win32_Storage_Xps",
   "Win32_UI_HiDpi",
+  "Win32_System_ProcessStatus",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Cryptography",
   "Win32_Devices_HumanInterfaceDevice",
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",

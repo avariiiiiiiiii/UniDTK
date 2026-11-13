@@ -160,6 +160,7 @@
       "../scheduler-tasks/": "scheduler-tasks",
       "../target/release/udtk.exe": "udtk.exe",
       "../target/release/vpn-helper.exe": "vpn-helper.exe",
+      "../target/release/unidtk-desktop.exe": "unidtk-desktop.exe",
       "../opt/directml/DirectML.dll": "DirectML.dll"
     },
     "windows": {

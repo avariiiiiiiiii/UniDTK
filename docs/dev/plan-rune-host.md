@@ -88,3 +88,14 @@ Every gate records, per process (kernel, WebView2 tree, host), after a one-minut
 ## Verification of every step
 
 `udtk build`, `udtk doctor`, `udtk doctor -ping` (RTT), `udtk logs --level ERROR`, `udtk shot`, `cargo test --release --workspace -j 1`, `udtk doc --check`. One commit per step, with the test count in its body.
+
+
+### Standalone inspector slice
+
+The standalone host runs without probe arguments and has a real G0 card whose press handler changes state. It is shipped as a fourth binary, but production still starts the WebView2 kernel. `udtk host run`, `udtk gui --host tree`, `udtk gui --host --force click:g0-card`, `udtk shot --host` and `udtk doctor --host -simulate` use the standalone inspector. The endpoint and limits are defined by [ipc.host-inspector](../reference/ipc.md#r-ipc.host-inspector).
+
+Startup remains click-through until a worker finds Progman/WorkerW and a short UI-thread attach plus the first widget-region publication succeed. A window region passes clicks to other processes; unlike returning `HTTRANSPARENT`, it also clips pixels, so the region includes a shadow margin. The actual window DPI converts layout points to physical region edges. Attach failure requests normal Rune shutdown and the binary exits unsuccessfully. The default CLI and scheduled tasks still target WebView2.
+
+The first drawn frame can arrive before asynchronous attachment, and a covered desktop can skip every later frame. The host therefore retains the last drawn widget rectangles in points and publishes the input region from both the attach callback and the drawn-frame callback, on the UI thread. Inspector readiness requires an attached HWND, a drawn frame and a successfully installed nonempty input region. The G0 surface is selected by its stable key; `ElementInfo.parent` is a runtime node index and cannot index the filtered element list.
+
+This slice does not close G0. Remaining: the kernel owns and supervises the host, passes its interface credentials privately, publishes the tracked endpoint in ping, enforces `desk.host` and forwards keyboard input; the host subscribes before its kernel snapshots; inspector reads join the kernel inventory; screenshots read back the actual wgpu frame. The current screenshot is explicitly a DWM `PrintWindow` capture with opaque alpha. Full wake accounting and the prescribed idle measurement still gate completion. Rune surface timer-wake counters and CPU frame time are exposed without claiming GPU latency or total OS wake-ups.

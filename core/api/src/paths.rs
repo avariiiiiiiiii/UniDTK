@@ -3,7 +3,7 @@
 //! The split follows the Windows convention exactly:
 //!
 //! * **program**: `C:\Program Files\UniDTK`, holding the executables and native
-//!   dependencies (`unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `sing-box.exe`,
+//!   dependencies (`unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `unidtk-desktop.exe`, `sing-box.exe`,
 //!   DLLs, AI DJ models). The directory is read-only: the application has no right
 //!   to write **anything** next to itself;
 //! * **data**: `%LOCALAPPDATA%\UniDTK`: databases, logs, cache, the Telegram session,

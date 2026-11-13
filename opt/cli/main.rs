@@ -15,6 +15,7 @@ use std::time::Duration;
 use unidtk_api::ModuleDb;
 
 mod book;
+mod host;
 mod splash;
 mod splash_art;
 
@@ -50,6 +51,7 @@ fn main() {
         "gui" => gui_cmd(&args).map_err(|e| (1, e)),
         "shot" => shot_cmd(&args).map_err(|e| (1, e)),
         "cdp-list" => cdp_list_cmd().map_err(|e| (1, e)),
+        "host" => host::host_cmd(&args).map_err(|e| (1, e)),
         "doctor" => doctor_cmd(&args),
         "build" => build_cmd(&args).map_err(|e| (1, e)),
         "stop" => stop_cmd().map_err(|e| (1, e)),
@@ -759,6 +761,7 @@ fn gui_json_outcome(failed: bool, doc: String) -> Result<String, String> {
 }
 
 fn gui_cmd(args: &[String]) -> Result<String, String> {
+    if args.iter().any(|a| a == "--host") { return host::gui(args); }
     let json_flag = args.iter().any(|a| a == "--json");
     let force = args.iter().any(|a| a == "--force");
     let steps: Vec<String> = args
@@ -1155,6 +1158,7 @@ fn local_timestamp_string() -> String {
 }
 
 fn shot_cmd(args: &[String]) -> Result<String, String> {
+    if args.iter().any(|a| a == "--host") { return host::shot(args); }
     let json_flag = args.iter().any(|a| a == "--json" || a == "-j");
     let quiet_flag = args.iter().any(|a| a == "--quiet" || a == "-q");
 
@@ -1310,9 +1314,10 @@ fn cli_commands() -> serde_json::Value {
                 { "name": "doctor", "args": "[-kernel] [-modules] [-ping] [-env] [-check] [-quick] [-simulate] [-all]", "desc": "Run non-destructive subsystem, module, environment, and IPC diagnostics" },
                 { "name": "invoke", "args": "<cmd> [json-args]", "desc": "Invoke module or kernel IPC command directly" },
                 { "name": "logs", "args": "[--limit N] [--since ID] [--level LEVEL] [--source SOURCE]", "desc": "Read log records from redb" },
-                { "name": "gui", "args": "[--json] [--force] <step>...", "desc": "Drive the page in one CDP session: js:<expr> | click:<target> | type:<target>:<text> | press:<key> | tree | wait:<ms>" },
-                { "name": "shot", "args": "[path] [--json] [-q]", "desc": "Capture screenshot via CDP, saves to Pictures/Screenshots by default" },
+                { "name": "gui", "args": "[--json] [--force] [--host] <step>...", "desc": "Drive the page in one CDP session: js:<expr> | click:<target> | type:<target>:<text> | press:<key> | tree | wait:<ms>" },
+                { "name": "shot", "args": "[path] [--json] [-q] [--host]", "desc": "Capture screenshot via CDP, saves to Pictures/Screenshots by default" },
                 { "name": "cdp-list", "desc": "List active CDP pages and targets" },
+                { "name": "host", "args": "[run|ping|tree|frames|shot [path]|hit <x> <y>|click <x> <y> [--force]|quit]", "desc": "Inspect and drive the native desktop host (unidtk-desktop) through its inspector door" },
                 { "name": "autostart", "args": "[status|enable|disable]", "desc": "Manage the logon autostart task (UniDTK)" },
                 { "name": "tasks", "args": "[status|register [name]|unregister <name>|cleanup-old]", "desc": "Manage Windows Task Scheduler tasks" },
                 { "name": "path", "args": "[status|ensure|remove]", "desc": "Check, register or remove the CLI directory in the User PATH" },
@@ -1467,7 +1472,7 @@ fn build_cmd(args: &[String]) -> Result<String, String> {
     // relocate our own exe so cargo can relink it (os error 32 otherwise); the
     // guard puts it back on every way out that is not a successful build
     let mut held_exe = HeldExe::hold(&exe)?;
-    // 1. one tauri pass builds all three bins + the NSIS installer
+    // 1. one tauri pass builds all four bins + the NSIS installer
     run_cargo_tauri(&["build", "--bundles", "nsis"], jobs)?;
     eprintln!("build OK");
     // cargo placed a fresh udtk.exe at the canonical path; drop the renamed
@@ -1671,7 +1676,7 @@ fn run_installer_and_verify(
             }
         }
     }
-    for name in ["udtk.exe", "vpn-helper.exe", "libmpv-2.dll"] {
+    for name in ["udtk.exe", "vpn-helper.exe", "unidtk-desktop.exe", "libmpv-2.dll"] {
         let (a, b) = (
             sha256_of(&install.join(name)).unwrap_or_default(),
             sha256_of(&release_dir.join(name)).unwrap_or_default(),
@@ -1733,7 +1738,7 @@ fn stop_verdict(left: &[u32], killed: usize) -> Result<String, String> {
 /// again: success is reported only when nothing of the install is left running.
 fn stop_cmd() -> Result<String, String> {
     let install = install_dir();
-    let mut graceful = false;
+    let mut graceful = host::quit().is_ok();
     match Cdp::open() {
         Ok(mut cdp) => match cdp.evaluate(
             "(() => { const h = window.__UNIDTK_HARNESS__; if (!h) return false; h.invoke('quit_app').catch(() => {}); return true; })()",
@@ -1788,7 +1793,7 @@ fn stop_cmd() -> Result<String, String> {
 /// PIDs of processes whose executable lives under `dir` (not including us).
 fn list_processes_from(dir: &std::path::Path) -> Vec<u32> {
     let self_pid = std::process::id();
-    let dir_str = dir.to_string_lossy().to_ascii_lowercase();
+    let dir_str = format!("{}\\", dir.to_string_lossy().trim_end_matches(['\\', '/']).to_ascii_lowercase());
     let script = format!(
         "$p=Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith('{}') }} | Select-Object -ExpandProperty ProcessId; $p | Where-Object {{ $_ -ne {spid} }}",
         dir_str.replace('\'', "''"),
@@ -1892,7 +1897,7 @@ fn find_toolchain() -> Option<std::path::PathBuf> {
 }
 
 /// One phase: `cargo tauri <args>` in the toolchain project. The tauri CLI
-/// itself runs `cargo build --bins` (all three binaries) before bundling, so
+/// itself runs `cargo build --bins` (all four binaries) before bundling, so
 /// no separate `cargo build --bins` pass is needed — a second pass with
 /// different features (no `tauri/custom-protocol`) forced a full recompile of
 /// the dependency graph on every build.
@@ -2388,7 +2393,7 @@ fn write_user_path(new: &str) -> Result<(), String> {
 fn path_cmd(args: &[String]) -> Result<String, String> {
     let sub = args.get(1).map(|s| s.as_str()).unwrap_or("status");
     // Only the installed copy (Program Files) goes on PATH, wherever the CLI
-    // was started from: a dev build from `targetelease` never does. No copies
+    // was started from: a dev build from `target/release` never does. No copies
     // of `udtk.exe` in the data directory: two copies drift apart in version.
     let bin_dir = program_files_install_dir();
     match sub {
@@ -3362,6 +3367,7 @@ fn run_ping_check() -> (bool, String) {
 ///   -simulate / --simulate : live frontend action & CDP simulation
 ///   -all / --all         : comprehensive audit (default)
 fn doctor_cmd(args: &[String]) -> Result<String, (i32, String)> {
+    if args.iter().any(|a| a == "--host") { return host::doctor(args).map_err(|e| (1, e)); }
     for arg in args.iter().skip(1) {
         if arg.starts_with('-') && !ALLOWED_DOCTOR_FLAGS.contains(&arg.as_str()) {
             return Err((
@@ -3890,8 +3896,10 @@ USAGE:
   udtk doctor [-kernel] [-modules] [-ping] [-env] [-check] [-quick] [-simulate] [-all]
   udtk invoke <cmd> [json-args]
   udtk logs [--limit N] [--since ID] [--level LEVEL] [--source SOURCE]
-  udtk gui [--json] [--force] <step>...   # js:<expr> | click:<target> | type:<target>:<text> | press:<key> | tree | wait:<ms>
-  udtk shot [path] [--json] [-q]
+  udtk gui [--json] [--force] [--host] <step>...   # js:<expr> | click:<target> | type:<target>:<text> | press:<key> | tree | wait:<ms>
+  udtk shot [path] [--json] [-q] [--host]
+  udtk host [run|ping|tree|frames|shot [path]|hit <x> <y>|click <x> <y> [--force]|quit]
+  udtk doctor --host [-ping|-simulate]
   udtk help [--json]
   udtk cdp-list
   udtk autostart [status|enable|disable]

@@ -14,3 +14,5 @@ Before writing, the file is checked: it must start with the PNG signature and be
 When CDP is not reachable, the error carries a hint, and the hint tells two cases apart: `UniDTK application is not running. Start it via 'udtk run' or 'schtasks /run /tn UniDTK'` when the socket also fails, and `UniDTK core is running, but WebView2 CDP (port N) is not responding.` when only CDP fails.
 
 `cdp-list` prints the JSON list of CDP targets from `GET /json`.
+
+The experimental native host has its own path: `udtk shot --host [path]`, or `udtk host shot [path]`. The inspector returns bounded PNG bytes; the CLI validates the signature and saves them locally. An explicit path is created exclusively, so an existing file is refused. Without a path it chooses a timestamp and process id in the same Screenshots directory. The JSON result names the absolute path, dimensions and `capture: "dwm-printwindow"`. This temporary G0 capture reads the host through `PrintWindow(PW_RENDERFULLCONTENT)` and sets alpha opaque; it is not a wgpu readback. It never falls back to the WebView2 screenshot. See [the inspector contract](../reference/ipc.md#r-ipc.host-inspector).

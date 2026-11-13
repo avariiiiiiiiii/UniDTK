@@ -1,6 +1,6 @@
 # Chapter 14. `build`, step by step
 
-`udtk build` is the only way to make a release. It builds the three binaries and the NSIS installer in one tauri pass, installs the installer silently into `C:\Program Files\UniDTK`, proves the install by hashes, restarts the app, and checks it over IPC. Do not run `cargo build` by hand, and do not copy binaries into `Program Files`. Both skip the installer, and the scheduled tasks and the PATH are registered by the installer.
+`udtk build` is the only way to make a release. It builds the four binaries and the NSIS installer in one tauri pass, installs the installer silently into `C:\Program Files\UniDTK`, proves the install by hashes, restarts the app, and checks it over IPC. Do not run `cargo build` by hand, and do not copy binaries into `Program Files`. Both skip the installer, and the scheduled tasks and the PATH are registered by the installer.
 
 ```bash
 udtk build          # thread count from .cargo/config.toml
@@ -22,7 +22,7 @@ Each step below is a stage in `build_cmd` in [opt/cli/main.rs](../../opt/cli/mai
 
 **Step 1. Set the running CLI aside.** The `udtk.exe` that runs the build is in `target\release`, and cargo must relink it. Windows will not overwrite a running executable. So the command renames its own file to `udtk.exe.held`. It deletes any old `.held` file first.
 
-**Step 2. Build with tauri.** `run_cargo_tauri(["build", "--bundles", "nsis"], jobs)` runs `cargo tauri build --bundles nsis` in the `toolchain` directory. Tauri builds the three binaries and the NSIS installer in one pass. The environment is the `.env` file, and `CARGO_BUILD_JOBS` is set if `-j` was given. If the build fails, the command renames `udtk.exe.held` back to `udtk.exe`, so the CLI stays usable, and it returns the error.
+**Step 2. Build with tauri.** `run_cargo_tauri(["build", "--bundles", "nsis"], jobs)` runs `cargo tauri build --bundles nsis` in the `toolchain` directory. Tauri builds the four binaries and the NSIS installer in one pass. The environment is the `.env` file, and `CARGO_BUILD_JOBS` is set if `-j` was given. If the build fails, the command renames `udtk.exe.held` back to `udtk.exe`, so the CLI stays usable, and it returns the error.
 
 **Step 3. Remove the set-aside copy.** After a successful build, cargo has written a fresh `udtk.exe` at the canonical path. The `.held` copy is deleted, so that the installer packs the new CLI and not the old one.
 
@@ -40,7 +40,7 @@ Each step below is a stage in `build_cmd` in [opt/cli/main.rs](../../opt/cli/mai
 - If the installer returns `740` (`ERROR_ELEVATION_REQUIRED`, because a per-machine install needs administrator rights), the command runs the installer again with `Start-Process ... -Verb RunAs -Wait`. On the author's machine UAC is off, so this succeeds without a prompt.
 - Because NSIS can skip a locked file and still exit 0, the command does not trust the exit code alone. It waits up to **60 seconds** until `C:\Program Files\UniDTK\unidtk.exe` exists with the same size as `target\release\unidtk.exe`. Otherwise it fails with `installer ran but installed unidtk.exe is missing or wrong size`.
 
-**Step 9. Verify by hashes.** For `udtk.exe`, `vpn-helper.exe`, and `libmpv-2.dll`, the command computes the SHA-256 of the installed copy and of the copy in `target\release`, using `certutil -hashfile`. A difference, or an empty hash, fails with `<name> did not update after install`. This is the proof that the installed files are the new ones.
+**Step 9. Verify by hashes.** For `udtk.exe`, `vpn-helper.exe`, `unidtk-desktop.exe`, and `libmpv-2.dll`, the command computes the SHA-256 of the installed copy and of the copy in `target\release`, using `certutil -hashfile`. A difference, or an empty hash, fails with `<name> did not update after install`. This is the proof that the installed files are the new ones.
 
 **Step 10. Restart and check over IPC.** The command starts the task with `schtasks /run /tn UniDTK`. Task Scheduler refuses to start the task from a shell that runs at medium integrity (a token filtered by UAC). When that happens, the command starts `C:\Program Files\UniDTK\unidtk.exe` directly, with the same working directory, and notes it in the output: `restart: task start denied (medium-integrity shell) — spawned the app directly`. Then it sends `ping` every 400 ms for up to **30 seconds**. If the app does not answer, the command fails with `app did not answer on IPC within 30s after install`.
 
@@ -52,6 +52,6 @@ These are the failures that shaped the steps. They are facts from the recorded s
 
 - **Memory.** A full build with thin LTO, on the author's 15.7 GB machine, reached the system's allocation limit. The page file grew to 48 GB, and the compiler failed with `LLVM out of memory`. The fix in `.cargo/config.toml` is a low job count and a large stack. For the tests, `cargo test --release --workspace -j 2` brought down two LTO builds at once with `0xc000012d`, so the tests run with `-j 1`. These are the author's recorded limits, not a general rule.
 - **Held files.** The installed app once held `tdjson.dll` and the OpenSSL DLLs **from the repository's `target\release`**, because the path to the Telegram library was stored in the settings. The consequences were an `os error 32` without a file name, and a broken Telegram after the folder was renamed. The step 0 stop and the install path prevent both.
-- **Cold build.** `build.rs` requires the resources of `tauri.conf.json` (`../target/release/udtk.exe`, `vpn-helper.exe`) to exist. On an empty `target/` the build cannot succeed, because it needs the program it builds. The recorded workaround is zero-length placeholder files, which cargo overwrites. The recorded fix is to accept missing resources at build time and check them at packaging.
+- **Cold build.** `build.rs` gives `tauri_build` an empty resource map, so the binaries need not exist during compilation. The bundler reads the real `tauri.conf.json` after Cargo has produced them and validates all binary resources. No placeholder executables are needed.
 - **Quiet success.** A cargo run piped through a PowerShell `Select-Object` was cut off early, and the artifact silently stayed old. It was caught twice as "build succeeded, binary is old". Run cargo directly, and read the exit status.
 - **Commit `cd1949b`** (`fix(cli): leave an unchanged libmpv copy alone`) is the reason for the hash check in step 4.

@@ -7,10 +7,17 @@
 //! through DirectComposition, which is proven for top-level windows only.
 //!
 //! `unidtk-desktop --probe-transparency <report.json>` answers it on this machine: it reads
-//! a few pixels of the desktop host as DWM composed it, attaches a full-screen transparent window with one half-transparent
-//! card, reads the same pixels again, writes the report and exits.
+//! a few pixels of the desktop host as DWM composed it, attaches a full-screen transparent
+//! window with one half-transparent card, reads the same pixels again, writes the report
+//! and exits. It did: the clear pixels show the desktop (the plan's G0 section).
+//!
+//! Without arguments the host runs: the same window under the desktop, kept, with its
+//! inspector door (`inspector.rs`), which `udtk host ...` talks to.
 
 mod desktop_host;
+mod host;
+mod inspector;
+mod protocol;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -48,7 +55,10 @@ fn main() {
             let report = args.get(index + 1).cloned().unwrap_or_else(|| "transparency.json".into());
             probe_transparency(report.into());
         }
-        None => eprintln!("unidtk-desktop: only --probe-transparency <report.json> exists yet (G0)"),
+        None => if let Err(error) = host::run() {
+            desktop_host::note(&error);
+            std::process::exit(1);
+        },
     }
 }
 

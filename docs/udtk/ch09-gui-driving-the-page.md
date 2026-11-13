@@ -8,6 +8,8 @@ udtk gui [--json] [--force] <step>...
 
 ## 9.1 The steps
 
+The experimental Rune window is selected explicitly with `udtk gui --host tree` or `udtk gui --host click:g0-card`. Its standalone G0 inspector resolves a key or path from its own tree. It posts input through Win32 and waits for the card's Rune handler to increment its press counter. A covered screen target is refused; `--force` explicitly permits posted input while covered and is recorded in the receipt. This mode supports `tree` and `click` only; other steps fail without falling back to WebView2. Start it with `udtk host run`. The kernel does not yet manage its lifecycle; see [the host plan](../dev/plan-rune-host.md).
+
 | Step | What it does |
 |---|---|
 | `js:<expr>` | Evaluates JavaScript in the page and returns the value |

@@ -2,9 +2,9 @@
 
 `udtk` is a small native program. It does not talk to the user's screen, and it does not contain the application's logic. It is a **client**. It asks the running UniDTK application questions over a local socket, and it drives the application's WebView through the browser debugging protocol (CDP). It also performs the operations that belong to the machine rather than to the app: building, installing, scheduled tasks, and the PATH.
 
-## 1.1 One project, three binaries
+## 1.1 One project, four binaries
 
-The whole Rust side is one Cargo project in `toolchain/`. It declares three binaries in [toolchain/Cargo.toml](../../toolchain/Cargo.toml):
+The whole Rust side is one Cargo project in `toolchain/`. It declares four binaries in [toolchain/Cargo.toml](../../toolchain/Cargo.toml):
 
 ```toml
 [[bin]]
@@ -18,6 +18,10 @@ path = "../opt/cli/main.rs"
 [[bin]]
 name = "vpn-helper"
 path = "../modules/vpn/helper/main.rs"
+
+[[bin]]
+name = "unidtk-desktop"
+path = "../core/desktop/main.rs"
 ```
 
 | Binary | Source | Role |
@@ -25,12 +29,13 @@ path = "../modules/vpn/helper/main.rs"
 | `unidtk.exe` | [core/kernel/main.rs](../../core/kernel/main.rs) | The application: kernel, WebView, IPC server, modules |
 | `udtk.exe` | [opt/cli/main.rs](../../opt/cli/main.rs) | This CLI |
 | `vpn-helper.exe` | [modules/vpn/helper/main.rs](../../modules/vpn/helper/main.rs) | A GUI-subsystem helper for the VPN, run as a scheduled task |
+| `unidtk-desktop.exe` | [core/desktop/main.rs](../../core/desktop/main.rs) | The experimental standalone Rune window; started explicitly with `udtk host run` |
 
 Nothing else is needed at run time. There are no script wrappers, no Node.js, and no external runtime.
 
 ## 1.2 Where the binaries live
 
-`udtk` finds the application by looking **next to itself**. The function `install_dir()` in [core/api/src/paths.rs](../../core/api/src/paths.rs) returns the directory of the running executable. In a shipped install that is `C:\Program Files\UniDTK`, where `unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, and `sing-box.exe` sit together. In a development run it is `target\release` of the checkout.
+`udtk` finds the application by looking **next to itself**. The function `install_dir()` in [core/api/src/paths.rs](../../core/api/src/paths.rs) returns the directory of the running executable. In a shipped install that is `C:\Program Files\UniDTK`, where `unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `unidtk-desktop.exe`, and `sing-box.exe` sit together. In a development run it is `target\release` of the checkout.
 
 Two commands use a different, fixed location on purpose. `udtk path` and `udtk tasks register` always point at `C:\Program Files\UniDTK`, even when the CLI runs from a checkout, so that a development build never registers itself in the PATH or in Task Scheduler. Section 12 explains this.
 

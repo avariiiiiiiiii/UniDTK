@@ -4,7 +4,7 @@ The rule is that the program and its data are kept apart, so that an update neve
 
 | What | Where | Why |
 |---|---|---|
-| Program: `unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `sing-box.exe`, DLLs, `models/`, `modules/`, `scheduler-tasks/` | `C:\Program Files\UniDTK` | Read-only for the user. The installer writes it |
+| Program: `unidtk.exe`, `udtk.exe`, `vpn-helper.exe`, `unidtk-desktop.exe`, `sing-box.exe`, DLLs, `models/`, `modules/`, `scheduler-tasks/` | `C:\Program Files\UniDTK` | Read-only for the user. The installer writes it |
 | Data: `logs/`, `cache/`, `music/` | `%LOCALAPPDATA%\UniDTK` (`logs_dir()`, `cache_dir()`, `music_dir()` in [core/api/src/paths.rs](../../core/api/src/paths.rs)) | The application writes here, never next to itself |
 | Databases: `unidtk.redb`, `unidtk_logs.redb` | `%LOCALAPPDATA%\UniDTK` | Described in [architecture.md](../reference/README.md) |
 
