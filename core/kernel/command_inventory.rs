@@ -54,6 +54,10 @@ pub const FRONTEND_LOG: CommandSpec =
 
 pub const WEATHER_LOCATION_REQUEST: CommandSpec =
     CommandSpec::write("weather_location_request", "Request Windows location permission for weather", "");
+pub const DESK_HOST_GET: CommandSpec =
+    CommandSpec::read_only("desk_host_get", "Active desktop host mode (web or native)", "");
+pub const DESK_HOST_SET: CommandSpec =
+    CommandSpec::write("desk_host_set", "Switch desktop host mode between web and native", "{mode}");
 
 /// Read-only health probes `doctor -simulate` runs against the live app.
 ///
@@ -113,6 +117,8 @@ pub static ALL: &[&CommandSpec] = &[
     &SET_MODULE_ENABLED,
     &COMMANDS,
     &WEATHER_LOCATION_REQUEST,
+    &DESK_HOST_GET,
+    &DESK_HOST_SET,
 ];
 
 /// Every command of the application: the kernel's, then each module's.

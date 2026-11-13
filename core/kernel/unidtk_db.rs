@@ -163,6 +163,43 @@ impl UniDtkDatabase {
         Ok(())
     }
 
+    // ─── Desktop host mode ────────────────────────────────────────────────────
+
+    pub fn get_desk_host(&self) -> Result<String, String> {
+        let txn = self.db.begin_read().map_err(|e| e.to_string())?;
+        let table = txn.open_table(WIDGET_SETTINGS).map_err(|e| e.to_string())?;
+        let Some(value) = table.get("desk_host").map_err(|e| e.to_string())? else {
+            return Ok("web".to_string());
+        };
+        let Ok(raw) = std::str::from_utf8(value.value()) else {
+            return Ok("web".to_string());
+        };
+        Ok(match raw.trim() {
+            "native" => "native".to_string(),
+            _ => "web".to_string(),
+        })
+    }
+
+    pub fn set_desk_host(&self, mode: &str) -> Result<(), String> {
+        let normalized = match mode {
+            "web" | "native" => mode,
+            other => {
+                return Err(format!(
+                    "Invalid desk_host '{other}'; expected 'web' or 'native'"
+                ))
+            }
+        };
+        let txn = self.db.begin_write().map_err(|e| e.to_string())?;
+        {
+            let mut table = txn.open_table(WIDGET_SETTINGS).map_err(|e| e.to_string())?;
+            table
+                .insert("desk_host", normalized.as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        txn.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     // ─── Folders ─────────────────────────────────────────────────────────────
 
     pub fn list_folders(&self) -> Result<Vec<FolderRecord>, String> {
@@ -488,6 +525,60 @@ mod tests {
             crate::log_store::LogStore::default_path().file_name().unwrap(),
             "unidtk_logs.redb"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_desk_host_defaults_to_web() {
+        let dir = std::env::temp_dir().join(format!("test_unidtk_desk_host_def_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let db = UniDtkDatabase::open(dir.join("test.redb")).unwrap();
+        assert_eq!(db.get_desk_host().unwrap(), "web");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_desk_host_roundtrips_native_and_preserves_widget_config() {
+        let dir = std::env::temp_dir().join(format!("test_unidtk_desk_host_rt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let db = UniDtkDatabase::open(dir.join("test.redb")).unwrap();
+        let config = serde_json::json!({ "positions": { "clock": { "x": 10, "y": 20 } } });
+        db.set_widget_config(&config).unwrap();
+
+        db.set_desk_host("native").unwrap();
+        assert_eq!(db.get_desk_host().unwrap(), "native");
+        assert_eq!(db.get_widget_config().unwrap().unwrap(), config);
+
+        db.set_desk_host("web").unwrap();
+        assert_eq!(db.get_desk_host().unwrap(), "web");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_desk_host_invalid_or_corrupted_value_degrades_to_web() {
+        let dir = std::env::temp_dir().join(format!("test_unidtk_desk_host_bad_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let db = UniDtkDatabase::open(dir.join("test.redb")).unwrap();
+        assert!(db.set_desk_host("bogus").is_err());
+
+        {
+            let txn = db.raw_db().begin_write().unwrap();
+            {
+                let mut table = txn.open_table(WIDGET_SETTINGS).unwrap();
+                table.insert("desk_host", b"corrupt-bytes".as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        assert_eq!(db.get_desk_host().unwrap(), "web");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

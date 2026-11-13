@@ -71,6 +71,7 @@ pub fn request(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
             }
         });
         if foreground_is_ours() { dispatch_begin(ui_app, started, cancel); return; }
+        crate::ensure_webview_runtime();
         // A readable foreground host is needed for WinRT's consent surface.
         let window = match tauri::WebviewWindowBuilder::new(&ui_app, LABEL,
             tauri::WebviewUrl::App("modules/micrographics/location-permission.html".into()))

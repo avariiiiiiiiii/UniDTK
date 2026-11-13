@@ -130,26 +130,73 @@ extern "system" fn find_sibling_worker(window: HWND, found: LPARAM) -> BOOL {
 /// on the newer Windows 11 one, where `SHELLDLL_DefView` and the wallpaper's WorkerW are
 /// both children of Progman.
 fn desktop_host() -> Result<HWND, String> {
+    desktop_host_for_attempt(60)
+}
+
+pub fn allow_progman_fallback(shell_tray_present: bool, attempt: usize) -> bool {
+    (shell_tray_present && attempt >= 4) || attempt >= 60
+}
+
+fn has_shell_tray() -> bool {
+    unsafe {
+        FindWindowW(w!("Shell_TrayWnd"), None)
+            .map(|hwnd| !hwnd.0.is_null())
+            .unwrap_or(false)
+    }
+}
+
+fn desktop_host_for_attempt(attempt: usize) -> Result<HWND, String> {
     unsafe {
         let progman = FindWindowW(w!("Progman"), None).map_err(|e| format!("Progman: {e}"))?;
         let mut result = 0usize;
+        let flags = SMTO_NORMAL | SMTO_ABORTIFHUNG;
         // Asks Explorer to split the wallpaper into its own WorkerW, as the kernel does.
-        let _ = SendMessageTimeoutW(progman, 0x052C, WPARAM(0xD), LPARAM(1), SMTO_NORMAL | SMTO_ABORTIFHUNG, 100, Some(&mut result));
+        let _ = SendMessageTimeoutW(progman, 0x052C, WPARAM(0xD), LPARAM(1), flags, 100, Some(&mut result));
         let mut worker = HWND::default();
         let _ = EnumWindows(Some(find_sibling_worker), LPARAM(&mut worker as *mut HWND as isize));
         if !worker.0.is_null() {
             return Ok(worker);
         }
-        let def_view = FindWindowExW(progman, HWND::default(), w!("SHELLDLL_DefView"), None).unwrap_or_default();
-        if !def_view.0.is_null() {
-            return Ok(progman);
+
+        // Fallback messages used by newer/restarted Explorer builds before creating sibling WorkerW.
+        let _ = SendMessageTimeoutW(progman, 0x052C, WPARAM(0xD), LPARAM(0), flags, 100, Some(&mut result));
+        let _ = SendMessageTimeoutW(progman, 0x052C, WPARAM(0), LPARAM(0), flags, 100, Some(&mut result));
+        let _ = EnumWindows(Some(find_sibling_worker), LPARAM(&mut worker as *mut HWND as isize));
+        if !worker.0.is_null() {
+            return Ok(worker);
+        }
+
+        if allow_progman_fallback(has_shell_tray(), attempt) {
+            // Top-level WorkerW without SHELLDLL_DefView (>= 640x480), matching kernel fallback.
+            let mut top_worker = FindWindowExW(HWND::default(), HWND::default(), w!("WorkerW"), None).unwrap_or_default();
+            while !top_worker.0.is_null() {
+                let inner_def = FindWindowExW(top_worker, HWND::default(), w!("SHELLDLL_DefView"), None).unwrap_or_default();
+                if inner_def.0.is_null() {
+                    let mut rect = RECT::default();
+                    let _ = GetWindowRect(top_worker, &mut rect);
+                    if rect.right - rect.left >= 640 && rect.bottom - rect.top >= 480 {
+                        return Ok(top_worker);
+                    }
+                }
+                top_worker = FindWindowExW(HWND::default(), top_worker, w!("WorkerW"), None).unwrap_or_default();
+            }
+
+            let def_view = FindWindowExW(progman, HWND::default(), w!("SHELLDLL_DefView"), None).unwrap_or_default();
+            if !def_view.0.is_null() {
+                return Ok(progman);
+            }
         }
         Err("no desktop host".into())
     }
 }
 
+#[allow(dead_code)]
 /// Worker-side discovery: no HWND on Rune's UI thread is blocked by the shell search.
 pub fn discover() -> Result<isize, String> { desktop_host().map(|host| host.0 as isize) }
+
+pub fn discover_with_attempt(attempt: usize) -> Result<isize, String> {
+    desktop_host_for_attempt(attempt).map(|host| host.0 as isize)
+}
 
 pub fn window_scale(hwnd: isize) -> f64 {
     let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(HWND(hwnd as _)) };

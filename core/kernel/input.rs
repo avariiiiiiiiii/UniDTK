@@ -506,7 +506,9 @@ unsafe extern "system" fn handle_window_message(
     });
     if taskbar_msg != 0 && msg == taskbar_msg {
         crate::log_line("input: received TaskbarCreated message (Explorer restarted), re-attaching desktop");
-        if let Some(app) = crate::APP_HANDLE.get() {
+        if crate::is_native_host() {
+            crate::host_supervisor::notify_taskbar_created();
+        } else if let Some(app) = crate::APP_HANDLE.get() {
             crate::request_wallpaper_visible(app);
         }
     }

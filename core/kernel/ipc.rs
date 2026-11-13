@@ -285,6 +285,8 @@ static ROUTES: &[(&str, Handler)] = &[
         crate::command_inventory::WEATHER_LOCATION_REQUEST.name,
         handle_weather_location_request,
     ),
+    (crate::command_inventory::DESK_HOST_GET.name, handle_desk_host_get),
+    (crate::command_inventory::DESK_HOST_SET.name, handle_desk_host_set),
 ];
 
 fn handle_ping(_server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
@@ -433,6 +435,26 @@ fn handle_frontend_log(_server: &IpcServer, args: &Args) -> Result<serde_json::V
 
 fn handle_weather_location_request(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
     crate::weather_location::request(server.app.clone())
+}
+
+fn handle_desk_host_get(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+    let persisted = server.db.get_desk_host()?;
+    let active = crate::current_host_mode().as_str();
+    let sup = crate::host_supervisor::status();
+    Ok(serde_json::json!({
+        "mode": active,
+        "persisted": persisted,
+        "supervisorPid": sup.pid,
+        "generation": sup.generation,
+        "supervisorRunning": sup.running,
+    }))
+}
+
+fn handle_desk_host_set(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let raw = args.get("mode").and_then(|v| v.as_str()).ok_or("missing mode")?;
+    let target = crate::HostMode::parse_strict(raw)?;
+    crate::switch_desk_host(&server.app, target)?;
+    Ok(serde_json::json!({ "ok": true, "mode": target.as_str() }))
 }
 
 #[cfg(test)]

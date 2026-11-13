@@ -226,3 +226,65 @@ fn modifiers_state_from_mods_maps_ctrl_alt_shift_and_logo_cleanly() {
     assert!(cmd_state.control_key());
     assert!(cmd_state.super_key());
 }
+
+#[test]
+fn supervised_stdin_reader_parses_control_lines_and_triggers_stop_on_eof() {
+    use crate::supervisor::{read_control_stream, ControlSink, StartHandshake};
+
+    #[derive(Default)]
+    struct RecordingSink {
+        started: Option<StartHandshake>,
+        taskbar_reattached: usize,
+        shows: usize,
+        stops: Vec<String>,
+    }
+
+    impl ControlSink for RecordingSink {
+        fn on_start(&mut self, handshake: StartHandshake) {
+            self.started = Some(handshake);
+        }
+        fn on_taskbar_created(&mut self) {
+            self.taskbar_reattached += 1;
+        }
+        fn on_show(&mut self) {
+            self.shows += 1;
+        }
+        fn on_stop(&mut self, reason: &str) {
+            self.stops.push(reason.to_string());
+        }
+    }
+
+    let input = concat!(
+        r#"{"cmd":"start","generation":7,"instance_nonce":"nonce-7","ws_port":26599,"ws_token":"secret"}"#, "\n",
+        r#"{"cmd":"taskbar_created"}"#, "\n",
+        r#"{"cmd":"show"}"#, "\n",
+    );
+    let mut sink = RecordingSink::default();
+    read_control_stream(std::io::Cursor::new(input), &mut sink).unwrap();
+
+    assert_eq!(
+        sink.started,
+        Some(StartHandshake {
+            generation: 7,
+            instance_nonce: "nonce-7".into(),
+            ws_port: Some(26599),
+            ws_token: Some("secret".into()),
+        })
+    );
+    assert_eq!(sink.taskbar_reattached, 1);
+    assert_eq!(sink.shows, 1);
+    assert_eq!(sink.stops, vec!["eof"]);
+}
+
+#[test]
+fn desktop_discovery_budget_and_progman_fallback_gate() {
+    assert_eq!(crate::host::DISCOVERY_ATTEMPTS, 120);
+    assert_eq!(crate::host::DISCOVERY_INTERVAL, std::time::Duration::from_millis(250));
+    // Early cold boot before Shell_TrayWnd exists must not grab immature Progman.
+    assert!(!crate::desktop_host::allow_progman_fallback(false, 2));
+    assert!(!crate::desktop_host::allow_progman_fallback(true, 2));
+    // Once Shell_TrayWnd is up and WorkerW split attempt window passed, allow fallback.
+    assert!(crate::desktop_host::allow_progman_fallback(true, 4));
+    // At 15s (60 * 250ms), allow fallback even if tray heuristic isn't present.
+    assert!(crate::desktop_host::allow_progman_fallback(false, 60));
+}

@@ -18,6 +18,8 @@ mod desktop_host;
 mod host;
 mod inspector;
 mod protocol;
+mod supervisor;
+mod ws_client;
 #[cfg(test)]
 mod tests;
 

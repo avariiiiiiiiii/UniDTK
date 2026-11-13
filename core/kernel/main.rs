@@ -24,6 +24,7 @@ mod panic_hook;
 pub mod registry;
 mod command_inventory;
 mod events;
+mod host_supervisor;
 mod ws;
 mod unidtk_db;
 mod shell_db;
@@ -187,6 +188,7 @@ pub(crate) fn app_shutdown(app: &tauri::AppHandle, wait_for_vpn: bool) {
         }
     }
     hotkeys::shutdown();
+    host_supervisor::shutdown(wait_for_vpn);
     let _ = wallpaper::reset();
     // Drain queued log lines into unidtk_logs.redb / unidtk.log.
     crate::logging::flush();
@@ -536,11 +538,36 @@ fn delete_folder(
 fn open_explorer(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {
     let target_path = path.unwrap_or_default();
     log_line(format!("open_explorer: path={target_path}"));
-    request_wallpaper_visible(&app);
+    if !is_native_host() {
+        request_wallpaper_visible(&app);
+    }
     // Through the contract, so the event broker (and therefore the WebSocket door) sees
     // it too — the kernel's emitter keeps the Tauri behaviour unchanged.
     unidtk_api::emit("explorer-open", serde_json::json!(target_path));
     Ok(())
+}
+
+#[tauri::command(async)]
+fn desk_host_get(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let persisted = app
+        .try_state::<Arc<UniDtkDatabase>>()
+        .ok_or_else(|| "database unavailable".to_string())?
+        .get_desk_host()?;
+    let sup = host_supervisor::status();
+    Ok(serde_json::json!({
+        "mode": current_host_mode().as_str(),
+        "persisted": persisted,
+        "supervisorPid": sup.pid,
+        "generation": sup.generation,
+        "supervisorRunning": sup.running,
+    }))
+}
+
+#[tauri::command(async)]
+fn desk_host_set(app: tauri::AppHandle, mode: String) -> Result<serde_json::Value, String> {
+    let target = HostMode::parse_strict(&mode)?;
+    switch_desk_host(&app, target)?;
+    Ok(serde_json::json!({ "ok": true, "mode": target.as_str() }))
 }
 
 #[tauri::command(async)]
@@ -608,6 +635,9 @@ pub(crate) fn request_wallpaper_visible(app: &tauri::AppHandle) {
 static ATTACH_IN_PROGRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn request_wallpaper_attach(app: &tauri::AppHandle, force: bool) {
+    if is_native_host() {
+        return;
+    }
     if !force && ATTACH_IN_PROGRESS.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_err() {
         return;
     }
@@ -768,6 +798,167 @@ fn load_env_into_process() {
             }
         }
     }
+}
+
+static CURRENT_HOST_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static WALLPAPER_DESTROYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SWITCH_HOST_MENU_ITEM: std::sync::OnceLock<tauri::menu::MenuItem<tauri::Wry>> =
+    std::sync::OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostMode {
+    Web = 0,
+    Native = 1,
+}
+
+impl HostMode {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim() {
+            "native" => Self::Native,
+            _ => Self::Web,
+        }
+    }
+
+    pub fn parse_strict(raw: &str) -> Result<Self, String> {
+        match raw.trim() {
+            "web" => Ok(Self::Web),
+            "native" => Ok(Self::Native),
+            other => Err(format!("unknown desk host '{other}'; expected 'web' or 'native'")),
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Web => Self::Native,
+            Self::Native => Self::Web,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Native => "native",
+        }
+    }
+
+    pub fn tray_switch_label(self) -> &'static str {
+        match self {
+            Self::Web => "Хост стола: WebView2 → Native (Rune)",
+            Self::Native => "Хост стола: Native (Rune) → WebView2",
+        }
+    }
+}
+
+pub(crate) fn current_host_mode() -> HostMode {
+    match CURRENT_HOST_MODE.load(std::sync::atomic::Ordering::Acquire) {
+        1 => HostMode::Native,
+        _ => HostMode::Web,
+    }
+}
+
+pub(crate) fn set_current_host_mode(mode: HostMode) {
+    CURRENT_HOST_MODE.store(mode as u8, std::sync::atomic::Ordering::Release);
+}
+
+pub(crate) fn is_native_host() -> bool {
+    current_host_mode() == HostMode::Native
+}
+
+static WEBVIEW_RUNTIME_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Configures WebView2 CLI flags and allocates the CDP port only when a WebView2
+/// window is actually about to be created (`web` host or transient permission UI).
+pub(crate) fn ensure_webview_runtime() {
+    WEBVIEW_RUNTIME_INIT.call_once(|| {
+        // Minimize WebView2 memory footprint: single renderer process, 128 MB V8 cap,
+        // keep DirectComposition & GPU shader cache intact while avoiding native occlusion stalls.
+        let browser_args = vec![
+            "--renderer-process-limit=1",
+            "--js-flags=--max-old-space-size=128",
+            "--disable-features=CalculateNativeWinOcclusion,TranslateUI,MediaEngagementBypassAutoplayPolicies",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+        ];
+        let cdp_port = pick_cdp_port();
+        let _ = CDP_PORT.set(cdp_port);
+        log_line(format!("main: CDP port {cdp_port} enabled for WebView2 tooling"));
+        let merged = merge_browser_args(&browser_args, cdp_port);
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", merged);
+    });
+}
+
+fn create_wallpaper_window(app: &tauri::AppHandle) -> Result<(), String> {
+    ensure_webview_runtime();
+    if app.get_webview_window("wallpaper").is_some() {
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "wallpaper",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("UniDTK")
+    .devtools(true)
+    .decorations(false)
+    .transparent(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .resizable(false)
+    .inner_size(1920.0, 1080.0)
+    .build()
+    .map_err(|e| format!("create wallpaper webview: {e}"))?;
+    log_line("host: created WebView2 wallpaper window");
+    Ok(())
+}
+
+pub(crate) fn switch_desk_host(app: &tauri::AppHandle, target: HostMode) -> Result<(), String> {
+    static SWITCH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = SWITCH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|e| format!("host switch lock: {e}"))?;
+
+    if current_host_mode() == target {
+        return Ok(());
+    }
+    if is_shutting_down() {
+        return Err("application is shutting down".into());
+    }
+
+    if let Some(db) = app.try_state::<Arc<UniDtkDatabase>>() {
+        db.set_desk_host(target.as_str())?;
+    }
+    set_current_host_mode(target);
+    log_line(format!("host: switching desktop host -> {}", target.as_str()));
+
+    match target {
+        HostMode::Native => {
+            let _ = run_on_main_thread(app, |app| {
+                if let Ok(hwnd) = wallpaper_hwnd(&app) {
+                    let _ = wallpaper::detach(hwnd, ATTACH_OPTS);
+                }
+                let _ = wallpaper::reset();
+                WALLPAPER_DESTROYING.store(true, std::sync::atomic::Ordering::Release);
+                if let Some(window) = app.get_webview_window("wallpaper") {
+                    let _ = window.destroy();
+                }
+                WALLPAPER_DESTROYING.store(false, std::sync::atomic::Ordering::Release);
+                Ok(())
+            });
+            host_supervisor::start_host(ws::port(), ws::token())?;
+        }
+        HostMode::Web => {
+            host_supervisor::stop_host(true);
+            run_on_main_thread(app, |app| create_wallpaper_window(&app))?;
+            request_wallpaper_attach(app, true);
+        }
+    }
+
+    if let Some(item) = SWITCH_HOST_MENU_ITEM.get() {
+        let _ = item.set_text(target.tray_switch_label());
+    }
+    unidtk_api::emit("desk-host-changed", serde_json::json!({ "mode": target.as_str() }));
+    Ok(())
 }
 
 /// CDP port of this run, published to the CLI through the IPC `ping` response.
@@ -1095,6 +1286,25 @@ mod frontend_contract_tests {
         }
         names
     }
+
+    #[test]
+    fn tauri_conf_disables_automatic_startup_windows_and_host_mode_toggles() {
+        let conf_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(conf_path).unwrap()).unwrap();
+        let windows = conf["app"]["windows"].as_array().expect("app.windows array");
+        assert!(windows.is_empty(), "tauri.conf.json app.windows must stay empty for conditional web/native startup");
+
+        assert_eq!(crate::HostMode::parse("native"), crate::HostMode::Native);
+        assert_eq!(crate::HostMode::parse("web"), crate::HostMode::Web);
+        assert_eq!(crate::HostMode::parse("garbage"), crate::HostMode::Web);
+        assert_eq!(crate::HostMode::Web.toggle(), crate::HostMode::Native);
+        assert_eq!(crate::HostMode::Native.toggle(), crate::HostMode::Web);
+        assert_ne!(
+            crate::HostMode::Web.tray_switch_label(),
+            crate::HostMode::Native.tray_switch_label()
+        );
+    }
 }
 
 fn main() {
@@ -1152,31 +1362,6 @@ fn main() {
         result
     });
 
-    // Configure WebView2 to minimize working set memory footprint:
-    // - single renderer process limit
-    // - V8 max old space size capped at 128MB to prevent heap hoarding
-    // - disable unused Chromium features, disk caches, and DWM background occlusion throttling
-    // NOTE: GPU DirectComposition and shader disk cache are preserved for fast cold boot.
-    let browser_args = vec![
-        "--renderer-process-limit=1",
-        "--js-flags=--max-old-space-size=128",
-        "--disable-features=CalculateNativeWinOcclusion,TranslateUI,MediaEngagementBypassAutoplayPolicies",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-renderer-backgrounding",
-    ];
-
-    // CDP is always on: the CLI diagnostic tooling (`udtk gui`/`shot`/`dom`) depends
-    // on it. The port is *discovered*, not assumed — if 9222 is held by a stale or
-    // foreign process we take a free one and publish it over IPC, so `udtk` can never
-    // drive somebody else's WebView. `--remote-allow-origins` is deliberately NOT set:
-    // our CLI sends no Origin header, and a client-chosen Origin is not a control.
-    let cdp_port = pick_cdp_port();
-    let _ = CDP_PORT.set(cdp_port);
-    log_line(format!("main: CDP port {cdp_port} enabled for CLI diagnostic tooling"));
-
-    let merged = merge_browser_args(&browser_args, cdp_port);
-    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", merged);
-
     // Periodic memory trimmer: periodically returns unused/dormant working set pages to Windows.
     #[cfg(windows)]
     let _ = std::thread::Builder::new()
@@ -1202,7 +1387,9 @@ fn main() {
             }
             // Second wallpaper launch: re-attach under WorkerW instead of
             // focusing a top-level window (set_focus would flash it over the desktop).
-            if app.get_webview_window("wallpaper").is_some() {
+            if is_native_host() {
+                let _ = host_supervisor::send_control(&host_supervisor::ControlMessage::Show);
+            } else if app.get_webview_window("wallpaper").is_some() {
                 request_wallpaper_attach(app, true);
             }
         }))
@@ -1246,6 +1433,8 @@ fn main() {
             delete_folder,
             weather_location_request,
             open_explorer,
+            desk_host_get,
+            desk_host_set,
             // core hotkeys & focus
             hotkeys_list,
             hotkey_toggle,
@@ -1323,13 +1512,28 @@ fn main() {
                 }
             }
 
+            let initial_mode = std::env::var("UNIDTK_DESK_HOST")
+                .ok()
+                .map(|raw| HostMode::parse(&raw))
+                .unwrap_or_else(|| {
+                    app.try_state::<Arc<UniDtkDatabase>>()
+                        .and_then(|db| db.get_desk_host().ok())
+                        .map(|raw| HostMode::parse(&raw))
+                        .unwrap_or(HostMode::Web)
+                });
+            set_current_host_mode(initial_mode);
+            log_line(format!("setup: desk_host={}", initial_mode.as_str()));
+
             let disabled_mods = disabled_module_set(app.handle());
 
             let show = MenuItemBuilder::with_id("show", "Показать виджеты").build(app)?;
+            let switch_host = MenuItemBuilder::with_id("switch_host", initial_mode.tray_switch_label()).build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Выход").build(app)?;
+            let _ = SWITCH_HOST_MENU_ITEM.set(switch_host.clone());
 
             let menu = MenuBuilder::new(app)
                 .item(&show)
+                .item(&switch_host)
                 .separator()
                 .item(&quit)
                 .build()?;
@@ -1340,7 +1544,20 @@ fn main() {
                 .tooltip("UniDTK")
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => {
-                        request_wallpaper_attach(app, true);
+                        if is_native_host() {
+                            let _ = host_supervisor::send_control(&host_supervisor::ControlMessage::Show);
+                        } else {
+                            request_wallpaper_attach(app, true);
+                        }
+                    }
+                    "switch_host" => {
+                        let app = app.clone();
+                        let next = current_host_mode().toggle();
+                        thread::spawn(move || {
+                            if let Err(err) = switch_desk_host(&app, next) {
+                                log_line(format!("tray: switch host failed: {err}"));
+                            }
+                        });
                     }
                     "quit" => {
                         // The same path as the menu's Exit: it waits, bounded, for the
@@ -1414,7 +1631,17 @@ fn main() {
 
             let _ = APP_HANDLE.set(app.handle().clone());
 
-            request_wallpaper_visible(app.handle());
+            match current_host_mode() {
+                HostMode::Web => {
+                    create_wallpaper_window(app.handle())?;
+                    request_wallpaper_visible(app.handle());
+                }
+                HostMode::Native => {
+                    if let Err(err) = host_supervisor::start_host(ws::port(), ws::token()) {
+                        log_line(format!("setup: failed to start native host: {err}"));
+                    }
+                }
+            }
 
             log_line("setup: done");
             log_line(format!("startup: setup complete at {} ms", startup_started.elapsed().as_millis()));
@@ -1425,7 +1652,9 @@ fn main() {
             // (the location-permission host) must really close, or their label
             // stays taken and their page stays a CDP target.
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if !hides_on_close(window.label()) {
+                if !hides_on_close(window.label())
+                    || WALLPAPER_DESTROYING.load(std::sync::atomic::Ordering::Acquire)
+                {
                     return;
                 }
                 log_line("window: close requested -> hide");

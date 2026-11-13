@@ -6,21 +6,7 @@
     "frontendDist": "dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "wallpaper",
-        "title": "UniDTK",
-        "url": "index.html",
-        "devtools": true,
-        "decorations": false,
-        "transparent": true,
-        "skipTaskbar": true,
-        "visible": false,
-        "resizable": false,
-        "width": 1920,
-        "height": 1080
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https: http: asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost; font-src 'self' data:; connect-src 'self' http://127.0.0.1:26540 ws://127.0.0.1:26540 ws://127.0.0.1:* ipc: http://ipc.localhost",
       "capabilities": [

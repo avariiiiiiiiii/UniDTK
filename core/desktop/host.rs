@@ -1,12 +1,14 @@
 //! G0's standalone native window and an observable card. Production stays on WebView2.
 
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use rune::el::{col, el, text};
 use rune::{App, AppSpec, Color, FrameOutcome, WindowOptions};
 use serde_json::json;
 use crate::inspector::Inspector;
+use crate::supervisor::{ControlSink, StartHandshake};
+use crate::ws_client::WsClientHandle;
 
 struct Host {
     inspector: Arc<Inspector>,
@@ -27,6 +29,78 @@ fn view(state: &Host, _: &mut rune::runtime::Cx<Host>) -> rune::el::El {
 }
 
 const SAMPLES: usize = 512;
+pub(crate) const DISCOVERY_ATTEMPTS: usize = 120;
+pub(crate) const DISCOVERY_INTERVAL: Duration = Duration::from_millis(250);
+
+static REATTACH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+fn spawn_attach_worker(
+    name: &'static str,
+    hwnd: isize,
+    max_attempts: usize,
+    inspector: Arc<Inspector>,
+    ui: rune::AppHandle<Host>,
+    fail_on_exhaust: bool,
+) {
+    let spawn = std::thread::Builder::new().name(name.into()).spawn(move || {
+        let mut error = "desktop unavailable".to_string();
+        for attempt in 0..max_attempts {
+            if inspector.stopping.load(Ordering::Acquire) {
+                if !fail_on_exhaust {
+                    REATTACH_IN_PROGRESS.store(false, Ordering::Release);
+                }
+                return;
+            }
+            match crate::desktop_host::discover_with_attempt(attempt) {
+                Ok(parent) => {
+                    ui.update(move |state, _| {
+                        if state.inspector.stopping.load(Ordering::Acquire) {
+                            return;
+                        }
+                        match crate::desktop_host::attach_to(hwnd, parent) {
+                            Ok(()) => {
+                                state.inspector.hwnd.store(hwnd, Ordering::Release);
+                                if let Err(error) = publish_region(&state.inspector) {
+                                    state.inspector.fail(error);
+                                    return;
+                                }
+                                let window = state.inspector.window.lock().ok().and_then(|g| g.clone());
+                                if let Some(w) = window {
+                                    w.recheck_occlusion();
+                                }
+                                crate::desktop_host::note(&format!(
+                                    "host attached under {}",
+                                    crate::desktop_host::host_description()
+                                ));
+                            }
+                            Err(error) => state.inspector.fail(error),
+                        }
+                    });
+                    if !fail_on_exhaust {
+                        REATTACH_IN_PROGRESS.store(false, Ordering::Release);
+                    }
+                    return;
+                }
+                Err(next) => error = next,
+            }
+            std::thread::sleep(DISCOVERY_INTERVAL);
+        }
+        if fail_on_exhaust {
+            inspector.fail(format!("desktop discovery exhausted: {error}"));
+        } else {
+            crate::desktop_host::note(&format!("reattach exhausted: {error}"));
+            REATTACH_IN_PROGRESS.store(false, Ordering::Release);
+        }
+    });
+    if let Err(error) = spawn {
+        if !fail_on_exhaust {
+            REATTACH_IN_PROGRESS.store(false, Ordering::Release);
+        } else {
+            // Best-effort log; caller holds inspector.
+            crate::desktop_host::note(&format!("desktop worker failed: {error}"));
+        }
+    }
+}
 
 pub fn run() -> Result<(), String> {
     let inspector = Inspector::new()?;
@@ -47,6 +121,93 @@ pub fn run() -> Result<(), String> {
     let quit_handle = handle.clone();
     inspector.start(move || quit_handle.quit())?;
 
+    let ws_slot: Arc<Mutex<Option<WsClientHandle>>> = Arc::new(Mutex::new(None));
+    if std::env::args().any(|arg| arg == "--supervised") {
+        struct SupervisedSink {
+            inspector: Arc<Inspector>,
+            ui: rune::AppHandle<Host>,
+            ws_slot: Arc<Mutex<Option<WsClientHandle>>>,
+        }
+        impl ControlSink for SupervisedSink {
+            fn on_start(&mut self, handshake: StartHandshake) {
+                crate::desktop_host::note(&format!(
+                    "supervisor: start gen={} nonce={} ws_port={:?}",
+                    handshake.generation, handshake.instance_nonce, handshake.ws_port
+                ));
+                if let (Some(port), Some(token)) = (handshake.ws_port, handshake.ws_token) {
+                    match crate::ws_client::connect_loop(port, token) {
+                        Ok(client) => {
+                            if let Ok(mut slot) = self.ws_slot.lock() {
+                                if let Some(old) = slot.replace(client) {
+                                    old.stop();
+                                }
+                            }
+                        }
+                        Err(err) => crate::desktop_host::note(&format!("ws_client start: {err}")),
+                    }
+                }
+            }
+
+            fn on_taskbar_created(&mut self) {
+                let hwnd = self.inspector.hwnd.load(Ordering::Acquire);
+                if hwnd != 0
+                    && REATTACH_IN_PROGRESS
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    crate::desktop_host::note("supervisor: TaskbarCreated -> re-attaching desktop");
+                    spawn_attach_worker(
+                        "desktop-reattach",
+                        hwnd,
+                        DISCOVERY_ATTEMPTS,
+                        self.inspector.clone(),
+                        self.ui.clone(),
+                        false,
+                    );
+                }
+            }
+
+            fn on_show(&mut self) {
+                let hwnd = self.inspector.hwnd.load(Ordering::Acquire);
+                if hwnd != 0
+                    && !crate::desktop_host::window_is_attached(hwnd)
+                    && REATTACH_IN_PROGRESS
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    spawn_attach_worker(
+                        "desktop-show",
+                        hwnd,
+                        20,
+                        self.inspector.clone(),
+                        self.ui.clone(),
+                        false,
+                    );
+                }
+            }
+
+            fn on_stop(&mut self, reason: &str) {
+                crate::desktop_host::note(&format!("supervisor: stop reason={reason}"));
+                self.inspector.request_quit();
+            }
+        }
+
+        let sup_inspector = inspector.clone();
+        let sup_ui = handle.clone();
+        let sup_ws = ws_slot.clone();
+        let _ = std::thread::Builder::new()
+            .name("host-stdin".into())
+            .spawn(move || {
+                let mut sink = SupervisedSink {
+                    inspector: sup_inspector,
+                    ui: sup_ui,
+                    ws_slot: sup_ws,
+                };
+                let stdin = std::io::stdin();
+                let _ = crate::supervisor::read_control_stream(stdin.lock(), &mut sink);
+            });
+    }
+
     let on_window = inspector.clone();
     let on_encoded = inspector.clone();
     let on_drawn = inspector.clone();
@@ -64,39 +225,14 @@ pub fn run() -> Result<(), String> {
         let ui = handle.clone();
         // r[kernel.no-blocking-main-thread], r[kernel.main-thread-once]: shell
         // discovery and retries stay on a worker; only the final attach is on UI.
-        let spawn = std::thread::Builder::new().name("desktop-discovery".into()).spawn(move || {
-            let mut error = "desktop unavailable".to_string();
-            for _ in 0..40 {
-                if inspector.stopping.load(Ordering::Acquire) { return; }
-                match crate::desktop_host::discover() {
-                    Ok(parent) => {
-                        ui.update(move |state, _| {
-                            if state.inspector.stopping.load(Ordering::Acquire) { return; }
-                            match crate::desktop_host::attach_to(hwnd, parent) {
-                                Ok(()) => {
-                                    state.inspector.hwnd.store(hwnd, Ordering::Release);
-                                    if let Err(error) = publish_region(&state.inspector) {
-                                        state.inspector.fail(error);
-                                        return;
-                                    }
-                                    let window = state.inspector.window.lock().ok().and_then(|g| g.clone());
-                                    if let Some(w) = window {
-                                        w.recheck_occlusion();
-                                    }
-                                    crate::desktop_host::note(&format!("host attached under {}", crate::desktop_host::host_description()));
-                                }
-                                Err(error) => state.inspector.fail(error),
-                            }
-                        });
-                        return;
-                    }
-                    Err(next) => error = next,
-                }
-                std::thread::sleep(Duration::from_millis(250));
-            }
-            inspector.fail(format!("desktop discovery exhausted: {error}"));
-        });
-        if let Err(error) = spawn { on_window.fail(format!("desktop worker: {error}")); }
+        spawn_attach_worker(
+            "desktop-discovery",
+            hwnd,
+            DISCOVERY_ATTEMPTS,
+            inspector,
+            ui,
+            true,
+        );
     })
     .on_frame_encoded(move |frame| {
         if let Ok(mut snapshot) = on_encoded.snapshot.lock() {
@@ -136,6 +272,11 @@ pub fn run() -> Result<(), String> {
         if let Err(error) = publish_region(&on_drawn) { on_drawn.fail(error); }
     }).try_run();
     inspector.stop();
+    if let Ok(mut slot) = ws_slot.lock() {
+        if let Some(client) = slot.take() {
+            client.stop();
+        }
+    }
     result?;
     if let Some(error) = inspector.failure.lock().map_err(|e| e.to_string())?.clone() { return Err(error); }
     Ok(())

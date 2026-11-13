@@ -115,7 +115,7 @@ impl Inspector {
         self.request_quit();
     }
 
-    fn request_quit(&self) {
+    pub(crate) fn request_quit(&self) {
         self.stopping.store(true, Ordering::Release);
         if let Ok(quit) = self.quit.lock() {
             if let Some(quit) = quit.as_ref() { quit(); }
