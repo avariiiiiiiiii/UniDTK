@@ -8,6 +8,15 @@ pub(crate) fn map_mods(m: ModifiersState) -> Mods {
         alt: m.alt_key(), ctrl: m.control_key(), logo: m.super_key() }
 }
 
+pub fn modifiers_state_from_mods(mods: crate::Mods) -> ModifiersState {
+    let mut state = ModifiersState::empty();
+    state.set(ModifiersState::SHIFT, mods.shift);
+    state.set(ModifiersState::ALT, mods.alt);
+    state.set(ModifiersState::CONTROL, mods.ctrl || (!cfg!(target_os = "macos") && mods.cmd));
+    state.set(ModifiersState::SUPER, mods.logo || (cfg!(target_os = "macos") && mods.cmd));
+    state
+}
+
 pub(crate) fn map_key(key: &WKey, m: ModifiersState) -> Option<KeyEvent> {
     let mods = map_mods(m);
     let key = match key {

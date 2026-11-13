@@ -27,6 +27,55 @@ impl Default for Route {
     fn default() -> Self { Route::Unbound { queued: Vec::new() } }
 }
 
+/// A forwarded keyboard event delivered through [`WindowHandle::inject_key`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct InjectedKey {
+    pub physical: crate::PhysicalKeyCode,
+    pub pressed: bool,
+    pub repeat: bool,
+    pub mods: crate::Mods,
+    pub logical: Option<crate::KeyEvent>,
+    pub key_base: Option<char>,
+}
+
+pub(crate) struct PendingCapture {
+    pub(crate) device: wgpu::Device,
+    pub(crate) buffer: wgpu::Buffer,
+    pub(crate) submission: wgpu::SubmissionIndex,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) padded_row: u32,
+    pub(crate) bgra: bool,
+    pub(crate) map_rx: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+
+impl PendingCapture {
+    pub(crate) fn finish(self) -> Result<(u32, u32, Vec<u8>), String> {
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(self.submission),
+            timeout: Some(std::time::Duration::from_secs(3)),
+        });
+        self.map_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .map_err(|e| format!("GPU readback map wait failed: {e}"))??;
+        let row_bytes = (self.width as usize).saturating_mul(4);
+        let padded = self.padded_row as usize;
+        let mut rgba = Vec::with_capacity(row_bytes.saturating_mul(self.height as usize));
+        {
+            let slice = self.buffer.slice(..);
+            let data = slice.get_mapped_range().map_err(|e| format!("readback map range failed: {e}"))?;
+            for row in 0..self.height as usize {
+                let start = row * padded;
+                rgba.extend_from_slice(&data[start..start + row_bytes]);
+            }
+        }
+        self.buffer.unmap();
+        drop(self.buffer);
+        crate::render::unpremultiply_to_straight_rgba(&mut rgba, self.bgra);
+        Ok((self.width, self.height, rgba))
+    }
+}
+
 /// A window's native reference, refreshed across App close/reopen without owning the window.
 #[derive(Clone)]
 pub struct WindowHandle {
@@ -149,6 +198,43 @@ impl WindowHandle {
         let window = self.window()?;
         let handle = window.window_handle().map_err(|e| e.to_string())?;
         Ok(f(handle))
+    }
+
+    /// Re-evaluates Win32 occlusion immediately (for example after reparenting or updating `SetWindowRgn`).
+    pub fn recheck_occlusion(&self) {
+        #[cfg(target_os = "windows")]
+        crate::platform::win32::occlusion::recheck();
+    }
+
+    /// Delivers a lossless keyboard event directly to this window's runtime without OS focus switching.
+    pub fn inject_key(&self, key: InjectedKey) {
+        self.send(move |slot| WakeEvent::InjectKey(slot, key));
+    }
+
+    /// Releases any held forwarded keys and delivers `PhysicalInput::FocusLost` on the UI thread.
+    pub fn inject_focus_lost(&self) {
+        self.send(WakeEvent::InjectFocusLost);
+    }
+
+    /// Renders this window into an isolated offscreen target (even while desktop-covered) and returns
+    /// straight-alpha RGBA8 `(width, height, pixels)`. GPU polling and pixel conversion run off the UI thread.
+    pub fn capture_rgba(&self) -> Result<(u32, u32, Vec<u8>), String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        {
+            let route = self.native.route.lock().unwrap();
+            match &*route {
+                Route::Bound { proxy, slot } => {
+                    proxy
+                        .send_event(WakeEvent::Capture(*slot, tx))
+                        .map_err(|_| "window event loop closed".to_string())?;
+                }
+                Route::Unbound { .. } => return Err("window host is not running yet".into()),
+            }
+        }
+        let pending = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| format!("offscreen capture timed out or cancelled: {e}"))??;
+        pending.finish()
     }
 }
 

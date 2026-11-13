@@ -106,6 +106,14 @@ impl<S: 'static> Runtime<S> {
         self.physical_input(crate::PhysicalInput::FocusLost);
     }
 
+    pub(crate) fn allow_injected_keys(&mut self) {
+        self.keys_lost = false;
+    }
+
+    pub(crate) fn has_committed(&self) -> bool {
+        self.commits > 0
+    }
+
     /// Keyboard input, a focus change, a file drag step or a file dialog answer is queued for the
     /// next frame.
     pub(crate) fn keys_queued(&self) -> bool {

@@ -228,6 +228,22 @@ pub use platform::macos::appearance as macos_appearance;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub use platform::macos::panel_bridge as macos_panel_bridge;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub mod win32_occlusion {
+    pub use crate::platform::win32::occlusion::{
+        DesktopAccess, Hrgn, ProbeFound, Rect, child_overlap_with_left, fallback_found_for,
+        is_desktop_shell_class, recheck, should_process_win_event,
+    };
+}
+#[doc(hidden)]
+pub mod win32_telemetry {
+    pub use crate::frame::surface_stats::{SurfaceCounts, is_wait_cancelled};
+    pub use crate::render::{MIN_DEDICATED_READBACK_BYTES, readback_staging_layout, unpremultiply_to_straight_rgba};
+    pub use crate::window::modifiers_state_from_mods;
+    pub use winit::event::StartCause;
+    pub use winit::keyboard::ModifiersState;
+}
 pub use platform::scroll_bars::ScrollBars;
 #[doc(hidden)]
 pub use platform::scroll_bars::current_runtime_id;
@@ -357,6 +373,7 @@ pub use video::MediaSource;
 pub use video::Player;
 pub use video::PlayerState;
 pub use video::Video;
+pub use window::InjectedKey;
 pub use window::WindowHandle;
 pub use window::spec as windows;
 pub use windows::AnyWindowSpec;

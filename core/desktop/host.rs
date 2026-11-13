@@ -79,6 +79,10 @@ pub fn run() -> Result<(), String> {
                                         state.inspector.fail(error);
                                         return;
                                     }
+                                    let window = state.inspector.window.lock().ok().and_then(|g| g.clone());
+                                    if let Some(w) = window {
+                                        w.recheck_occlusion();
+                                    }
                                     crate::desktop_host::note(&format!("host attached under {}", crate::desktop_host::host_description()));
                                 }
                                 Err(error) => state.inspector.fail(error),
@@ -169,7 +173,11 @@ fn publish_region(inspector: &Inspector) -> Result<(), String> {
         // restore WS_POPUP and erase our WS_CHILD after SetParent.
         crate::desktop_host::enable_widget_input(hwnd)?;
     }
+    let window = inspector.window.lock().ok().and_then(|g| g.clone());
     inspector.snapshot.lock().map_err(|e| e.to_string())?.region = region;
+    if let Some(w) = window {
+        w.recheck_occlusion();
+    }
     Ok(())
 }
 

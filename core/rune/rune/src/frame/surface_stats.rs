@@ -33,11 +33,19 @@ pub struct SurfaceCounts {
     pub turns: u64,
     /// Turns a deadline or poll started, rather than an event.
     pub wakes: u64,
+    /// Turns where an active sleep was interrupted before its deadline (`StartCause::WaitCancelled`).
+    pub wait_cancelled: u64,
 }
 
 impl SurfaceCounts {
     /// Every `get_current_texture` call that gave no drawable.
     pub fn failed(&self) -> u64 { self.occluded + self.timeouts + self.outdated }
+
+    pub fn record_turn(&mut self, woke: bool, wait_cancelled: bool) {
+        self.turns += 1;
+        if woke { self.wakes += 1; }
+        if wait_cancelled { self.wait_cancelled += 1; }
+    }
 
     fn since(&self, earlier: &SurfaceCounts) -> SurfaceCounts {
         SurfaceCounts {
@@ -50,6 +58,7 @@ impl SurfaceCounts {
             outdated: self.outdated - earlier.outdated,
             turns: self.turns - earlier.turns,
             wakes: self.wakes - earlier.wakes,
+            wait_cancelled: self.wait_cancelled - earlier.wait_cancelled,
         }
     }
 
@@ -59,6 +68,7 @@ impl SurfaceCounts {
         SurfaceCounts {
             redraws: r(self.redraws), unpaced: r(self.unpaced), presents: r(self.presents), skipped: r(self.skipped),
             occluded: r(self.occluded), timeouts: r(self.timeouts), outdated: r(self.outdated), turns: r(self.turns), wakes: r(self.wakes),
+            wait_cancelled: r(self.wait_cancelled),
         }
     }
 }
@@ -231,10 +241,18 @@ impl SurfaceMeter {
 
     /// An event-loop turn, `woke` by a deadline or poll rather than an event. A deadline that
     /// was still ahead when the loop slept (`waited`) paces the redraw it asks for.
+    /// Event-loop turn called directly by unit tests; hosts call `turn_cause`.
+    #[cfg(test)]
     pub(crate) fn turn(&mut self, woke: bool, waited: bool) {
-        self.totals.turns += 1;
-        if woke { self.totals.wakes += 1; }
+        self.totals.record_turn(woke, false);
         self.waited |= waited;
+        self.tick(Instant::now());
+    }
+
+    pub(crate) fn turn_cause(&mut self, cause: winit::event::StartCause) {
+        let woke = matches!(cause, winit::event::StartCause::ResumeTimeReached { .. } | winit::event::StartCause::Poll);
+        self.totals.record_turn(woke, is_wait_cancelled(cause));
+        self.waited |= slept(cause);
         self.tick(Instant::now());
     }
 
@@ -274,6 +292,10 @@ impl SurfaceMeter {
 /// turns it at once, as a poll does.
 pub(crate) fn slept(cause: winit::event::StartCause) -> bool {
     matches!(cause, winit::event::StartCause::ResumeTimeReached { start, requested_resume } if requested_resume > start)
+}
+
+pub fn is_wait_cancelled(cause: winit::event::StartCause) -> bool {
+    matches!(cause, winit::event::StartCause::WaitCancelled { .. })
 }
 
 /// The published stats, with rates zeroed once they are stale.

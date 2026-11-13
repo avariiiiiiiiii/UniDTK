@@ -83,6 +83,45 @@ pub const KIND_EFFECT: f32 = 12.0;
 /// device pixels per point.
 pub const KIND_BACKDROP_BLUR: f32 = 13.0;
 
+/// Minimum staging buffer size for readback (`> 4 MiB` so DX12 `gpu-allocator` uses dedicated
+/// blocks and releases `ID3D12Heap` memory immediately when the staging buffer drops).
+pub const MIN_DEDICATED_READBACK_BYTES: u64 = 4 * 1024 * 1024 + 256;
+
+/// Returns `(padded_bytes_per_row, staging_buffer_bytes)` for a readback of `width x height`.
+pub fn readback_staging_layout(width: u32, height: u32) -> Result<(u32, u64), String> {
+    if width == 0 || height == 0 {
+        return Err("offscreen capture requires non-zero dimensions".into());
+    }
+    let row_bytes = width.checked_mul(4).ok_or_else(|| "capture width overflow".to_string())?;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_row = row_bytes
+        .checked_add(align - 1)
+        .map(|n| (n / align) * align)
+        .ok_or_else(|| "capture row alignment overflow".to_string())?;
+    let image_bytes = u64::from(padded_row)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| "capture buffer size overflow".to_string())?;
+    Ok((padded_row, image_bytes.max(MIN_DEDICATED_READBACK_BYTES)))
+}
+
+/// Converts premultiplied RGBA8/BGRA8 readback bytes into straight-alpha RGBA8 in place.
+pub fn unpremultiply_to_straight_rgba(pixels: &mut [u8], bgra: bool) {
+    for p in pixels.chunks_exact_mut(4) {
+        if bgra { p.swap(0, 2); }
+        let a = p[3];
+        if a == 0 {
+            p[0] = 0;
+            p[1] = 0;
+            p[2] = 0;
+        } else if a < 255 {
+            let a32 = u32::from(a);
+            for c in &mut p[..3] {
+                *c = ((u32::from(*c) * 255 + a32 / 2) / a32).min(255) as u8;
+            }
+        }
+    }
+}
+
 /// How a scope combines its contents. The completed scope still uses source-over on its parent
 /// unless that parent also requests additive composition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

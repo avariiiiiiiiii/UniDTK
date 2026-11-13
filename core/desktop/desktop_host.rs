@@ -354,13 +354,7 @@ pub fn window_png(hwnd: isize) -> Result<(u32, u32, Vec<u8>), String> {
             return Err("PrintWindow could not read the host window".into());
         }
         for pixel in bgra.chunks_exact_mut(4) { pixel.swap(0, 2); pixel[3] = 255; }
-        let mut bytes = Vec::new();
-        let mut encoder = png::Encoder::new(&mut bytes, width as u32, height as u32);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-        writer.write_image_data(&bgra).map_err(|e| e.to_string())?;
-        writer.finish().map_err(|e| e.to_string())?;
+        let bytes = encode_rgba_png(width as u32, height as u32, &bgra)?;
         Ok((width as u32, height as u32, bytes))
     }
 }
@@ -380,6 +374,40 @@ pub fn click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
         PostMessageW(hwnd, WM_LBUTTONUP, WPARAM(0), at).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Encodes straight RGBA8 pixels (`width x height`) as PNG bytes without blocking UI.
+pub fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "PNG dimensions overflow".to_string())?;
+    if rgba.len() != expected {
+        return Err(format!("RGBA buffer length {} does not match {}x{}x4", rgba.len(), width, height));
+    }
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+    writer.write_image_data(rgba).map_err(|e| e.to_string())?;
+    writer.finish().map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+/// Open kernel handles, GDI objects, and USER objects owned by this process.
+pub fn process_handles() -> (u32, u32, u32) {
+    use windows::Win32::System::Threading::{
+        GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources, GetProcessHandleCount,
+    };
+    unsafe {
+        let process = GetCurrentProcess();
+        let mut handles = 0u32;
+        let _ = GetProcessHandleCount(process, &mut handles);
+        let gdi = GetGuiResources(process, GR_GDIOBJECTS);
+        let user = GetGuiResources(process, GR_USEROBJECTS);
+        (handles, gdi, user)
+    }
 }
 
 /// CPU time in milliseconds, Working Set and private bytes of this process.

@@ -18,6 +18,8 @@ mod desktop_host;
 mod host;
 mod inspector;
 mod protocol;
+#[cfg(test)]
+mod tests;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

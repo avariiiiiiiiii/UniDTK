@@ -182,10 +182,18 @@ impl Inspector {
                 Ok(Value::Array(snapshot.elements.clone()))
             }
             "png" => {
+                let window = self.window.lock().map_err(|e| e.to_string())?.clone();
                 let _capture = self.capture.try_lock().map_err(|_| "screenshot already in progress")?;
-                let (width, height, bytes) = crate::desktop_host::window_png(hwnd)?;
+                let (width, height, bytes, method) = if let Some(w) = window {
+                    let (width, height, rgba) = w.capture_rgba()?;
+                    let bytes = crate::desktop_host::encode_rgba_png(width, height, &rgba)?;
+                    (width, height, bytes, "wgpu-readback")
+                } else {
+                    let (width, height, bytes) = crate::desktop_host::window_png(hwnd)?;
+                    (width, height, bytes, "dwm-printwindow")
+                };
                 if bytes.len() > protocol::MAX_PNG { return Err("PNG exceeds the inspector limit".into()); }
-                Ok(json!({ "width": width, "height": height, "capture": "dwm-printwindow",
+                Ok(json!({ "width": width, "height": height, "capture": method,
                     "base64": base64::engine::general_purpose::STANDARD.encode(bytes) }))
             }
             "hit" => {
@@ -234,14 +242,27 @@ impl Inspector {
         let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?.clone();
         let stats = self.window.lock().map_err(|e| e.to_string())?.as_ref().map(|w| w.surface_stats());
         let (cpu_ms, working_set, private) = crate::desktop_host::process_usage();
+        let (handles, gdi_objects, user_objects) = crate::desktop_host::process_handles();
         Ok(json!({
             "uptime_ms": self.started.elapsed().as_millis() as u64,
             "drawn": snapshot.drawn, "skipped": snapshot.skipped, "unchanged": snapshot.unchanged,
             "since_last_frame_ms": snapshot.last_frame.map(|at| at.elapsed().as_millis() as u64),
             "encode_ms": quantiles(snapshot.encode_ms), "update_ms": quantiles(snapshot.update_ms),
             "cpu_frame_ms": quantiles(snapshot.cpu_frame_ms),
-            "surface": stats.map(|s| json!({ "turns": s.totals.turns, "timer_wakes": s.totals.wakes, "redraws": s.totals.redraws, "presents": s.totals.presents })),
+            "surface": stats.map(|s| json!({
+                "turns": s.totals.turns,
+                "timer_wakes": s.totals.wakes,
+                "wait_cancelled": s.totals.wait_cancelled,
+                "redraws": s.totals.redraws,
+                "unpaced": s.totals.unpaced,
+                "presents": s.totals.presents,
+                "skipped": s.totals.skipped,
+                "occluded": s.totals.occluded,
+                "timeouts": s.totals.timeouts,
+                "outdated": s.totals.outdated,
+            })),
             "cpu_ms": cpu_ms, "working_set_mb": working_set as f64 / 1048576.0, "private_mb": private as f64 / 1048576.0,
+            "handles": handles, "gdi_objects": gdi_objects, "user_objects": user_objects,
         }))
     }
 }

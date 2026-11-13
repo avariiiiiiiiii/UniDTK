@@ -156,7 +156,7 @@ impl<S: 'static> Host<S> {
     fn new_events_in_turn(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         #[cfg(target_os = "macos")]
         if let Some(shadow) = self.win.as_ref().and_then(|w| w.native.shadow.as_ref()) { shadow.turn(); }
-        self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll), crate::frame::surface_stats::slept(cause));
+        self.meter.turn_cause(cause);
         if matches!(cause, StartCause::ResumeTimeReached { .. }) && let Some(w) = &self.win { w.cursor.reassert(); }
         #[cfg(target_os = "windows")]
         if let Some(w) = &self.win { w.native.cloak.lift_if_due(&w.window, Instant::now()); }

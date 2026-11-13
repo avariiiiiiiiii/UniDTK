@@ -51,6 +51,7 @@ use platform_sync::sync_platform;
 mod shell_requests;
 mod keys;
 pub(crate) use keys::{key_base, map_key_event, map_mods};
+pub use keys::modifiers_state_from_mods;
 mod any_host;
 mod app_events;
 mod event_loop;
@@ -58,7 +59,7 @@ mod events;
 mod file_drop;
 pub(crate) mod frame;
 mod handle;
-pub use handle::WindowHandle;
+pub use handle::{InjectedKey, WindowHandle};
 use handle::native_window_number;
 mod life;
 pub(crate) use life::Life;
@@ -109,6 +110,12 @@ pub(crate) enum WakeEvent {
     /// A native menu's modal loop holds the event loop: run its idle turn (`Windows::turn`).
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     Turn,
+    /// Lossless forwarded key event from the host supervisor/hook.
+    InjectKey(usize, handle::InjectedKey),
+    /// Lossless focus loss release for forwarded keys.
+    InjectFocusLost(usize),
+    /// Offscreen RGBA capture request answered asynchronously off the UI thread.
+    Capture(usize, std::sync::mpsc::SyncSender<Result<handle::PendingCapture, String>>),
 }
 
 /// What `Windows` needs of a host, whatever its state type: an app window or an overlay.
@@ -315,7 +322,8 @@ impl ApplicationHandler<WakeEvent> for Windows {
         let slot = match &event {
             WakeEvent::DisplayTick(i) | WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Window(i, _) | WakeEvent::Focus(i)
                 | WakeEvent::Position(i, _) | WakeEvent::Level(i, _) | WakeEvent::Place(i, _) | WakeEvent::Frame(i, _)
-                | WakeEvent::A11y(i) | WakeEvent::Covered(i, _) => *i,
+                | WakeEvent::A11y(i) | WakeEvent::Covered(i, _) | WakeEvent::InjectKey(i, _)
+                | WakeEvent::InjectFocusLost(i) | WakeEvent::Capture(i, _) => *i,
             WakeEvent::Reopen => {
                 self.reopen(event_loop);
                 self.cleanup(event_loop);

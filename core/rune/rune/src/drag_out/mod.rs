@@ -362,7 +362,7 @@ pub(crate) fn snapshot(gpu: &crate::render::Gpu, renderer: &crate::render::Rende
         }
     }
     buffer.unmap();
-    to_straight_rgba(&mut rgba, bgra);
+    crate::render::unpremultiply_to_straight_rgba(&mut rgba, bgra);
     let mut image = DragImage::rgba(w, h, &rgba)?.size(w as f32 / scale, h as f32 / scale);
     // The crop rounds out to whole pixels, so the image sits exactly over what was drawn.
     image.placement = Placement::At(x as f32 / scale, y as f32 / scale);
@@ -376,17 +376,6 @@ fn crop(rect: [f32; 4], scale: f32, size: (u32, u32)) -> Option<[u32; 4]> {
     let x1 = ((rect[0] + rect[2]) * scale).ceil().clamp(0.0, size.0 as f32) as u32;
     let y1 = ((rect[1] + rect[3]) * scale).ceil().clamp(0.0, size.1 as f32) as u32;
     (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
-}
-
-/// Frame pixels are premultiplied, in the surface's channel order.
-fn to_straight_rgba(pixels: &mut [u8], bgra: bool) {
-    for p in pixels.chunks_exact_mut(4) {
-        if bgra { p.swap(0, 2); }
-        let a = p[3];
-        if a != 0 && a != 255 {
-            for c in &mut p[..3] { *c = ((*c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8; }
-        }
-    }
 }
 
 /// Starts the OS drag session for `start` from inside the pointer event that crossed the
@@ -514,7 +503,7 @@ mod tests {
     #[test]
     fn readback_unpremultiplies_and_swaps_bgra() {
         let mut p = [0, 0, 128, 128, 10, 20, 30, 255];
-        to_straight_rgba(&mut p, true);
+        crate::render::unpremultiply_to_straight_rgba(&mut p, true);
         assert_eq!(p, [255, 0, 0, 128, 30, 20, 10, 255]);
     }
 }

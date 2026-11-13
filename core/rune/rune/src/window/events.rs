@@ -156,8 +156,131 @@ impl<S: 'static> Host<S> {
                 if covered { self.land_frame(); }
                 self.set_cover(Cover::Windows, covered);
             }
+            WakeEvent::InjectKey(_, key) => {
+                self.inject_key(key);
+                self.shell(event_loop);
+            }
+            WakeEvent::InjectFocusLost(_) => {
+                self.inject_focus_lost();
+                self.shell(event_loop);
+            }
+            WakeEvent::Capture(_, reply) => {
+                let _ = reply.send(self.capture_offscreen());
+            }
             WakeEvent::Reopen | WakeEvent::Turn | WakeEvent::Quit(_) => {}
         }
+    }
+
+    fn request_input_step(&mut self) {
+        if let Some(l) = &self.win {
+            if !self.life.covered() && !l.minimized() {
+                l.request_redraw();
+            } else {
+                self.covered_frame();
+            }
+        }
+    }
+
+    fn inject_key(&mut self, ev: InjectedKey) {
+        self.rt.allow_injected_keys();
+        let new_mods = modifiers_state_from_mods(ev.mods);
+        if self.mods != new_mods {
+            self.mods = new_mods;
+            self.rt.physical_observation(crate::PhysicalInput::Modifiers(ev.mods));
+        }
+        let redraw = self.rt.physical_then(
+            crate::PhysicalInput::Key { key: ev.physical, mods: ev.mods, pressed: ev.pressed, repeat: ev.repeat },
+            ev.logical,
+            ev.key_base,
+            None,
+        );
+        if redraw || ev.pressed {
+            self.request_input_step();
+        }
+    }
+
+    fn inject_focus_lost(&mut self) {
+        self.mods = ModifiersState::empty();
+        self.rt.keys_lost();
+        self.rt.physical_observation(crate::PhysicalInput::Modifiers(crate::Mods::default()));
+        self.request_input_step();
+    }
+
+    fn capture_offscreen(&mut self) -> Result<super::handle::PendingCapture, String> {
+        let Some(l) = self.win.as_mut() else {
+            return Err("window is not open for offscreen capture".into());
+        };
+        let (width, height) = (l.config.width, l.config.height);
+        if width == 0 || height == 0 {
+            return Err("window has zero-sized capture viewport".into());
+        }
+        if !self.rt.has_committed() || self.rt.stale() {
+            self.rt.frame(0.0);
+        }
+        let Some((gpu, renderer)) = self.gpu.as_mut() else {
+            return Err("window GPU device is not initialized".into());
+        };
+        let format = renderer.format();
+        let bgra = match format {
+            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm => true,
+            wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Rgba8Unorm => false,
+            other => return Err(format!("unsupported capture surface format: {other:?}")),
+        };
+        let (padded_row, staging_bytes) = crate::render::readback_staging_layout(width, height)?;
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut self.rt.images);
+        renderer.prepare_surfaces(&gpu.device, &gpu.queue, &self.rt.surfaces, (width, height));
+        renderer.prepare(&gpu.device, &gpu.queue, &mut self.rt.text.atlas, &self.rt.instances, (width, height));
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("unidtk-desktop offscreen capture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("unidtk-desktop capture readback"),
+            size: staging_bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut enc, &view, self.rt.clear_color());
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        let submission = renderer.submit(&gpu.queue, enc);
+        let (map_tx, map_rx) = std::sync::mpsc::sync_channel(1);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+            let _ = map_tx.send(res.map_err(|e| e.to_string()));
+        });
+        Ok(super::handle::PendingCapture {
+            device: gpu.device.clone(),
+            buffer,
+            submission,
+            width,
+            height,
+            padded_row,
+            bgra,
+            map_rx,
+        })
     }
 
     /// Runs what assistive clients asked; an action draws the frame that runs it.
