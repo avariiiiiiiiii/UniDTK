@@ -88,9 +88,18 @@ pub const KIND_BACKDROP_BLUR: f32 = 13.0;
 pub const MIN_DEDICATED_READBACK_BYTES: u64 = 4 * 1024 * 1024 + 256;
 
 /// Returns `(padded_bytes_per_row, staging_buffer_bytes)` for a readback of `width x height`.
+/// Cap offscreen PNG readback at 16 MP (4096x4096) so an oversized surface cannot allocate an unbounded staging buffer.
+pub const MAX_READBACK_PIXELS: u64 = 16_777_216;
+
 pub fn readback_staging_layout(width: u32, height: u32) -> Result<(u32, u64), String> {
     if width == 0 || height == 0 {
         return Err("offscreen capture requires non-zero dimensions".into());
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > MAX_READBACK_PIXELS {
+        return Err(format!(
+            "offscreen capture dimensions {width}x{height} ({pixels} px) exceed maximum {MAX_READBACK_PIXELS} pixels"
+        ));
     }
     let row_bytes = width.checked_mul(4).ok_or_else(|| "capture width overflow".to_string())?;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;

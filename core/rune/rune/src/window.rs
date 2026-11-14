@@ -478,7 +478,9 @@ impl<S: 'static> Host<S> {
         let mut args = app.resolve_args(args);
         let on_window = app.on_window.take();
         let on_ready = app.on_ready.take();
-        let frame_reports = crate::frame::encoded::FrameReports::new(app.on_frame_encoded.take(), Some(native_handle.key())).inspecting(app.on_frame_drawn.take());
+        let frame_reports = crate::frame::encoded::FrameReports::new(app.on_frame_encoded.take(), Some(native_handle.key()))
+            .inspecting(app.on_frame_drawn.take())
+            .inspecting_committed(app.on_tree_committed.take());
         let macos_window = std::mem::take(&mut app.macos_window);
         // Before the menu guard, so custom items in Edit or Window join these menus.
         #[cfg(target_os = "macos")]
@@ -630,7 +632,14 @@ fn setup_waker<S: 'static>(shared: &Arc<crate::app::Shared<S>>) -> Waker {
 /// (`Runtime::hidden_wake`); the view and layout wait, dirty, for the frame that uncovers it.
 /// Uncovering settles first, so that frame builds once and paints motion where it would have
 /// ended, as Core Animation's time-based motion has by the time a covered window shows again.
-pub(crate) fn covered_step<S: 'static>(rt: &mut Runtime<S>) { rt.hidden_wake(); }
+/// Advance a shown window's runtime while covered/unpresented; a cold boot (`!has_committed`) runs the initial tree commit and build once.
+pub fn covered_step<S: 'static>(rt: &mut Runtime<S>) {
+    if !rt.has_committed() {
+        rt.hidden_timer_frame();
+    } else {
+        rt.hidden_wake();
+    }
+}
 
 /// Whether a drain of other threads' requests asks the window for a frame. A hidden launcher
 /// renders a change into its cached frame (paced); a shown launcher redraws for a change or

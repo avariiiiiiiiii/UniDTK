@@ -284,6 +284,10 @@ impl<S> WindowSpec<S> {
     pub fn on_frame_encoded(mut self, f: impl FnMut(&crate::FrameEncoded) + 'static) -> Self {
         self.app = self.app.on_frame_encoded(f); self
     }
+
+    pub fn on_tree_committed(mut self, f: impl FnMut(&crate::Runtime<S>) + 'static) -> Self {
+        self.app = self.app.on_tree_committed(f); self
+    }
     pub fn options(mut self, options: WindowOptions) -> Self {
         self.options = options;
         self.app.macos_window = MacWindowOptions::default();

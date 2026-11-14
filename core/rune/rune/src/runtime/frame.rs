@@ -110,8 +110,12 @@ impl<S: 'static> Runtime<S> {
         self.keys_lost = false;
     }
 
-    pub(crate) fn has_committed(&self) -> bool {
+    pub fn has_committed(&self) -> bool {
         self.commits > 0
+    }
+
+    pub(crate) fn commit_seq(&self) -> u64 {
+        self.commits
     }
 
     /// Keyboard input, a focus change, a file drag step or a file dialog answer is queued for the

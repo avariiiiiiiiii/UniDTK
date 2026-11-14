@@ -27,6 +27,7 @@ impl<S: 'static> Host<S> {
         if !self.started || self.life.finished() || self.win.as_ref().is_some_and(|_| self.life.shown() || self.launcher()) { return; }
         if !self.rt.keys_queued() { return; }
         self.rt.hidden_timer_frame();
+        self.frame_reports.check_committed(&self.rt);
         self.clipboard.flush(&mut self.rt);
         self.shell(event_loop);
     }
@@ -165,7 +166,12 @@ impl<S: 'static> Host<S> {
                 self.shell(event_loop);
             }
             WakeEvent::Capture(_, reply) => {
-                let _ = reply.send(self.capture_offscreen());
+                let res = self.capture_offscreen();
+                if res.is_ok() {
+                    self.clipboard.flush(&mut self.rt);
+                    self.shell(event_loop);
+                }
+                let _ = reply.send(res);
             }
             WakeEvent::Reopen | WakeEvent::Turn | WakeEvent::Quit(_) => {}
         }
@@ -214,19 +220,28 @@ impl<S: 'static> Host<S> {
         if width == 0 || height == 0 {
             return Err("window has zero-sized capture viewport".into());
         }
-        if !self.rt.has_committed() || self.rt.stale() {
-            self.rt.frame(0.0);
-        }
-        let Some((gpu, renderer)) = self.gpu.as_mut() else {
-            return Err("window GPU device is not initialized".into());
+        let (padded_row, staging_bytes) = crate::render::readback_staging_layout(width, height)?;
+        let format = {
+            let Some((_, renderer)) = self.gpu.as_ref() else {
+                return Err("window GPU device is not initialized".into());
+            };
+            renderer.format()
         };
-        let format = renderer.format();
         let bgra = match format {
             wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm => true,
             wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Rgba8Unorm => false,
             other => return Err(format!("unsupported capture surface format: {other:?}")),
         };
-        let (padded_row, staging_bytes) = crate::render::readback_staging_layout(width, height)?;
+        if !self.rt.has_committed() || self.rt.stale() {
+            if self.rt.has_committed() {
+                self.rt.settle_all();
+            }
+            self.rt.frame(0.0);
+        }
+        self.frame_reports.check_committed(&self.rt);
+        let Some((gpu, renderer)) = self.gpu.as_mut() else {
+            return Err("window GPU device is not initialized".into());
+        };
         renderer.upload_images(&gpu.device, &gpu.queue, &mut self.rt.images);
         renderer.prepare_surfaces(&gpu.device, &gpu.queue, &self.rt.surfaces, (width, height));
         renderer.prepare(&gpu.device, &gpu.queue, &mut self.rt.text.atlas, &self.rt.instances, (width, height));

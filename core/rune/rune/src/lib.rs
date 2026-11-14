@@ -238,9 +238,13 @@ pub mod win32_occlusion {
 }
 #[doc(hidden)]
 pub mod win32_telemetry {
+    pub use crate::frame::encoded::check_commit_transition;
     pub use crate::frame::surface_stats::{SurfaceCounts, is_wait_cancelled};
-    pub use crate::render::{MIN_DEDICATED_READBACK_BYTES, readback_staging_layout, unpremultiply_to_straight_rgba};
-    pub use crate::window::modifiers_state_from_mods;
+    pub use crate::render::{
+        MAX_READBACK_PIXELS, MIN_DEDICATED_READBACK_BYTES, readback_staging_layout,
+        unpremultiply_to_straight_rgba,
+    };
+    pub use crate::window::{covered_step, modifiers_state_from_mods};
     pub use winit::event::StartCause;
     pub use winit::keyboard::ModifiersState;
 }

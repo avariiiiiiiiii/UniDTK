@@ -42,7 +42,6 @@ fn spawn_attach_worker(
     ui: rune::AppHandle<Host>,
     fail_on_exhaust: bool,
     ws_slot: Arc<Mutex<Option<WsClientHandle>>>,
-    first_frame: Arc<AtomicBool>,
 ) {
     let spawn = std::thread::Builder::new().name(name.into()).spawn(move || {
         let mut error = "desktop unavailable".to_string();
@@ -56,7 +55,6 @@ fn spawn_attach_worker(
             match crate::desktop_host::discover_with_attempt(attempt) {
                 Ok(parent) => {
                     let attached_ws = ws_slot.clone();
-                    let attached_ready = first_frame.clone();
                     ui.update(move |state, _| {
                         if state.inspector.stopping.load(Ordering::Acquire) {
                             return;
@@ -72,12 +70,7 @@ fn spawn_attach_worker(
                                 if let Some(w) = window {
                                     w.recheck_occlusion();
                                 }
-                                if let Ok(slot) = attached_ws.lock() {
-                                    if let Some(client) = slot.as_ref() {
-                                        let ready = attached_ready.load(Ordering::Acquire);
-                                        client.update_registration(state.inspector.port(), true, ready);
-                                    }
-                                }
+                                sync_registration(&state.inspector, &attached_ws);
                                 crate::desktop_host::note(&format!(
                                     "host attached under {}",
                                     crate::desktop_host::host_description()
@@ -134,7 +127,6 @@ pub fn run() -> Result<(), String> {
     inspector.start(supervised, move || quit_handle.quit())?;
 
     let ws_slot: Arc<Mutex<Option<WsClientHandle>>> = Arc::new(Mutex::new(None));
-    let first_frame = Arc::new(AtomicBool::new(false));
     let active_generation = Arc::new(AtomicU64::new(0));
     let focused_input = Arc::new(AtomicBool::new(false));
     if supervised {
@@ -142,7 +134,6 @@ pub fn run() -> Result<(), String> {
             inspector: Arc<Inspector>,
             ui: rune::AppHandle<Host>,
             ws_slot: Arc<Mutex<Option<WsClientHandle>>>,
-            first_frame: Arc<AtomicBool>,
             active_generation: Arc<AtomicU64>,
         }
         impl ControlSink for SupervisedSink {
@@ -153,8 +144,9 @@ pub fn run() -> Result<(), String> {
                     handshake.generation, handshake.instance_nonce, handshake.ws_port
                 ));
                 if let (Some(port), Some(token)) = (handshake.ws_port, handshake.ws_token) {
-                    let attached = crate::desktop_host::window_is_attached(self.inspector.hwnd.load(Ordering::Acquire));
-                    let ready = attached && self.first_frame.load(Ordering::Acquire);
+                    let hwnd = self.inspector.hwnd.load(Ordering::Acquire);
+                    let attached = hwnd != 0 && crate::desktop_host::window_is_attached(hwnd);
+                    let ready = self.inspector.is_ready(attached).unwrap_or(false);
                     let info = HostRegistrationInfo {
                         pid: std::process::id(),
                         generation: handshake.generation,
@@ -170,6 +162,8 @@ pub fn run() -> Result<(), String> {
                                     old.stop();
                                 }
                             }
+                            // Close the race window if a commit or attach finished while connecting.
+                            sync_registration(&self.inspector, &self.ws_slot);
                         }
                         Err(err) => crate::desktop_host::note(&format!("ws_client start: {err}")),
                     }
@@ -192,7 +186,6 @@ pub fn run() -> Result<(), String> {
                         self.ui.clone(),
                         false,
                         self.ws_slot.clone(),
-                        self.first_frame.clone(),
                     );
                 }
             }
@@ -213,7 +206,6 @@ pub fn run() -> Result<(), String> {
                         self.ui.clone(),
                         false,
                         self.ws_slot.clone(),
-                        self.first_frame.clone(),
                     );
                 }
             }
@@ -251,7 +243,6 @@ pub fn run() -> Result<(), String> {
         let sup_inspector = inspector.clone();
         let sup_ui = handle.clone();
         let sup_ws = ws_slot.clone();
-        let sup_frame = first_frame.clone();
         let sup_gen = active_generation.clone();
         let _ = std::thread::Builder::new()
             .name("host-stdin".into())
@@ -260,7 +251,6 @@ pub fn run() -> Result<(), String> {
                     inspector: sup_inspector,
                     ui: sup_ui,
                     ws_slot: sup_ws,
-                    first_frame: sup_frame,
                     active_generation: sup_gen,
                 };
                 let stdin = std::io::stdin();
@@ -270,12 +260,15 @@ pub fn run() -> Result<(), String> {
 
     let on_window = inspector.clone();
     let on_window_ws = ws_slot.clone();
-    let on_window_frame = first_frame.clone();
     let on_encoded = inspector.clone();
+    let on_committed = inspector.clone();
+    let on_committed_ws = ws_slot.clone();
+    let on_committed_focus = focused_input.clone();
+    let last_commit_drawn_c = std::rc::Rc::new(std::cell::Cell::new(None::<u64>));
     let on_drawn = inspector.clone();
     let on_drawn_ws = ws_slot.clone();
-    let on_drawn_frame = first_frame.clone();
     let on_drawn_focus = focused_input.clone();
+    let last_commit_drawn_d = last_commit_drawn_c.clone();
     let result = app.on_window(move |window| {
         *on_window.window.lock().unwrap() = Some(window.clone());
         let hwnd = window.with_raw_handle(|raw| match raw.as_raw() {
@@ -298,7 +291,6 @@ pub fn run() -> Result<(), String> {
             ui,
             true,
             on_window_ws.clone(),
-            on_window_frame.clone(),
         );
     })
     .on_frame_encoded(move |frame| {
@@ -320,41 +312,22 @@ pub fn run() -> Result<(), String> {
             snapshot.last_frame = Some(Instant::now());
         }
     })
+    .on_tree_committed(move |rt| {
+        let drawn_seq = sync_tree_snapshot(
+            rt,
+            &on_committed,
+            &on_committed_ws,
+            &on_committed_focus,
+            true,
+        );
+        last_commit_drawn_c.set(Some(drawn_seq));
+    })
     .on_frame_drawn(move |rt| {
-        let infos = rt.elements();
-        let elements = infos.iter().map(|element| json!({
-            "path": element.path, "key": element.key, "role": element.role,
-            "label": element.label, "text": element.text, "rect": element.rect,
-            "opacity": element.opacity,
-        })).collect();
-        let has_focused_text = infos.iter().any(|element| element.focused && element.focusable && !element.exiting);
-        if on_drawn_focus.swap(has_focused_text, Ordering::AcqRel) != has_focused_text {
-            if let Ok(slot) = on_drawn_ws.lock() {
-                if let Some(client) = slot.as_ref() {
-                    client.report_input_focus(has_focused_text);
-                }
-            }
+        let drawn_seq = on_drawn.snapshot.lock().map(|s| s.drawn).unwrap_or(0);
+        if last_commit_drawn_d.take() == Some(drawn_seq) {
+            return;
         }
-        {
-            let mut snapshot = on_drawn.snapshot.lock().unwrap();
-            // ElementInfo.parent indexes runtime nodes, not this filtered list.
-            // G0 has exactly one interactive surface, identified by its stable key.
-            snapshot.widget_rects = infos.iter().filter(|element| {
-                element.key.as_deref() == Some("g0-card") && !element.exiting
-            }).map(|element| element.rect).collect();
-            snapshot.elements = elements;
-        }
-        if let Err(error) = publish_region(&on_drawn) { on_drawn.fail(error); }
-        if !on_drawn_frame.swap(true, Ordering::AcqRel) {
-            let hwnd = on_drawn.hwnd.load(Ordering::Acquire);
-            if hwnd != 0 && crate::desktop_host::window_is_attached(hwnd) {
-                if let Ok(slot) = on_drawn_ws.lock() {
-                    if let Some(client) = slot.as_ref() {
-                        client.update_registration(on_drawn.port(), true, true);
-                    }
-                }
-            }
-        }
+        let _ = sync_tree_snapshot(rt, &on_drawn, &on_drawn_ws, &on_drawn_focus, false);
     }).try_run();
     inspector.stop();
     if let Ok(mut slot) = ws_slot.lock() {
@@ -379,6 +352,59 @@ fn hit_region(rects: &[[f32; 4]], scale: f64) -> Vec<[i32; 4]> {
         let bottom = ((y + h + SHADOW) * scale).ceil() as i32;
         [left, top, right - left, bottom - top]
     }).collect()
+}
+
+fn sync_registration(inspector: &Inspector, ws_slot: &Arc<Mutex<Option<WsClientHandle>>>) {
+    let hwnd = inspector.hwnd.load(Ordering::Acquire);
+    let attached = hwnd != 0 && crate::desktop_host::window_is_attached(hwnd);
+    let ready = inspector.is_ready(attached).unwrap_or(false);
+    if let Ok(slot) = ws_slot.lock() {
+        if let Some(client) = slot.as_ref() {
+            client.update_registration(inspector.port(), attached, ready);
+        }
+    }
+}
+
+fn sync_tree_snapshot(
+    rt: &rune::Runtime<Host>,
+    inspector: &Inspector,
+    ws_slot: &Arc<Mutex<Option<WsClientHandle>>>,
+    focused_input: &AtomicBool,
+    from_commit: bool,
+) -> u64 {
+    let infos = rt.elements();
+    let elements = infos.iter().map(|element| json!({
+        "path": element.path, "key": element.key, "role": element.role,
+        "label": element.label, "text": element.text, "rect": element.rect,
+        "opacity": element.opacity,
+    })).collect();
+    let has_focused_text = infos.iter().any(|element| element.focused && element.focusable && !element.exiting);
+    if focused_input.swap(has_focused_text, Ordering::AcqRel) != has_focused_text {
+        if let Ok(slot) = ws_slot.lock() {
+            if let Some(client) = slot.as_ref() {
+                client.report_input_focus(has_focused_text);
+            }
+        }
+    }
+    let drawn_seq = {
+        let mut snapshot = inspector.snapshot.lock().unwrap();
+        // ElementInfo.parent indexes runtime nodes, not this filtered list.
+        // G0 has exactly one interactive surface, identified by its stable key.
+        snapshot.widget_rects = infos.iter().filter(|element| {
+            element.key.as_deref() == Some("g0-card") && !element.exiting
+        }).map(|element| element.rect).collect();
+        snapshot.elements = elements;
+        if from_commit {
+            snapshot.committed += 1;
+        }
+        snapshot.drawn
+    };
+    if let Err(error) = publish_region(inspector) {
+        inspector.fail(error);
+    }
+    inspector.tree_seq.fetch_add(1, Ordering::AcqRel);
+    sync_registration(inspector, ws_slot);
+    drawn_seq
 }
 
 /// Both events run on Rune's UI thread. A covered window may draw before attach

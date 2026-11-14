@@ -1187,7 +1187,7 @@ fn native_host_ping_verdict(ping_result: &serde_json::Value) -> Result<String, S
     }
     if host.get("ready").and_then(|v| v.as_bool()) != Some(true) {
         return Err(format!(
-            "native host pid={pid} port={port} has not drawn its first frame"
+            "native host pid={pid} port={port} has not committed its initial element tree or hit region"
         ));
     }
     let gen_id = host.get("generation").and_then(|v| v.as_u64()).unwrap_or(0);

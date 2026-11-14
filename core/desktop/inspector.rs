@@ -19,6 +19,7 @@ const PRIORITY_READ_WINDOW: Duration = Duration::from_millis(500);
 #[derive(Clone, Default)]
 pub struct Snapshot {
     pub elements: Vec<Value>,
+    pub committed: u64,
     pub drawn: u64,
     pub skipped: u64,
     pub unchanged: u64,
@@ -34,6 +35,7 @@ pub struct Inspector {
     pub snapshot: Mutex<Snapshot>,
     pub hwnd: AtomicIsize,
     pub input_count: AtomicU64,
+    pub tree_seq: AtomicU64,
     pub window: Mutex<Option<rune::WindowHandle>>,
     pub stopping: AtomicBool,
     pub failure: Mutex<Option<String>>,
@@ -58,7 +60,7 @@ impl Inspector {
     pub fn new_in(data_dir: PathBuf) -> Result<Arc<Self>, String> {
         Ok(Arc::new(Self {
             snapshot: Mutex::new(Snapshot::default()), hwnd: AtomicIsize::new(0),
-            input_count: AtomicU64::new(0), window: Mutex::new(None),
+            input_count: AtomicU64::new(0), tree_seq: AtomicU64::new(0), window: Mutex::new(None),
             stopping: AtomicBool::new(false), failure: Mutex::new(None),
             data_dir,
             started: Instant::now(), token: crate::desktop_host::random_token()?,
@@ -71,6 +73,48 @@ impl Inspector {
 
     pub fn port(&self) -> u16 {
         self.bound_port.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_ready(&self, attached: bool) -> Result<bool, String> {
+        let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?;
+        Ok(attached
+            && !self.stopping.load(Ordering::Acquire)
+            && snapshot.committed > 0
+            && !snapshot.region.is_empty())
+    }
+
+    pub(crate) fn tree_snapshot(&self) -> Result<Value, String> {
+        let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?;
+        if snapshot.committed == 0 {
+            return Err("host has not committed its initial element tree".into());
+        }
+        Ok(Value::Array(snapshot.elements.clone()))
+    }
+
+    pub(crate) fn wait_for_click_ack(
+        &self,
+        before_input: u64,
+        before_tree: u64,
+        ack_timeout: Duration,
+        tree_grace: Duration,
+    ) -> Result<u64, String> {
+        let deadline = Instant::now() + ack_timeout;
+        while self.input_count.load(Ordering::Acquire) == before_input {
+            if Instant::now() >= deadline || self.stopping.load(Ordering::Acquire) {
+                return Err("input was posted but Rune did not acknowledge a card press".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Wait briefly for the post-input commit (`tree_seq`) so callers reading `tree` right after
+        // `click` see updated text without timing out on handlers that do not alter the tree.
+        let tree_deadline = Instant::now() + tree_grace;
+        while self.tree_seq.load(Ordering::Acquire) == before_tree
+            && Instant::now() < tree_deadline
+            && !self.stopping.load(Ordering::Acquire)
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(self.input_count.load(Ordering::Acquire))
     }
 
     #[cfg(test)]
@@ -253,11 +297,7 @@ impl Inspector {
         if cmd == "ping" {
             let hwnd = self.hwnd.load(Ordering::Acquire);
             let attached = crate::desktop_host::window_is_attached(hwnd);
-            let ready = {
-                let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?;
-                snapshot.drawn > 0 && !snapshot.region.is_empty() && attached
-                    && !self.stopping.load(Ordering::Acquire)
-            };
+            let ready = self.is_ready(attached)?;
             return Ok(json!({
                 "pid": std::process::id(), "proto": protocol::VERSION,
                 "port": self.port(),
@@ -275,11 +315,7 @@ impl Inspector {
         if hwnd == 0 { return Err("host is starting: the desktop window is not attached".into()); }
         if !crate::desktop_host::window_is_attached(hwnd) { return Err("native desktop window is detached; restart the host".into()); }
         match cmd {
-            "tree" => {
-                let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?;
-                if snapshot.drawn == 0 { return Err("host has not drawn its first frame (desktop may be covered)".into()); }
-                Ok(Value::Array(snapshot.elements.clone()))
-            }
+            "tree" => self.tree_snapshot(),
             "png" => {
                 let window = self.window.lock().map_err(|e| e.to_string())?.clone();
                 let _capture = self.capture.try_lock().map_err(|_| "screenshot already in progress")?;
@@ -309,7 +345,7 @@ impl Inspector {
         let _input = self.input.try_lock().map_err(|_| "another input operation is in progress")?;
         let point = {
             let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?;
-            if snapshot.drawn == 0 { return Err("host has not drawn its first frame".into()); }
+            if snapshot.committed == 0 { return Err("host has not committed its initial element tree".into()); }
             if let Some(target) = args["target"].as_str() {
                 let matches: Vec<_> = snapshot.elements.iter().filter(|e| e["key"] == target || e["path"] == target).collect();
                 if matches.len() != 1 { return Err(format!("target '{target}' matched {} elements", matches.len())); }
@@ -325,16 +361,16 @@ impl Inspector {
         let forced = args["force"].as_bool().unwrap_or(false);
         if !forced && hit["on_screen_is_host"] != true { return Err("target is covered; --force explicitly permits posted input to the covered host".into()); }
         let before = self.input_count.load(Ordering::Acquire);
+        let before_tree = self.tree_seq.load(Ordering::Acquire);
         crate::desktop_host::click(hwnd, x, y)?;
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while self.input_count.load(Ordering::Acquire) == before {
-            if Instant::now() >= deadline || self.stopping.load(Ordering::Acquire) {
-                return Err("input was posted but Rune did not acknowledge a card press".into());
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let input_count = self.wait_for_click_ack(
+            before,
+            before_tree,
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+        )?;
         Ok(json!({ "clicked": point, "forced": forced, "transport": "win32-posted",
-            "before": before, "input_count": self.input_count.load(Ordering::Acquire), "handled": true }))
+            "before": before, "input_count": input_count, "handled": true }))
     }
 
     fn frames(&self) -> Result<Value, String> {
@@ -344,6 +380,7 @@ impl Inspector {
         let (handles, gdi_objects, user_objects) = crate::desktop_host::process_handles();
         Ok(json!({
             "uptime_ms": self.started.elapsed().as_millis() as u64,
+            "committed": snapshot.committed,
             "drawn": snapshot.drawn, "skipped": snapshot.skipped, "unchanged": snapshot.unchanged,
             "since_last_frame_ms": snapshot.last_frame.map(|at| at.elapsed().as_millis() as u64),
             "encode_ms": quantiles(snapshot.encode_ms), "update_ms": quantiles(snapshot.update_ms),

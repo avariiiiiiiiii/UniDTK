@@ -34,6 +34,7 @@ impl<S: 'static> Host<S> {
         // What this frame would have run still runs, without drawing (`covered_step`). Misses
         // come at the retry's pace, not the display's.
         if !stepped { covered_step(&mut self.rt); }
+        self.frame_reports.check_committed(&self.rt);
         self.clipboard.flush(&mut self.rt);
         self.frame_reports.skipped();
     }
@@ -52,6 +53,7 @@ impl<S: 'static> Host<S> {
         if shown {
             self.rt.set_live_visible(false);
             covered_step(&mut self.rt);
+            self.frame_reports.check_committed(&self.rt);
             self.clipboard.flush(&mut self.rt);
             self.frame_reports.skipped();
         }
@@ -135,16 +137,23 @@ impl<S: 'static> Host<S> {
         // The frame moves before the drawable is acquired, so it has the new size; never while
         // the user holds the window's edge in a live resize.
         if !hidden && !live_resize { self.step_frame(target.unwrap_or_else(Instant::now)); }
-        let (Some(l), Some((gpu, renderer))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
+        let (Some(l), Some((gpu, renderer))) = (self.win.as_mut(), self.gpu.as_mut()) else {
+            self.frame_reports.check_committed(&self.rt);
+            return;
+        };
         #[cfg(target_os = "macos")]
         l.set_live_resize(resizing && live_resize);
         // Acquire before latching live values so a drawable wait cannot age the input.
         l.backoff_step(BackoffEvent::Lapsed);
         if renderer.srgb_blend() != self.rt.srgb_blend() {
-            let Some(surface) = l.surface.as_ref() else { return };
+            let Some(surface) = l.surface.as_ref() else {
+                self.frame_reports.check_committed(&self.rt);
+                return;
+            };
             if !reblend(surface, gpu, &mut l.config, renderer, &mut l.alpha, &mut self.rt) {
                 // A surface that won't take the new format is replaced before the next frame.
                 l.surface_ok = false;
+                self.frame_reports.check_committed(&self.rt);
                 return;
             }
         }
@@ -174,6 +183,7 @@ impl<S: 'static> Host<S> {
                 sync_platform(l, rt, &mut self.secure_input, &mut self.ime_allowed, &self.clipboard);
                 l.stop_pacing();
                 self.meter.set_pacing(l.pacing_state(false));
+                self.frame_reports.check_committed(rt);
                 self.frame_reports.unchanged(target);
                 return;
             }
@@ -186,7 +196,7 @@ impl<S: 'static> Host<S> {
         if deferred && let Some(pacing) = &mut l.native.pacing { let _ = pacing.next_frame(); }
         #[cfg(feature = "frame-profile")]
         let fp_start = crate::frame::live_log::on().then(crate::frame::live_log::Stamp::now);
-        let Some(surface) = l.surface.as_ref() else { return };
+        let Some(surface) = l.surface.as_ref() else { self.frame_reports.check_committed(&self.rt); return; };
         let frame = match acquire(surface, gpu, &l.config, l.surface_ok, 1, &mut self.meter) {
             Ok(frame) => frame,
             // A surface with no presentation (a refused configuration, or a device that is gone)
@@ -195,7 +205,7 @@ impl<S: 'static> Host<S> {
                 l.surface_ok = false;
                 return self.missed_frame(Missed::Unconfigured, built.is_some());
             }
-            Err(_) if hidden => { l.first_frame.missed(); l.backoff_step(BackoffEvent::HiddenMissed { preparing: l.first_frame.deadline().is_some(), now: Instant::now() }); self.frame_reports.skipped(); return; }
+            Err(_) if hidden => { l.first_frame.missed(); l.backoff_step(BackoffEvent::HiddenMissed { preparing: l.first_frame.deadline().is_some(), now: Instant::now() }); self.frame_reports.check_committed(&self.rt); self.frame_reports.skipped(); return; }
             Err(missed) => return self.missed_frame(missed, built.is_some()),
         };
         #[cfg(feature = "frame-profile")]
@@ -246,7 +256,7 @@ impl<S: 'static> Host<S> {
             drop(frame);
             rt.native_materials = true;
             animating |= rt.frame(0.0);
-            let Some(surface) = l.surface.as_ref() else { return };
+            let Some(surface) = l.surface.as_ref() else { self.frame_reports.check_committed(rt); return; };
             let frame = match acquire(surface, gpu, &l.config, l.surface_ok, 1, &mut self.meter) {
                 Ok(frame) => frame,
                 Err(Missed::Unconfigured) => {
@@ -254,7 +264,7 @@ impl<S: 'static> Host<S> {
                     return self.missed_frame(Missed::Unconfigured, true);
                 }
                 // Retrying at once is what spins while occluded; wait like any missed frame.
-                Err(_) if hidden => { l.first_frame.missed(); l.backoff_step(BackoffEvent::HiddenMissed { preparing: l.first_frame.deadline().is_some(), now: Instant::now() }); self.frame_reports.skipped(); return; }
+                Err(_) if hidden => { l.first_frame.missed(); l.backoff_step(BackoffEvent::HiddenMissed { preparing: l.first_frame.deadline().is_some(), now: Instant::now() }); self.frame_reports.check_committed(rt); self.frame_reports.skipped(); return; }
                 Err(missed) => return self.missed_frame(missed, true),
             };
             drawable = l.native.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired());
@@ -263,9 +273,10 @@ impl<S: 'static> Host<S> {
         // A handler switched blending (`Tx::set_srgb_blend`): this drawable has the old format.
         let frame = if renderer.srgb_blend() != rt.srgb_blend() {
             drop(frame);
-            let Some(surface) = l.surface.as_ref() else { return };
+            let Some(surface) = l.surface.as_ref() else { self.frame_reports.check_committed(rt); return; };
             if !reblend(surface, gpu, &mut l.config, renderer, &mut l.alpha, rt) {
                 l.surface_ok = false;
+                self.frame_reports.check_committed(rt);
                 return;
             }
             let frame = match acquire(surface, gpu, &l.config, l.surface_ok, 1, &mut self.meter) {
@@ -274,7 +285,7 @@ impl<S: 'static> Host<S> {
                     l.surface_ok = false;
                     return self.missed_frame(Missed::Unconfigured, true);
                 }
-                Err(_) if hidden => { l.first_frame.missed(); l.backoff_step(BackoffEvent::HiddenMissed { preparing: l.first_frame.deadline().is_some(), now: Instant::now() }); self.frame_reports.skipped(); return; }
+                Err(_) if hidden => { l.first_frame.missed(); l.backoff_step(BackoffEvent::HiddenMissed { preparing: l.first_frame.deadline().is_some(), now: Instant::now() }); self.frame_reports.check_committed(rt); self.frame_reports.skipped(); return; }
                 Err(missed) => return self.missed_frame(missed, true),
             };
             #[cfg(target_os = "macos")]
@@ -373,6 +384,7 @@ impl<S: 'static> Host<S> {
         if !hidden && l.native.pacing.is_none() { l.native.pacing = crate::platform::display_link::DisplayLink::retry(&l.window, self.frame_wake.clone()); }
         self.frame_reports.drawn(encoded, presents_at, now, update_ms);
         rt.interaction_presented(submitted, presents_at);
+        self.frame_reports.check_committed(rt);
         self.frame_reports.inspect(rt);
         if let Some(trace) = self.trace.as_mut() {
             // A frame count keeps the trace redrawing while idle, as below.

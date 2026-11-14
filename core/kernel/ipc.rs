@@ -329,19 +329,28 @@ fn handle_ping(_server: &IpcServer, _args: &Args) -> Result<serde_json::Value, S
     Ok(ping_payload())
 }
 
-fn handle_logs(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+const MAX_LOGS_LIMIT: u64 = 1000;
+
+fn query_logs(logs: &LogStore, args: &Args) -> Result<Vec<crate::log_store::LogEntry>, String> {
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50)
+        .min(MAX_LOGS_LIMIT) as usize;
     let level = args.get("level").and_then(|v| v.as_str());
     let source = args.get("source").and_then(|v| v.as_str());
+    match args.get("since").and_then(|v| v.as_u64()) {
+        Some(since) => logs.get_since_filtered(since, Some(limit), level, source),
+        None => logs.list(limit, level, source),
+    }
+}
+
+fn handle_logs(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
     let logs = server
         .logs
         .as_ref()
         .ok_or_else(|| "log store unavailable".to_string())?;
-    let entries = match args.get("since").and_then(|v| v.as_u64()) {
-        Some(since) => logs.get_since(since, Some(limit))?,
-        None => logs.list(limit, level, source)?,
-    };
-    json_value(entries)
+    json_value(query_logs(logs, args)?)
 }
 
 fn handle_log_stats(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
@@ -373,8 +382,7 @@ fn handle_log_delta(server: &IpcServer, args: &Args) -> Result<serde_json::Value
         .logs
         .as_ref()
         .ok_or_else(|| "log store unavailable".to_string())?;
-    let entries = logs.get_since(since, Some(limit))?;
-    let max_id = logs.max_id().unwrap_or(since);
+    let (max_id, entries) = logs.get_delta(since, limit)?;
     Ok(serde_json::json!({ "maxId": max_id, "entries": entries }))
 }
 
@@ -788,5 +796,49 @@ mod route_tests {
         let hit = proxy_host_request(Some(port), "hit", &hit_args).unwrap();
         assert_eq!(hit["in_region"], true);
         let _ = server.join();
+    }
+
+    #[test]
+    fn handle_logs_applies_level_source_with_since_and_clamps_limit() {
+        let dir = std::env::temp_dir().join(format!("test_ipc_query_logs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = LogStore::open(dir.join("logs.redb")).unwrap();
+        let entries: Vec<crate::log_store::LogEntry> = (1..=1010)
+            .map(|i| crate::log_store::LogEntry {
+                id: i,
+                ts: 1000 + i as i64,
+                level: if i % 2 == 0 { "ERROR" } else { "INFO" }.into(),
+                source: if i % 3 == 0 { "frontend" } else { "backend" }.into(),
+                module: "test".into(),
+                message: format!("m{i}"),
+                meta: None,
+            })
+            .collect();
+        store.insert_batch(&entries).unwrap();
+
+        // When `since` is combined with `level` and `source`, non-matching rows must be skipped.
+        let mut args = Args::new();
+        args.insert("since".into(), serde_json::json!(1000));
+        args.insert("level".into(), serde_json::json!("ERROR"));
+        args.insert("source".into(), serde_json::json!("frontend"));
+        args.insert("limit".into(), serde_json::json!(10));
+        let filtered = query_logs(&store, &args).unwrap();
+        let filtered_ids: Vec<u64> = filtered.iter().map(|e| e.id).collect();
+        assert_eq!(filtered_ids, vec![1002, 1008]);
+        assert!(filtered.iter().all(|e| e.level == "ERROR" && e.source == "frontend"));
+
+        // Huge limits must clamp to 1000 on both `since` and `list` paths.
+        let mut clamped_since = Args::new();
+        clamped_since.insert("since".into(), serde_json::json!(0));
+        clamped_since.insert("limit".into(), serde_json::json!(5000));
+        assert_eq!(query_logs(&store, &clamped_since).unwrap().len(), 1000);
+
+        let mut clamped_list = Args::new();
+        clamped_list.insert("limit".into(), serde_json::json!(5000));
+        assert_eq!(query_logs(&store, &clamped_list).unwrap().len(), 1000);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

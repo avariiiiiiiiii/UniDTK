@@ -212,6 +212,7 @@ impl<S: 'static> Host<S> {
                         w.timer_frame.stalled_again(now);
                     }
                     covered_step(&mut self.rt);
+                    self.frame_reports.check_committed(&self.rt);
                     self.clipboard.flush(&mut self.rt);
                     self.shell(event_loop);
                 } else {
@@ -235,6 +236,7 @@ impl<S: 'static> Host<S> {
                 }
             } else {
                 covered_step(&mut self.rt);
+                self.frame_reports.check_committed(&self.rt);
                 self.clipboard.flush(&mut self.rt);
                 self.shell(event_loop);
             }

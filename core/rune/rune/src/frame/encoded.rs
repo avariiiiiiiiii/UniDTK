@@ -11,6 +11,24 @@ pub(crate) type OnFrameEncoded = Box<dyn FnMut(&FrameEncoded)>;
 /// `App::on_frame_drawn`'s hook.
 pub(crate) type OnFrameDrawn<S> = Box<dyn FnMut(&crate::Runtime<S>)>;
 
+/// `App::on_tree_committed`'s hook.
+pub(crate) type OnTreeCommitted<S> = Box<dyn FnMut(&crate::Runtime<S>)>;
+
+/// Fires `hook` once for each commit generation transition (`commits > 0 && commits != *last_committed`).
+pub fn check_commit_transition<S: 'static>(
+    rt: &crate::Runtime<S>,
+    last_committed: &mut u64,
+    hook: &mut dyn FnMut(&crate::Runtime<S>),
+) -> bool {
+    let commits = rt.commit_seq();
+    if commits == 0 || commits == *last_committed {
+        return false;
+    }
+    *last_committed = commits;
+    hook(rt);
+    true
+}
+
 /// One frame a window ran, as `App::on_frame_encoded` reports it.
 #[derive(Clone, Debug)]
 pub struct FrameEncoded {
@@ -81,10 +99,10 @@ impl FrameEncoded {
 
 /// A window's hooks and the count it numbers reports with. Without a hook every call is one
 /// `Option` check and nothing else, so reporting never changes how the window draws.
-pub(crate) struct FrameReports<S: 'static>(Option<Reporter>, Option<OnFrameDrawn<S>>);
+pub(crate) struct FrameReports<S: 'static>(Option<Reporter>, Option<OnFrameDrawn<S>>, Option<OnTreeCommitted<S>>, u64);
 
 impl<S: 'static> Default for FrameReports<S> {
-    fn default() -> Self { Self(None, None) }
+    fn default() -> Self { Self(None, None, None, 0) }
 }
 
 struct Reporter {
@@ -96,11 +114,16 @@ struct Reporter {
 
 impl<S: 'static> FrameReports<S> {
     pub(crate) fn new(hook: Option<OnFrameEncoded>, window: Option<&str>) -> Self {
-        Self(hook.map(|hook| Reporter { hook, window: window.map(Rc::from), seq: 0, refresh_hz: None }), None)
+        Self(hook.map(|hook| Reporter { hook, window: window.map(Rc::from), seq: 0, refresh_hz: None }), None, None, 0)
     }
 
     pub(crate) fn inspecting(mut self, drawn: Option<OnFrameDrawn<S>>) -> Self {
         self.1 = drawn;
+        self
+    }
+
+    pub(crate) fn inspecting_committed(mut self, committed: Option<OnTreeCommitted<S>>) -> Self {
+        self.2 = committed;
         self
     }
 
@@ -124,6 +147,12 @@ impl<S: 'static> FrameReports<S> {
     }
 
     /// After a `Drawn` frame: `App::on_frame_drawn` reads the runtime as it presented.
+    pub(crate) fn check_committed(&mut self, rt: &crate::Runtime<S>) {
+        if let Some(hook) = self.2.as_mut() {
+            check_commit_transition(rt, &mut self.3, hook.as_mut());
+        }
+    }
+
     pub(crate) fn inspect(&mut self, rt: &crate::Runtime<S>) {
         if let Some(hook) = &mut self.1 { hook(rt); }
     }

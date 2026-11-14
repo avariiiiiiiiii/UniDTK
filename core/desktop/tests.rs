@@ -392,6 +392,12 @@ fn readback_staging_layout_pads_rows_and_beats_4mib_general_heap() {
     let (row_fhd, size_fhd) = rune::win32_telemetry::readback_staging_layout(1920, 1080).unwrap();
     assert_eq!(row_fhd, 7680);
     assert_eq!(size_fhd, 7680 * 1080);
+
+    assert!(rune::win32_telemetry::readback_staging_layout(4096, 4096).is_ok());
+    assert!(
+        rune::win32_telemetry::readback_staging_layout(4097, 4096).is_err(),
+        "readback staging layout must reject captures larger than 16 MP"
+    );
 }
 
 #[test]
@@ -501,4 +507,125 @@ fn desktop_discovery_budget_and_progman_fallback_gate() {
     assert!(crate::desktop_host::allow_progman_fallback(true, 4));
     // At 15s (60 * 250ms), allow fallback even if tray heuristic isn't present.
     assert!(crate::desktop_host::allow_progman_fallback(false, 60));
+}
+
+#[test]
+fn inspector_gates_ready_and_tree_on_committed_tree_and_waits_for_tree_after_click() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let dir = std::env::temp_dir().join(format!(
+        "unidtk-inspector-committed-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let inspector = crate::inspector::Inspector::new_in(dir.clone()).unwrap();
+
+    assert!(!inspector.is_ready(true).unwrap());
+    assert!(inspector.tree_snapshot().is_err());
+
+    {
+        let mut s = inspector.snapshot.lock().unwrap();
+        s.committed = 1;
+        s.drawn = 0; // Still covered on cold boot: no GPU present yet.
+        s.elements = vec![serde_json::json!({ "key": "g0-card", "text": "Presses: 0" })];
+        s.region = vec![[24, 24, 320, 80]];
+    }
+    inspector.tree_seq.store(1, Ordering::Release);
+
+    assert!(
+        inspector.is_ready(true).unwrap(),
+        "attached host with committed tree + region must report ready even while covered (drawn=0)"
+    );
+    let tree = inspector.tree_snapshot().expect("tree available after commit");
+    assert_eq!(tree[0]["text"], "Presses: 0");
+
+    // Simulate Rune pressing first (`input_count`), then committing updated tree (`tree_seq`) 15ms later.
+    let before_input = inspector.input_count.load(Ordering::Acquire);
+    let before_tree = inspector.tree_seq.load(Ordering::Acquire);
+    let insp_bg = inspector.clone();
+    let updater = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(10));
+        insp_bg.input_count.fetch_add(1, Ordering::AcqRel);
+        std::thread::sleep(Duration::from_millis(15));
+        {
+            let mut s = insp_bg.snapshot.lock().unwrap();
+            s.committed += 1;
+            s.elements = vec![serde_json::json!({ "key": "g0-card", "text": "Presses: 1" })];
+        }
+        insp_bg.tree_seq.fetch_add(1, Ordering::AcqRel);
+    });
+
+    let count = inspector
+        .wait_for_click_ack(
+            before_input,
+            before_tree,
+            Duration::from_secs(1),
+            Duration::from_millis(200),
+        )
+        .expect("click ack with tree barrier");
+    assert_eq!(count, before_input + 1);
+    let updated = inspector.tree_snapshot().unwrap();
+    assert_eq!(updated[0]["text"], "Presses: 1");
+    let _ = updater.join();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rune_tree_committed_fires_after_covered_boot_and_dedups_unchanged_commits() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    // Verifies the App builder surface compiles symmetrically with `on_frame_drawn`.
+    let spec = rune::AppSpec::new(
+        "test",
+        (200.0, 100.0),
+        || 0u32,
+        |n: &u32, _: &mut rune::Cx<u32>| rune::el().key("g0-card").child(rune::text(format!("Presses: {n}"))),
+    );
+    let _app = rune::App::new(spec).on_tree_committed(|_rt| {});
+
+    let mut rt = rune::Runtime::new(
+        0u32,
+        |n: &u32, _: &mut rune::Cx<u32>| {
+            rune::el().key("g0-card").child(rune::text(format!("Presses: {n}")))
+        },
+        (200.0, 100.0),
+        rune::Env::default(),
+    );
+    let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+    let mut last_committed = 0u64;
+    let mut on_commit = |rt: &rune::Runtime<u32>| {
+        let text = rt
+            .elements()
+            .into_iter()
+            .filter_map(|e| e.text)
+            .collect::<Vec<_>>()
+            .join(",");
+        seen.borrow_mut().push(text);
+    };
+
+    assert!(!rune::win32_telemetry::check_commit_transition(&rt, &mut last_committed, &mut on_commit));
+    assert!(seen.borrow().is_empty(), "uncommitted runtime must not fire on_tree_committed");
+
+    // Cold covered boot (`covered_step`) on `!has_committed()` builds the initial tree once.
+    rune::win32_telemetry::covered_step(&mut rt);
+    assert!(rt.has_committed(), "covered_step on cold boot must perform initial commit+build");
+    assert!(rune::win32_telemetry::check_commit_transition(&rt, &mut last_committed, &mut on_commit));
+    assert_eq!(seen.borrow().as_slice(), ["Presses: 0"]);
+
+    // Subsequent `covered_step` while idle neither re-commits nor re-fires the hook.
+    rune::win32_telemetry::covered_step(&mut rt);
+    assert!(!rune::win32_telemetry::check_commit_transition(&rt, &mut last_committed, &mut on_commit));
+    assert_eq!(seen.borrow().len(), 1);
+
+    // State update + frame builds "Presses: 1" without needing a Drawn swapchain present.
+    rt.update(|n, _| *n = 1);
+    rt.frame(0.0);
+    assert!(rune::win32_telemetry::check_commit_transition(&rt, &mut last_committed, &mut on_commit));
+    assert_eq!(seen.borrow().as_slice(), ["Presses: 0", "Presses: 1"]);
 }

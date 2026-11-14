@@ -80,6 +80,7 @@ pub struct App<S: 'static> {
     pub(crate) on_ready: Option<OnWindow>,
     pub(crate) on_frame_encoded: Option<crate::frame::encoded::OnFrameEncoded>,
     pub(crate) on_frame_drawn: Option<crate::frame::encoded::OnFrameDrawn<S>>,
+    pub(crate) on_tree_committed: Option<crate::frame::encoded::OnTreeCommitted<S>>,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(crate) same_tab_router: Option<Box<dyn Fn(&str) -> bool>>,
     pub(crate) macos_window: crate::MacWindowOptions,
@@ -136,6 +137,7 @@ impl<S: 'static> App<S> {
             on_ready: None,
             on_frame_encoded: None,
             on_frame_drawn: None,
+            on_tree_committed: None,
             same_tab_router: None,
             macos_window: crate::MacWindowOptions::default(),
             compositor: None,
@@ -531,6 +533,11 @@ impl<S: 'static> App<S> {
     /// or what the window draws, and only desktop windows call it.
     pub fn on_frame_drawn(mut self, f: impl FnMut(&crate::Runtime<S>) + 'static) -> Self {
         self.on_frame_drawn = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_tree_committed(mut self, f: impl FnMut(&crate::Runtime<S>) + 'static) -> Self {
+        self.on_tree_committed = Some(Box::new(f));
         self
     }
 

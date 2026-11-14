@@ -22,9 +22,8 @@ pub fn host_cmd(args: &[String]) -> Result<String, String> {
                     .ok_or_else(|| format!("usage: udtk host {sub} <x> <y> [--force] (points)"))
             };
             let (x, y) = (number(2)?, number(3)?);
-            let mut body = json!({ "cmd": sub, "args": { "x": x, "y": y, "force": force } });
-            if sub == "click" { body["args"]["token"] = json!(token()?); }
-            request(body)?
+            let body = json!({ "cmd": sub, "args": { "x": x, "y": y, "force": force } });
+            if sub == "click" { request_with_token(body)? } else { request(body)? }
         }
         "quit" => quit()?,
         _ => return Err("usage: udtk host [run|ping|tree|frames|shot [path]|hit <x> <y>|click <x> <y> [--force]|quit]".into()),
@@ -50,7 +49,9 @@ fn run() -> Result<String, String> {
     Err("native host did not attach within 20 seconds; inspect udtk host ping".into())
 }
 
-pub fn quit() -> Result<Value, String> { request(json!({ "cmd": "quit", "args": { "token": token()? } })) }
+pub fn quit() -> Result<Value, String> {
+    request_with_token(json!({ "cmd": "quit", "args": {} }))
+}
 
 pub fn gui(args: &[String]) -> Result<String, String> {
     let force = args.iter().any(|a| a == "--force");
@@ -60,7 +61,7 @@ pub fn gui(args: &[String]) -> Result<String, String> {
     for step in steps {
         let result = if step.as_str() == "tree" { request(json!({ "cmd": "tree" }))? }
             else if let Some(target) = step.strip_prefix("click:") {
-                request(json!({ "cmd": "click", "args": { "target": target, "force": force, "token": token()? } }))?
+                request_with_token(json!({ "cmd": "click", "args": { "target": target, "force": force } }))?
             } else { return Err(format!("native G0 supports tree and click:<key-or-path>; unsupported step: {step}")); };
         receipts.push(json!({ "step": step, "ok": true, "result": result }));
     }
@@ -125,14 +126,14 @@ pub fn doctor(args: &[String]) -> Result<String, String> {
         }
         let tree = request(json!({ "cmd": "tree" }))?;
         if !tree.as_array().is_some_and(|nodes| nodes.iter().any(|n| n["key"] == "g0-card")) { return Err("test card missing from element tree".into()); }
-        let receipt = request(json!({ "cmd": "click", "args": { "target": "g0-card", "force": true, "token": token()? } }))?;
+        let receipt = request_with_token(json!({ "cmd": "click", "args": { "target": "g0-card", "force": true } }))?;
         if receipt["handled"] != true || receipt["input_count"].as_u64() <= receipt["before"].as_u64() { return Err("Rune did not acknowledge the card press".into()); }
         out.push_str(&format!("  [OK] card press acknowledged (forced Win32 posting): {receipt}\n"));
         let hit = request(json!({ "cmd": "hit", "args": { "x": 1, "y": 1 } }))?;
         if hit["host_is_child"] != true { return Err(format!("native window lost its WS_CHILD style: {hit}")); }
         if hit["in_region"] != false { return Err(format!("blank desktop is intercepted: {hit}")); }
         out.push_str("  [OK] blank desktop point is outside the native input region\n");
-        let original_token = token()?;
+        let original = resolve_endpoint()?;
         let exe = super::install_dir().join("unidtk-desktop.exe");
         let mut duplicate = super::spawn_detached(std::process::Command::new(&exe).creation_flags(super::NO_WINDOW)).map_err(|e| e.to_string())?;
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -144,7 +145,10 @@ pub fn doctor(args: &[String]) -> Result<String, String> {
             if Instant::now() >= deadline { return Err("duplicate host did not refuse within five seconds".into()); }
             std::thread::sleep(Duration::from_millis(25));
         }
-        if token()? != original_token || request(json!({ "cmd": "ping" }))?["pid"] != ping["pid"] { return Err("duplicate host changed the live token or endpoint".into()); }
+        let after = resolve_endpoint()?;
+        if after != original || request_on(&after, json!({ "cmd": "ping" }))?["pid"] != ping["pid"] {
+            return Err("duplicate host changed the live token or endpoint".into());
+        }
         out.push_str("  [OK] duplicate start refused; live token and process preserved\n");
     }
     out.push_str(&format!("  [OK] metrics: {}\n", request(json!({ "cmd": "frames" }))?));
@@ -163,15 +167,31 @@ struct InspectorMetadata {
     pid: u32,
     port: u16,
     token: String,
-    #[allow(dead_code)]
     supervised: bool,
 }
 
+enum MetadataLoad {
+    Loaded(InspectorMetadata),
+    NotFound(String),
+}
+
+fn read_metadata_optional(path: &std::path::Path) -> Result<MetadataLoad, String> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<InspectorMetadata>(&raw)
+            .map(MetadataLoad::Loaded)
+            .map_err(|e| format!("{}: bad metadata json: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(MetadataLoad::NotFound(format!("{}: {e} (is the host running?)", path.display())))
+        }
+        Err(e) => Err(format!("{}: {e} (is the host running?)", path.display())),
+    }
+}
+
 fn read_metadata(path: &std::path::Path) -> Result<InspectorMetadata, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("{}: {e} (is the host running?)", path.display()))?;
-    serde_json::from_str::<InspectorMetadata>(&raw)
-        .map_err(|e| format!("{}: bad metadata json: {e}", path.display()))
+    match read_metadata_optional(path)? {
+        MetadataLoad::Loaded(meta) => Ok(meta),
+        MetadataLoad::NotFound(msg) => Err(msg),
+    }
 }
 
 pub(crate) fn probe_kernel_ping() -> Option<Value> {
@@ -194,61 +214,171 @@ pub(crate) fn probe_kernel_ping() -> Option<Value> {
     }
 }
 
+fn load_standalone(
+    data_dir: &std::path::Path,
+    web_mode: bool,
+    mut is_live_pid: impl FnMut(u32) -> bool,
+) -> Result<Endpoint, String> {
+    let path = data_dir.join("host-standalone.json");
+    let meta = match read_metadata_optional(&path)? {
+        MetadataLoad::Loaded(meta) => meta,
+        MetadataLoad::NotFound(not_found_err) => {
+            if web_mode {
+                return Err(
+                    "native desktop host is not active: kernel is running in 'web' mode and no standalone host is listening (switch mode in tray or run 'udtk host run')"
+                        .into(),
+                );
+            }
+            return Err(not_found_err);
+        }
+    };
+    if meta.supervised {
+        return Err(format!("{}: expected standalone metadata (supervised=false)", path.display()));
+    }
+    if !is_live_pid(meta.pid) {
+        return Err(format!(
+            "{}: stale standalone host metadata (pid={} is not running)",
+            path.display(),
+            meta.pid
+        ));
+    }
+    Ok(Endpoint {
+        port: meta.port,
+        token: meta.token,
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn resolve_endpoint_in(
     data_dir: &std::path::Path,
     kernel_ping: Option<&Value>,
 ) -> Result<Endpoint, String> {
+    resolve_endpoint_with(data_dir, kernel_ping, |_| true)
+}
+
+pub(crate) fn resolve_endpoint_with(
+    data_dir: &std::path::Path,
+    kernel_ping: Option<&Value>,
+    is_live_pid: impl FnMut(u32) -> bool,
+) -> Result<Endpoint, String> {
+    let mut web_mode = false;
     if let Some(ping) = kernel_ping {
         if let Some(host) = ping.get("host") {
-            if host.get("mode").and_then(|m| m.as_str()) == Some("native") {
-                let pid = host
-                    .get("pid")
-                    .and_then(|v| v.as_u64())
-                    .and_then(|v| u32::try_from(v).ok())
-                    .ok_or_else(|| "native host mode is active without a host PID".to_string())?;
-                let port = host
-                    .get("inspectorPort")
-                    .and_then(|v| v.as_u64())
-                    .and_then(|v| u16::try_from(v).ok())
-                    .ok_or_else(|| {
-                        "native host has not registered its inspector port yet".to_string()
-                    })?;
-                let meta_path = data_dir.join(format!("host-inspector.{pid}.json"));
-                let meta = read_metadata(&meta_path)?;
-                if meta.pid != pid || meta.port != port {
-                    return Err(format!(
-                        "{}: metadata mismatch (pid={}, port={}) vs ping (pid={pid}, port={port})",
-                        meta_path.display(),
-                        meta.pid,
-                        meta.port
-                    ));
+            match host.get("mode").and_then(|m| m.as_str()) {
+                Some("native") => {
+                    let pid = host
+                        .get("pid")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| u32::try_from(v).ok())
+                        .ok_or_else(|| "native host mode is active without a host PID".to_string())?;
+                    let port = host
+                        .get("inspectorPort")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| u16::try_from(v).ok())
+                        .ok_or_else(|| {
+                            "native host has not registered its inspector port yet".to_string()
+                        })?;
+                    let meta_path = data_dir.join(format!("host-inspector.{pid}.json"));
+                    let meta = read_metadata(&meta_path)?;
+                    if !meta.supervised || meta.pid != pid || meta.port != port {
+                        return Err(format!(
+                            "{}: metadata mismatch (pid={}, port={}, supervised={}) vs ping (pid={pid}, port={port})",
+                            meta_path.display(),
+                            meta.pid,
+                            meta.port,
+                            meta.supervised
+                        ));
+                    }
+                    return Ok(Endpoint {
+                        port,
+                        token: meta.token,
+                    });
                 }
-                return Ok(Endpoint {
-                    port,
-                    token: meta.token,
-                });
+                Some("web") => {
+                    web_mode = true;
+                }
+                Some(other) => {
+                    return Err(format!("kernel reported unknown desktop host mode '{other}'"));
+                }
+                None => {}
             }
         }
     }
 
-    let standalone = read_metadata(&data_dir.join("host-standalone.json"))?;
-    Ok(Endpoint {
-        port: standalone.port,
-        token: standalone.token,
-    })
+    load_standalone(data_dir, web_mode, is_live_pid)
+}
+
+fn pid_is_live_desktop_host(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+
+    struct OwnedHandle(HANDLE);
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    unsafe {
+        let Ok(raw) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let handle = OwnedHandle(raw);
+        let mut exit_code = 0u32;
+        if GetExitCodeProcess(handle.0, &mut exit_code).is_err() || exit_code != STILL_ACTIVE {
+            return false;
+        }
+        let mut buf = [0u16; 520];
+        let mut len = buf.len() as u32;
+        if QueryFullProcessImageNameW(
+            handle.0,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        std::path::Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("unidtk-desktop.exe"))
+    }
 }
 
 fn resolve_endpoint() -> Result<Endpoint, String> {
     let ping = probe_kernel_ping();
-    resolve_endpoint_in(&unidtk_api::paths::data_dir_view(), ping.as_ref())
-}
-
-fn token() -> Result<String, String> {
-    resolve_endpoint().map(|ep| ep.token)
+    resolve_endpoint_with(&unidtk_api::paths::data_dir_view(), ping.as_ref(), pid_is_live_desktop_host)
 }
 
 fn request(body: Value) -> Result<Value, String> {
     let ep = resolve_endpoint()?;
+    request_on(&ep, body)
+}
+
+fn request_with_token(mut body: Value) -> Result<Value, String> {
+    let ep = resolve_endpoint()?;
+    if let Some(obj) = body.as_object_mut() {
+        let args = obj.entry("args").or_insert_with(|| json!({}));
+        if let Some(args_obj) = args.as_object_mut() {
+            args_obj.insert("token".into(), json!(ep.token));
+        }
+    }
+    request_on(&ep, body)
+}
+
+fn request_on(ep: &Endpoint, body: Value) -> Result<Value, String> {
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], ep.port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|e| format!("native inspector unavailable at {address}: {e}"))?;
@@ -307,6 +437,67 @@ mod tests {
         let standalone = resolve_endpoint_in(&dir, None).expect("offline standalone fallback");
         assert_eq!(standalone.port, 26541);
         assert_eq!(standalone.token, "standalone-tok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cli_reports_clear_error_in_web_mode_without_breaking_standalone() {
+        let dir = std::env::temp_dir().join(format!(
+            "unidtk-cli-host-web-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let web_ping = json!({
+            "host": { "mode": "web", "pid": null, "generation": 0, "inspectorPort": null, "attached": false, "ready": false }
+        });
+
+        // Case A: kernel in `web` mode and no standalone host running -> clear error instead of raw os error 2.
+        let missing_err = resolve_endpoint_in(&dir, Some(&web_ping)).unwrap_err();
+        assert!(
+            missing_err.contains("web") && missing_err.contains("native"),
+            "expected clear web-mode message, got: {missing_err}"
+        );
+
+        // Case D: offline kernel + no standalone file keeps the standalone metadata error.
+        let offline_err = resolve_endpoint_in(&dir, None).unwrap_err();
+        assert!(
+            offline_err.contains("host-standalone.json"),
+            "expected standalone metadata error when offline, got: {offline_err}"
+        );
+
+        // Case C: corrupt standalone JSON is still surfaced honestly even in `web` mode.
+        let standalone_path = dir.join("host-standalone.json");
+        std::fs::write(&standalone_path, "{not json").unwrap();
+        let corrupt_err = resolve_endpoint_in(&dir, Some(&web_ping)).unwrap_err();
+        assert!(
+            corrupt_err.contains("bad metadata json"),
+            "expected parse error, got: {corrupt_err}"
+        );
+
+        // Case B: valid standalone metadata still works while kernel is in `web` mode (`udtk host run` / `stop`).
+        std::fs::write(
+            &standalone_path,
+            r#"{"pid":101,"port":26541,"token":"standalone-tok","supervised":false}"#,
+        )
+        .unwrap();
+        let ep = resolve_endpoint_in(&dir, Some(&web_ping))
+            .expect("standalone host must still resolve while kernel is in web mode");
+        assert_eq!(ep.port, 26541);
+        assert_eq!(ep.token, "standalone-tok");
+
+        // Case E: dead PID makes standalone metadata report stale instead of connecting to reused port.
+        let stale_err = resolve_endpoint_with(&dir, Some(&web_ping), |_| false).unwrap_err();
+        assert!(stale_err.contains("stale"), "expected stale error, got: {stale_err}");
+
+        // Case F: unknown host mode fails explicitly.
+        let weird_ping = json!({ "host": { "mode": "bogus" } });
+        let mode_err = resolve_endpoint_in(&dir, Some(&weird_ping)).unwrap_err();
+        assert!(mode_err.contains("bogus"), "expected unknown mode error, got: {mode_err}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

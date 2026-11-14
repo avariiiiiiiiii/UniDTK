@@ -5,12 +5,13 @@
 //! durability. Tables are created lazily on the first write.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition, TableError};
 use serde::{Deserialize, Serialize};
 
 const LOGS: TableDefinition<u64, &[u8]> = TableDefinition::new("logs");
@@ -42,6 +43,44 @@ impl Default for LogRetention {
             max_entries: 5000,
         }
     }
+}
+
+#[derive(Deserialize)]
+struct LogFilterHeader<'a> {
+    #[serde(borrow)]
+    level: Cow<'a, str>,
+    #[serde(borrow)]
+    source: Cow<'a, str>,
+}
+
+fn normalized_filter(filter: Option<&str>) -> Option<&str> {
+    filter.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn level_matches(stored: &str, requested: &str) -> bool {
+    stored.eq_ignore_ascii_case(requested)
+        || (requested.eq_ignore_ascii_case("WARNING") && stored.eq_ignore_ascii_case("WARN"))
+}
+
+fn deserialize_matching(
+    bytes: &[u8],
+    level_filter: Option<&str>,
+    source_filter: Option<&str>,
+) -> Option<LogEntry> {
+    if level_filter.is_some() || source_filter.is_some() {
+        let header: LogFilterHeader<'_> = serde_json::from_slice(bytes).ok()?;
+        if let Some(lf) = level_filter {
+            if !level_matches(header.level.as_ref(), lf) {
+                return None;
+            }
+        }
+        if let Some(sf) = source_filter {
+            if header.source.as_ref() != sf {
+                return None;
+            }
+        }
+    }
+    serde_json::from_slice::<LogEntry>(bytes).ok()
 }
 
 /// Dedicated redb store for UniDTK logs.
@@ -113,10 +152,16 @@ impl LogStore {
         level_filter: Option<&str>,
         source_filter: Option<&str>,
     ) -> Result<Vec<LogEntry>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let level_filter = normalized_filter(level_filter);
+        let source_filter = normalized_filter(source_filter);
         let txn = self.db.begin_read().map_err(|e| e.to_string())?;
         let table = match txn.open_table(LOGS) {
             Ok(t) => t,
-            Err(_) => return Ok(Vec::new()),
+            Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
         };
         let mut entries: Vec<LogEntry> = Vec::with_capacity(limit.min(1000));
         let range = table.range::<u64>(..).map_err(|e| e.to_string())?;
@@ -125,44 +170,86 @@ impl LogStore {
                 break;
             }
             let (_, v) = item.map_err(|e| e.to_string())?;
-            let entry: LogEntry = match serde_json::from_slice(v.value()) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if let Some(lf) = level_filter {
-                if !lf.is_empty() && !entry.level.eq_ignore_ascii_case(lf) {
-                    continue;
-                }
+            if let Some(entry) = deserialize_matching(v.value(), level_filter, source_filter) {
+                entries.push(entry);
             }
-            if let Some(sf) = source_filter {
-                if !sf.is_empty() && entry.source != *sf {
-                    continue;
-                }
-            }
-            entries.push(entry);
         }
         Ok(entries)
     }
 
     /// Entries with `id > since_id`, ascending (oldest to newest).
+    #[cfg(test)]
     pub fn get_since(&self, since_id: u64, limit: Option<usize>) -> Result<Vec<LogEntry>, String> {
+        self.get_since_filtered(since_id, limit, None, None)
+    }
+
+    /// Entries with `id > since_id`, ascending (oldest to newest), filtered before `limit`.
+    pub fn get_since_filtered(
+        &self,
+        since_id: u64,
+        limit: Option<usize>,
+        level_filter: Option<&str>,
+        source_filter: Option<&str>,
+    ) -> Result<Vec<LogEntry>, String> {
+        let limit = limit.unwrap_or(1000);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let level_filter = normalized_filter(level_filter);
+        let source_filter = normalized_filter(source_filter);
         let txn = self.db.begin_read().map_err(|e| e.to_string())?;
         let table = match txn.open_table(LOGS) {
             Ok(t) => t,
-            Err(_) => return Ok(Vec::new()),
+            Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
         };
-        let limit = limit.unwrap_or(1000);
+        let mut entries = Vec::with_capacity(limit.min(128));
+        let range = table
+            .range::<u64>((std::ops::Bound::Excluded(since_id), std::ops::Bound::Unbounded))
+            .map_err(|e| e.to_string())?;
+        for item in range {
+            if entries.len() >= limit {
+                break;
+            }
+            let (_, v) = item.map_err(|e| e.to_string())?;
+            if let Some(entry) = deserialize_matching(v.value(), level_filter, source_filter) {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Snapshot both `max_id` and entries with `id > since_id` inside one read transaction.
+    pub fn get_delta(&self, since_id: u64, limit: usize) -> Result<(u64, Vec<LogEntry>), String> {
+        let txn = self.db.begin_read().map_err(|e| e.to_string())?;
+        let table = match txn.open_table(LOGS) {
+            Ok(t) => t,
+            Err(TableError::TableDoesNotExist(_)) => return Ok((since_id, Vec::new())),
+            Err(e) => return Err(e.to_string()),
+        };
+        let max_id = table
+            .range::<u64>(..)
+            .map_err(|e| e.to_string())?
+            .next_back()
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .map(|(k, _)| k.value())
+            .unwrap_or(0)
+            .max(since_id);
+        if limit == 0 {
+            return Ok((max_id, Vec::new()));
+        }
         let mut entries = Vec::with_capacity(limit.min(128));
         let range = table
             .range::<u64>((std::ops::Bound::Excluded(since_id), std::ops::Bound::Unbounded))
             .map_err(|e| e.to_string())?;
         for item in range.take(limit) {
             let (_, v) = item.map_err(|e| e.to_string())?;
-            if let Ok(entry) = serde_json::from_slice::<LogEntry>(v.value()) {
+            if let Some(entry) = deserialize_matching(v.value(), None, None) {
                 entries.push(entry);
             }
         }
-        Ok(entries)
+        Ok((max_id, entries))
     }
 
     /// Remove all entries (and counters); returns how many were removed.
@@ -490,6 +577,74 @@ mod tests {
         let delta_lim = store.get_since(1, Some(2)).unwrap();
         assert_eq!(delta_lim.len(), 2);
         assert_eq!(delta_lim[0].id, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_get_since_filtered_applies_level_and_source_before_limit_and_clamps_zero() {
+        let dir = std::env::temp_dir().join(format!("test_shell_logs_since_filtered_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Fresh store without writes handles TableDoesNotExist cleanly as empty.
+        let empty_dir = std::env::temp_dir().join(format!("test_shell_logs_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty_dir);
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let empty_store = LogStore::open(empty_dir.join("logs.redb")).unwrap();
+        assert!(empty_store.get_since_filtered(0, Some(10), Some("ERROR"), None).unwrap().is_empty());
+        let (empty_max, empty_entries) = empty_store.get_delta(5, 10).unwrap();
+        assert_eq!(empty_max, 5);
+        assert!(empty_entries.is_empty());
+        let _ = std::fs::remove_dir_all(&empty_dir);
+
+        let store = LogStore::open(dir.join("logs.redb")).unwrap();
+        store
+            .insert_batch(&[
+                entry(1, 1001, "ERROR", "frontend", "before since"),
+                entry(2, 1002, "INFO", "backend", "noise 1"),
+                entry(3, 1003, "INFO", "frontend", "noise 2"),
+                entry(4, 1004, "ERROR", "backend", "wrong source"),
+                entry(5, 1005, "ERROR", "frontend", "hit 1"),
+                entry(6, 1006, "WARN", "frontend", "warn hit"),
+                entry(7, 1007, "ERROR", "frontend", "hit 2"),
+                entry(8, 1008, "ERROR", "frontend", "hit 3"),
+            ])
+            .unwrap();
+
+        // Filter must apply before limit: 3 non-matching entries (2..=4) precede hit 1 (5).
+        let hits = store
+            .get_since_filtered(1, Some(2), Some("error"), Some("frontend"))
+            .unwrap();
+        let ids: Vec<u64> = hits.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![5, 7]);
+
+        // "warning" alias matches stored normalized "WARN" rows.
+        let warns = store
+            .get_since_filtered(1, Some(10), Some(" warning "), Some("frontend"))
+            .unwrap();
+        assert_eq!(warns.len(), 1);
+        assert_eq!(warns[0].id, 6);
+
+        // `since_id == u64::MAX` must not overflow or wrap.
+        assert!(store.get_since_filtered(u64::MAX, Some(10), None, None).unwrap().is_empty());
+
+        // `get_delta` snapshots both max_id and ascending entries.
+        let (delta_max, delta_entries) = store.get_delta(6, 10).unwrap();
+        assert_eq!(delta_max, 8);
+        assert_eq!(delta_entries.iter().map(|e| e.id).collect::<Vec<_>>(), vec![7, 8]);
+
+        // Empty/whitespace filter strings mean unfiltered, preserving ascending id order.
+        let unfiltered = store.get_since_filtered(6, Some(10), Some("  "), Some("")).unwrap();
+        let unfiltered_ids: Vec<u64> = unfiltered.iter().map(|e| e.id).collect();
+        assert_eq!(unfiltered_ids, vec![7, 8]);
+
+        // limit = 0 returns empty in both list and get_since_filtered.
+        assert!(store.list(0, None, None).unwrap().is_empty());
+        assert!(store
+            .get_since_filtered(0, Some(0), Some("ERROR"), None)
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
