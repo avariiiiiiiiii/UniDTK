@@ -201,6 +201,14 @@ pub(crate) fn is_shutting_down() -> bool {
     SHUTDOWN.is_started()
 }
 
+/// Keeps the kernel alive when closing/destroying the last Tauri window
+/// (e.g. destroying `"wallpaper"` during `Web -> Native` switch or closing
+/// `"weather-location"` while in `HostMode::Native`), unless explicit exit or
+/// shutdown has been requested.
+pub(crate) fn should_prevent_implicit_exit(exit_code: Option<i32>, shutting_down: bool) -> bool {
+    exit_code.is_none() && !shutting_down
+}
+
 /// Module context: its own database slice + AppHandle as host state.
 /// If redb failed to open, the module receives an empty stub; modules that do not
 /// need the database must still start in degraded mode.
@@ -965,6 +973,9 @@ pub(crate) fn switch_desk_host(app: &tauri::AppHandle, target: HostMode) -> Resu
                 input::start_native_listeners();
                 Ok(())
             });
+            if is_shutting_down() {
+                return Err("application is shutting down".into());
+            }
             host_supervisor::start_host(ws::port(), ws::token())?;
         }
         HostMode::Web => {
@@ -1326,6 +1337,26 @@ mod frontend_contract_tests {
         assert_ne!(
             crate::HostMode::Web.tray_switch_label(),
             crate::HostMode::Native.tray_switch_label()
+        );
+    }
+
+    #[test]
+    fn implicit_last_window_exit_is_prevented_unless_shutting_down() {
+        assert!(
+            crate::should_prevent_implicit_exit(None, false),
+            "destroying the last Tauri window (e.g., WebView -> Native switch) must not kill the kernel"
+        );
+        assert!(
+            !crate::should_prevent_implicit_exit(Some(0), false),
+            "explicit app.exit(0) must allow the event loop to exit"
+        );
+        assert!(
+            !crate::should_prevent_implicit_exit(None, true),
+            "once shutdown latched, ExitRequested must complete shutdown and exit"
+        );
+        assert!(
+            !crate::should_prevent_implicit_exit(Some(0), true),
+            "quit_app / explicit shutdown exit must proceed cleanly"
         );
     }
 }
@@ -1690,11 +1721,16 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("tauri build")
         .run(|app, event| {
-            if let RunEvent::ExitRequested { .. } = event {
-                log_line("run: exit requested");
-                // Never block the main event loop here; the awaited variant is
-                // used by quit_app and the session-end handler instead.
-                app_shutdown(app, false);
+            if let RunEvent::ExitRequested { api, code, .. } = event {
+                if should_prevent_implicit_exit(code, is_shutting_down()) {
+                    log_line("run: implicit last-window exit prevented");
+                    api.prevent_exit();
+                } else {
+                    log_line("run: exit requested");
+                    // Never block the main event loop here; the awaited variant is
+                    // used by quit_app and the session-end handler instead.
+                    app_shutdown(app, false);
+                }
             }
         });
 }

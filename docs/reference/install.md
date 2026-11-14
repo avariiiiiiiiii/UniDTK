@@ -26,7 +26,7 @@ r[install.one-build-command]
 
 The release is built and installed only by `udtk build [-j N]`. It stops the application, builds the four binaries and the NSIS installer in one `cargo tauri build --bundles nsis`, installs silently into Program Files, verifies the installed files by SHA-256, restarts the application, and waits for live IPC. Building with plain `cargo build` or copying binaries into Program Files is not allowed: a hand copy does not register the scheduled tasks. `udtk build` cannot run from the Program Files copy, because that directory is not writable.
 
-The fourth binary, `unidtk-desktop.exe`, is the experimental standalone Rune host. The installer carries it and the CLI verifies its SHA-256, but the scheduled task and ordinary `udtk run` still start `unidtk.exe`. Native startup is explicit with `udtk host run`; see [the host plan](../dev/plan-rune-host.md).
+The fourth binary, `unidtk-desktop.exe`, is the native Rune desktop host. The installer carries it and `udtk build` verifies its SHA-256 alongside `unidtk.exe`, `udtk.exe`, and `vpn-helper.exe`. Scheduled logon (`UniDTK`) and `udtk run` always start `unidtk.exe`, which supervises `unidtk-desktop.exe` inside a Win32 Job Object (`KILL_ON_JOB_CLOSE`) whenever the `desk.host` setting in `unidtk.redb` is `"native"` and keeps `"web"` (WebView2) as the default until G5. Standalone startup for isolated testing uses `udtk host run`; see [the host plan](../dev/plan-rune-host.md).
 
 Tasks and the `PATH` entry are set up by the installer (`toolchain/windows/hooks.nsh` runs `udtk tasks register all` and `udtk path ensure`), not by the first launch.
 

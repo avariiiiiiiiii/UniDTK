@@ -18,8 +18,8 @@ udtk stop
 
 `stop` makes the app's files replaceable. It runs in three steps:
 
-1. If CDP is reachable, it asks the page to quit through its harness (`h.invoke('quit_app')`). The command `quit_app` is defined in [core/kernel/main.rs](../../core/kernel/main.rs). In that case it allows **3500 ms** for the quit.
-2. It then polls for processes whose executable lies under the install directory, excluding itself. The total wait is the grace period plus **2500 ms**. The poll uses PowerShell and `Win32_Process`.
+1. It probes kernel `ping`. When `host.mode` is `"native"`, it skips `host::quit()` (because `HostSupervisor` would respawn the child) and proceeds directly to terminating `unidtk.exe`, whose `KILL_ON_JOB_CLOSE` Job Object tears down `unidtk-desktop.exe` cleanly. Otherwise it attempts `host::quit()` (for any standalone host) and, if CDP is reachable, asks the page to quit through `h.invoke('quit_app')` (from [core/kernel/main.rs](../../core/kernel/main.rs)), allowing **6000 ms** for graceful exit when acknowledged.
+2. When not already past deadline, it polls for processes whose executable lies under the install directory, excluding itself (`Win32_Process`).
 3. If processes remain after the deadline, it runs `taskkill /F` on each. Finally it runs `schtasks /end` for the elevated tasks (`UniDTKSingbox`, `UniDTKVpnStop`).
 
 It then looks at the install directory again, for up to two more seconds, because a killed process takes a moment to leave the list. If nothing is left it prints `stopped` (or `stopped (N process(es) had to be killed)`) and exits 0. If something is still running it fails with `still running after quit and kill: pid ...`, and `udtk build` and the installer's pre-install hook stop there instead of failing later with an opaque `os error 32`.

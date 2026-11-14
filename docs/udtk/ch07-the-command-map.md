@@ -7,9 +7,9 @@
 | `udtk invoke <cmd> [json]` | Calls one socket command | Yes |
 | `udtk logs [filters]` | Reads journal records through the socket | Yes |
 | `udtk gui [--json] [--force] <step>...` | Runs a batch of steps in the page over one CDP session | Yes, plus CDP |
-| `udtk shot [path] [--json] [-q]` | Saves a PNG of the window through CDP | Yes, plus CDP |
+| `udtk shot [path] [--json] [-q]` | Saves a PNG of the window (CDP in `web` mode, inspector GPU readback in `native` mode or with `--host`) | Yes |
 | `udtk cdp-list` | Lists the CDP targets | Yes, plus CDP |
-| `udtk host [run\|ping\|tree\|frames\|shot\|hit\|click\|quit]` | Inspects and drives the native desktop host (`unidtk-desktop`) through its inspector door, `127.0.0.1:26541` | No, the host |
+| `udtk host [run\|ping\|tree\|frames\|shot\|hit\|click\|quit]` | Inspects and drives the native desktop host (`unidtk-desktop`) via supervised `host-inspector.<pid>.json` or `host-standalone.json` | No, the host |
 | `udtk tasks [status\|register\|unregister\|cleanup-old]` | Manages the Windows scheduled tasks | No |
 | `udtk autostart [status\|enable\|disable]` | Controls the logon task `UniDTK` | No |
 | `udtk path [status\|ensure\|remove]` | Checks, adds or removes the install directory in the User PATH | No |

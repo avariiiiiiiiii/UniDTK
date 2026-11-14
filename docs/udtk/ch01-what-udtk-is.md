@@ -29,7 +29,7 @@ path = "../core/desktop/main.rs"
 | `unidtk.exe` | [core/kernel/main.rs](../../core/kernel/main.rs) | The application: kernel, WebView, IPC server, modules |
 | `udtk.exe` | [opt/cli/main.rs](../../opt/cli/main.rs) | This CLI |
 | `vpn-helper.exe` | [modules/vpn/helper/main.rs](../../modules/vpn/helper/main.rs) | A GUI-subsystem helper for the VPN, run as a scheduled task |
-| `unidtk-desktop.exe` | [core/desktop/main.rs](../../core/desktop/main.rs) | The experimental standalone Rune window; started explicitly with `udtk host run` |
+| `unidtk-desktop.exe` | [core/desktop/main.rs](../../core/desktop/main.rs) | The native Rune desktop host; supervised by `unidtk.exe` when `desk.host` is `native`, or launched standalone via `udtk host run` |
 
 Nothing else is needed at run time. There are no script wrappers, no Node.js, and no external runtime.
 

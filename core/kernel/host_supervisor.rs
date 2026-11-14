@@ -20,8 +20,10 @@ use serde::{Deserialize, Serialize};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, DuplicateHandle, SetHandleInformation, DUPLICATE_SAME_ACCESS, HANDLE,
-    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
+    HANDLE_FLAG_INHERIT,
 };
+#[cfg(test)]
+use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -267,6 +269,7 @@ impl HostProcess {
         self.process.duplicate()
     }
 
+    #[cfg(test)]
     pub fn wait_exit(&self, timeout: Duration) -> bool {
         let ms = timeout.as_millis().min((u32::MAX - 1) as u128) as u32;
         unsafe { WaitForSingleObject(self.process.raw(), ms) == WAIT_OBJECT_0 }

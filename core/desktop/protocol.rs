@@ -17,6 +17,7 @@ pub const IO_DEADLINE: Duration = Duration::from_secs(3);
 
 /// One newline-terminated message with an absolute deadline: a slow sender cannot
 /// keep a worker alive by sending a byte just before each socket timeout.
+#[allow(dead_code)] // The CLI (`opt/cli/host.rs`) compiles and uses this helper.
 pub fn read_line(stream: &mut TcpStream, limit: usize) -> Result<Vec<u8>, String> {
     read_line_within(stream, limit, IO_DEADLINE)
 }

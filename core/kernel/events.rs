@@ -60,6 +60,7 @@ struct Broker {
 }
 
 enum SubscriberSink {
+    #[cfg(test)]
     Legacy(crossbeam_channel::Sender<Frame>),
     Managed(Arc<SubscriberState>),
 }
@@ -123,6 +124,7 @@ fn is_state_event(event: &str) -> bool {
 ///
 /// The WebSocket door uses this to coalesce a burst into one message: replaying thirty
 /// 120 ms spectrum samples to a WebView buys nothing, one current value does.
+#[cfg(test)]
 pub fn is_state(event: &str) -> bool {
     is_state_event(event)
 }
@@ -163,6 +165,7 @@ pub fn publish(event: &str, payload: Value) {
         if let Ok(subscribers) = broker.subscribers.lock() {
             for (_, sink) in subscribers.iter() {
                 match sink {
+                    #[cfg(test)]
                     SubscriberSink::Legacy(sender) => {
                         let _ = sender.try_send(frame.clone());
                     }
@@ -183,6 +186,7 @@ pub fn publish(event: &str, payload: Value) {
 }
 
 /// Registers a subscriber and returns its id.
+#[cfg(test)]
 pub fn subscribe(sender: crossbeam_channel::Sender<Frame>) -> u64 {
     let broker = broker();
     let id = broker.next_subscriber.fetch_add(1, Ordering::SeqCst) + 1;
@@ -201,6 +205,7 @@ pub fn unsubscribe(id: u64) {
 
 /// What a fresh subscriber must be told: the newest value of each state event, so a page
 /// that just connected is not blind until the next change.
+#[cfg(test)]
 pub fn snapshot(event: &str) -> Option<Frame> {
     let rings = broker().rings.lock().ok()?;
     rings.get(event).and_then(|ring| ring.back().cloned())
@@ -342,6 +347,7 @@ pub fn subscribe_with_capacity(capacity: usize, wake: WakeHook) -> Subscription 
 
 /// Frames after `cursor` for one event, or `None` when the ring no longer covers it —
 /// the caller must then tell the client about the gap rather than send a partial stream.
+#[cfg(test)]
 pub fn replay(event: &str, cursor: u64) -> Option<Vec<Frame>> {
     let rings = broker().rings.lock().ok()?;
     replay_from_rings(&rings, event, cursor)
