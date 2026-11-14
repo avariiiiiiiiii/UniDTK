@@ -6,6 +6,7 @@ use std::io::Read;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
 pub const PORT: u16 = 26541;
 pub const VERSION: u32 = 1;
 pub const MAX_REQUEST: usize = 16 * 1024;
@@ -17,7 +18,11 @@ pub const IO_DEADLINE: Duration = Duration::from_secs(3);
 /// One newline-terminated message with an absolute deadline: a slow sender cannot
 /// keep a worker alive by sending a byte just before each socket timeout.
 pub fn read_line(stream: &mut TcpStream, limit: usize) -> Result<Vec<u8>, String> {
-    let deadline = Instant::now() + IO_DEADLINE;
+    read_line_within(stream, limit, IO_DEADLINE)
+}
+
+pub fn read_line_within(stream: &mut TcpStream, limit: usize, window: Duration) -> Result<Vec<u8>, String> {
+    let deadline = Instant::now() + window;
     let mut bytes = Vec::new();
     loop {
         let remaining = deadline.checked_duration_since(Instant::now()).ok_or("request deadline exceeded")?;

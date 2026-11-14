@@ -58,6 +58,36 @@ pub const DESK_HOST_GET: CommandSpec =
     CommandSpec::read_only("desk_host_get", "Active desktop host mode (web or native)", "");
 pub const DESK_HOST_SET: CommandSpec =
     CommandSpec::write("desk_host_set", "Switch desktop host mode between web and native", "{mode}");
+pub const HOST_REGISTER: CommandSpec = CommandSpec::write(
+    "host_register",
+    "Register supervised native desktop host state",
+    "{pid, generation, instanceNonce, inspectorPort, attached, ready}",
+);
+pub const SET_DESKTOP_INPUT_FOCUS: CommandSpec = CommandSpec::write(
+    "set_desktop_input_focus",
+    "Report focused text-input state from the active desktop host",
+    "{focused}",
+);
+pub const HOST_PING: CommandSpec = CommandSpec::read_only_cli(
+    "host_ping",
+    "Read native desktop host status via kernel proxy",
+    "",
+);
+pub const HOST_TREE: CommandSpec = CommandSpec::read_only_cli(
+    "host_tree",
+    "Read native desktop element tree via kernel proxy",
+    "",
+);
+pub const HOST_FRAMES: CommandSpec = CommandSpec::read_only_cli(
+    "host_frames",
+    "Read native desktop frame metrics via kernel proxy",
+    "",
+);
+pub const HOST_HIT: CommandSpec = CommandSpec::read_only_cli(
+    "host_hit",
+    "Test native desktop hit region at (x, y) via kernel proxy",
+    "{x, y}",
+);
 
 /// Read-only health probes `doctor -simulate` runs against the live app.
 ///
@@ -119,6 +149,12 @@ pub static ALL: &[&CommandSpec] = &[
     &WEATHER_LOCATION_REQUEST,
     &DESK_HOST_GET,
     &DESK_HOST_SET,
+    &HOST_REGISTER,
+    &SET_DESKTOP_INPUT_FOCUS,
+    &HOST_PING,
+    &HOST_TREE,
+    &HOST_FRAMES,
+    &HOST_HIT,
 ];
 
 /// Every command of the application: the kernel's, then each module's.

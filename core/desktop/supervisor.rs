@@ -17,6 +17,23 @@ pub enum ControlCommand {
     TaskbarCreated,
     Show,
     Stop,
+    InjectKey {
+        generation: u64,
+        vk: u32,
+        scan_code: u32,
+        extended: bool,
+        pressed: bool,
+        repeat: bool,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        win: bool,
+        text: Option<String>,
+        key_base: Option<char>,
+    },
+    FocusLost {
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +49,8 @@ pub trait ControlSink {
     fn on_taskbar_created(&mut self);
     fn on_show(&mut self);
     fn on_stop(&mut self, reason: &str);
+    fn on_inject_key(&mut self, _cmd: ControlCommand) {}
+    fn on_focus_lost(&mut self, _generation: u64) {}
 }
 
 pub fn read_control_stream<R: BufRead, S: ControlSink>(
@@ -73,6 +92,8 @@ pub fn read_control_stream<R: BufRead, S: ControlSink>(
                     }),
                     Ok(ControlCommand::TaskbarCreated) => sink.on_taskbar_created(),
                     Ok(ControlCommand::Show) => sink.on_show(),
+                    Ok(cmd @ ControlCommand::InjectKey { .. }) => sink.on_inject_key(cmd),
+                    Ok(ControlCommand::FocusLost { generation }) => sink.on_focus_lost(generation),
                     Ok(ControlCommand::Stop) => {
                         sink.on_stop("stop");
                         return Ok(());

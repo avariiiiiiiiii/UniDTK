@@ -65,10 +65,40 @@ static HOTKEYS: OnceLock<RwLock<Vec<HotkeyDefinition>>> = OnceLock::new();
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static INPUT_FOCUSED: AtomicBool = AtomicBool::new(false);
 static INPUT_GENERATION: AtomicU32 = AtomicU32::new(0);
+static HOST_PID: AtomicU32 = AtomicU32::new(0);
+static HOST_KEY_TX: OnceLock<SyncSender<crate::host_supervisor::ControlMessage>> = OnceLock::new();
 // Escape release stays with the original target across foreground changes.
 thread_local! {
     static ESC_TARGET: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
     static ESC_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ESC_NATIVE_GEN: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_host_pid(pid: u32) {
+    HOST_PID.store(pid, Ordering::Release);
+}
+
+pub fn clear_host_pid(pid: u32) {
+    let _ = HOST_PID.compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire);
+}
+
+pub fn is_host_pid(pid: u32) -> bool {
+    pid != 0 && HOST_PID.load(Ordering::Acquire) == pid
+}
+
+fn send_host_control(msg: crate::host_supervisor::ControlMessage) -> bool {
+    #[cfg(test)]
+    {
+        let sent = TEST_HOST_SINK.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|tx| tx.try_send(msg.clone()).is_ok())
+        });
+        if let Some(ok) = sent {
+            return ok;
+        }
+    }
+    HOST_KEY_TX.get().is_some_and(|tx| tx.try_send(msg).is_ok())
 }
 
 /// The kernel's own entries; a module adds its own through [`register_module_hotkeys`].
@@ -160,14 +190,28 @@ pub fn toggle_hotkey(id: &str, enabled: bool) -> Result<(), String> {
 pub fn set_input_focus(_app: &AppHandle, focused: bool) -> Result<(), String> {
     // A delayed DOM focus message cannot claim input after the user left us.
     let focused = focused && !matches!(foreground_class(), ForegroundClass::Foreign);
-    INPUT_FOCUSED.store(focused, Ordering::SeqCst);
+    let was_focused = INPUT_FOCUSED.swap(focused, Ordering::SeqCst);
     INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    if was_focused && !focused && crate::is_native_host() {
+        if let Some(generation) = crate::host_supervisor::active_generation() {
+            let _ = send_host_control(crate::host_supervisor::ControlMessage::FocusLost {
+                generation,
+            });
+        }
+    }
     Ok(())
 }
 
 pub fn reset_input_focus() {
-    INPUT_FOCUSED.store(false, Ordering::SeqCst);
+    let was_focused = INPUT_FOCUSED.swap(false, Ordering::SeqCst);
     INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    if was_focused && crate::is_native_host() {
+        if let Some(generation) = crate::host_supervisor::active_generation() {
+            let _ = send_host_control(crate::host_supervisor::ControlMessage::FocusLost {
+                generation,
+            });
+        }
+    }
 }
 
 /// Class of the foreground window at the moment Escape is pressed.
@@ -182,6 +226,16 @@ enum ForegroundClass {
     Foreign,
 }
 
+fn classify_foreground_pid(pid: u32, desktop_class: bool) -> ForegroundClass {
+    if pid == std::process::id() || is_host_pid(pid) {
+        ForegroundClass::Shell
+    } else if desktop_class {
+        ForegroundClass::Desktop
+    } else {
+        ForegroundClass::Foreign
+    }
+}
+
 fn foreground_class() -> ForegroundClass {
     #[cfg(test)]
     if let Some(class) = TEST_FOREGROUND.with(|value| value.get()) { return class; }
@@ -193,13 +247,7 @@ fn foreground_class() -> ForegroundClass {
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(fg, Some(&mut pid as *mut u32));
-        if pid == std::process::id() {
-            ForegroundClass::Shell
-        } else if crate::input::is_desktop_class(fg) {
-            ForegroundClass::Desktop
-        } else {
-            ForegroundClass::Foreign
-        }
+        classify_foreground_pid(pid, crate::input::is_desktop_class(fg))
     }
 }
 
@@ -210,6 +258,54 @@ fn forward_escape_to_shell(vk: u32, msg: u32, scan_code: isize) {
     // Original failsafe: Esc always releases the text-input capture,
     // otherwise after the field closes the hook would keep swallowing typing into a foreign window.
     reset_input_focus();
+
+    if crate::is_native_host() {
+        if is_down {
+            if ESC_DOWN.with(|slot| slot.replace(true)) {
+                return;
+            }
+            if matches!(foreground_class(), ForegroundClass::Desktop) {
+                if let Some(generation) = crate::host_supervisor::active_generation() {
+                    ESC_NATIVE_GEN.with(|slot| slot.set(Some(generation)));
+                    let _ = send_host_control(crate::host_supervisor::ControlMessage::InjectKey {
+                        generation,
+                        vk,
+                        scan_code: scan_code as u32,
+                        extended: false,
+                        pressed: true,
+                        repeat: false,
+                        shift: false,
+                        ctrl: false,
+                        alt: false,
+                        win: false,
+                        text: None,
+                        key_base: None,
+                    });
+                }
+            } else {
+                ESC_NATIVE_GEN.with(|slot| slot.set(None));
+            }
+        } else {
+            ESC_DOWN.with(|slot| slot.set(false));
+            if let Some(generation) = ESC_NATIVE_GEN.with(|slot| slot.take()) {
+                let _ = send_host_control(crate::host_supervisor::ControlMessage::InjectKey {
+                    generation,
+                    vk,
+                    scan_code: scan_code as u32,
+                    extended: false,
+                    pressed: false,
+                    repeat: false,
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                    win: false,
+                    text: None,
+                    key_base: None,
+                });
+            }
+        }
+        return;
+    }
 
     let target = if is_down {
         if ESC_DOWN.with(|slot| slot.replace(true)) {
@@ -235,7 +331,7 @@ fn forward_escape_to_shell(vk: u32, msg: u32, scan_code: isize) {
 
 // Ownership is local to the hook thread; system modifier pairs are never owned.
 #[derive(Clone, Copy)]
-struct KeyOwner { target: isize, key_messages: bool, scan: u32, extended: bool, generation: u32 }
+struct KeyOwner { target: isize, native_host: bool, key_messages: bool, scan: u32, extended: bool, generation: u32 }
 thread_local! {
     static KEY_OWNERS: std::cell::RefCell<[Option<KeyOwner>; 256]> = const {
         std::cell::RefCell::new([None; 256])
@@ -295,6 +391,99 @@ fn mask_start_menu() {
     }
 }
 
+fn vk_is_chord(ctrl: bool, vk: u32) -> bool {
+    ctrl && matches!(vk, 0x41 | 0x43 | 0x56 | 0x58 | 0x59 | 0x5A)
+}
+
+fn vk_is_navigation(vk: u32) -> bool {
+    matches!(vk, 0x08 | 0x09 | 0x0D | 0x1B | 0x2E | 0x23..=0x28)
+}
+
+unsafe fn translate_key_strings(
+    vk: u32,
+    scan_code: u32,
+    mods: Modifiers,
+) -> (Option<String>, Option<char>) {
+    let chord = vk_is_chord(mods.ctrl, vk);
+    let nav = vk_is_navigation(vk);
+    let fg = GetForegroundWindow();
+    let thread_id = if HWND::is_invalid(&fg) {
+        0
+    } else {
+        GetWindowThreadProcessId(fg, None)
+    };
+    let hkl = GetKeyboardLayout(thread_id);
+
+    let base_state = [0u8; 256];
+    let mut base_chars = [0u16; 8];
+    let base_count = ToUnicodeEx(vk, scan_code, &base_state, &mut base_chars, 0x04, hkl);
+    let key_base = if base_count > 0 {
+        String::from_utf16_lossy(&base_chars[..(base_count as usize).min(base_chars.len())])
+            .chars()
+            .find(|c| !c.is_control())
+    } else {
+        None
+    };
+
+    let text = if !mods.ctrl && !mods.alt && !mods.win && !chord && !nav {
+        let mut key_state = [0u8; 256];
+        let _ = GetKeyboardState(&mut key_state);
+        key_state[VK_SHIFT.0 as usize] = if mods.shift { 0x80 } else { 0 };
+        key_state[VK_CONTROL.0 as usize] = 0;
+        key_state[VK_MENU.0 as usize] = 0;
+        key_state[0x14] = (GetKeyState(0x14) as u8) & 1;
+        let mut chars = [0u16; 8];
+        let count = ToUnicodeEx(vk, scan_code, &key_state, &mut chars, 0x04, hkl);
+        if count > 0 {
+            let s = String::from_utf16_lossy(&chars[..(count as usize).min(chars.len())]);
+            if !s.is_empty() && !s.chars().all(|c| c.is_control()) {
+                Some(s)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    (text, key_base)
+}
+
+fn forward_host_key(
+    vk: u32,
+    scan_code: u32,
+    extended: bool,
+    pressed: bool,
+    repeat: bool,
+    mods: Modifiers,
+    text: Option<String>,
+    key_base: Option<char>,
+    generation: u64,
+) -> bool {
+    let sent = send_host_control(crate::host_supervisor::ControlMessage::InjectKey {
+        generation,
+        vk,
+        scan_code,
+        extended,
+        pressed,
+        repeat,
+        shift: mods.shift,
+        ctrl: mods.ctrl,
+        alt: mods.alt,
+        win: mods.win,
+        text,
+        key_base,
+    });
+    if sent && pressed && vk == VK_ESCAPE.0 as u32 {
+        let _ = send_host_control(crate::host_supervisor::ControlMessage::FocusLost {
+            generation,
+        });
+    }
+    sent
+}
+
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code < 0 { return CallNextHookEx(None, code, wparam, lparam); }
     let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
@@ -319,6 +508,23 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     });
     if let Some(owner) = owner {
         if up {
+            if owner.native_host {
+                if let Some(gen_id) = crate::host_supervisor::active_generation() {
+                    let mods = modifiers();
+                    let _ = forward_host_key(
+                        vk,
+                        owner.scan,
+                        owner.extended,
+                        false,
+                        false,
+                        mods,
+                        None,
+                        None,
+                        gen_id,
+                    );
+                }
+                return LRESULT(1);
+            }
             if owner.target != 0 && owner.key_messages && crate::input::is_key_target(HWND(owner.target as _)) {
                 let _ = PostMessageW(HWND(owner.target as _), WM_KEYUP, WPARAM(vk as usize),
                     key_lparam(owner.scan, owner.extended, true));
@@ -326,6 +532,29 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
             return LRESULT(1);
         }
         // Never leak repeats of a swallowed down into a newly active application.
+        if owner.native_host {
+            if matches!(foreground, ForegroundClass::Desktop)
+                && owner.generation == INPUT_GENERATION.load(Ordering::SeqCst)
+                && INPUT_FOCUSED.load(Ordering::SeqCst)
+            {
+                if let Some(gen_id) = crate::host_supervisor::active_generation() {
+                    let mods = modifiers();
+                    let (text, key_base) = translate_key_strings(vk, owner.scan, mods);
+                    let _ = forward_host_key(
+                        vk,
+                        owner.scan,
+                        owner.extended,
+                        true,
+                        true,
+                        mods,
+                        text,
+                        key_base,
+                        gen_id,
+                    );
+                }
+            }
+            return LRESULT(1);
+        }
         if matches!(foreground, ForegroundClass::Desktop) && owner.target != 0
             && owner.generation == INPUT_GENERATION.load(Ordering::SeqCst)
             && INPUT_FOCUSED.load(Ordering::SeqCst) && crate::input::is_key_target(HWND(owner.target as _)) {
@@ -362,7 +591,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         if ACTIONS.get().is_some_and(|tx| tx.try_send(key.id.clone()).is_ok()) {
             if key.swallow {
                 if key.win_required { mask_start_menu(); }
-                remember_key(vk, KeyOwner { target: 0, key_messages: false,
+                remember_key(vk, KeyOwner { target: 0, native_host: false, key_messages: false,
                     scan: kb.scanCode, extended: kb.flags.0 & 1 != 0,
                     generation: INPUT_GENERATION.load(Ordering::SeqCst) });
                 return LRESULT(1);
@@ -374,6 +603,35 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     if !matches!(foreground, ForegroundClass::Desktop)
         || !INPUT_FOCUSED.load(Ordering::SeqCst) || win || alt
     { return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) }; }
+
+    if crate::is_native_host() {
+        let Some(gen_id) = crate::host_supervisor::active_generation() else {
+            reset_input_focus();
+            return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) };
+        };
+        let chord = vk_is_chord(ctrl, vk);
+        let navigation = vk_is_navigation(vk);
+        if ctrl && !chord && !navigation {
+            return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) };
+        }
+        let mods = Modifiers { win, ctrl, alt, shift };
+        let (text, key_base) = translate_key_strings(vk, kb.scanCode, mods);
+        let extended = kb.flags.0 & 1 != 0;
+        let repeat = owner.is_some();
+        if forward_host_key(vk, kb.scanCode, extended, true, repeat, mods, text, key_base, gen_id) {
+            remember_key(vk, KeyOwner {
+                target: 0,
+                native_host: true,
+                key_messages: chord || navigation,
+                scan: kb.scanCode,
+                extended,
+                generation: INPUT_GENERATION.load(Ordering::SeqCst),
+            });
+            return LRESULT(1);
+        }
+        return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) };
+    }
+
     let target = owner.filter(|owned| owned.target != 0).map(|owned| HWND(owned.target as _))
         .or_else(crate::input::get_last_key_target);
     let Some(target) = target else {
@@ -407,7 +665,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
             PostMessageW(target, WM_CHAR, WPARAM(*ch as usize), LPARAM(1)).is_ok())
     };
     if delivered {
-        remember_key(vk, KeyOwner { target: target.0 as isize, key_messages,
+        remember_key(vk, KeyOwner { target: target.0 as isize, native_host: false, key_messages,
             scan: kb.scanCode, extended: kb.flags.0 & 1 != 0,
             generation: INPUT_GENERATION.load(Ordering::SeqCst) });
         return LRESULT(1);
@@ -417,6 +675,14 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
 
 pub fn init(app: AppHandle) {
     let _ = APP_HANDLE.set(app);
+    let (host_tx, host_rx) = sync_channel::<crate::host_supervisor::ControlMessage>(256);
+    let _ = HOST_KEY_TX.set(host_tx);
+    std::thread::Builder::new().name("host-key-forwarder".into()).spawn(move || {
+        while let Ok(msg) = host_rx.recv() {
+            if crate::is_shutting_down() { break; }
+            let _ = crate::host_supervisor::send_control(&msg);
+        }
+    }).expect("spawn host key forwarder");
     let (tx, rx) = sync_channel::<String>(32);
     let _ = ACTIONS.set(tx);
     std::thread::Builder::new().name("hotkey-actions".into()).spawn(move || {
@@ -486,10 +752,46 @@ pub fn shutdown() {
 }
 
 #[cfg(test)]
+struct TestHostSinkGuard;
+
+#[cfg(test)]
+impl Drop for TestHostSinkGuard {
+    fn drop(&mut self) {
+        TEST_HOST_SINK.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn install_test_host_sink(
+    tx: SyncSender<crate::host_supervisor::ControlMessage>,
+) -> TestHostSinkGuard {
+    TEST_HOST_SINK.with(|slot| *slot.borrow_mut() = Some(tx));
+    TestHostSinkGuard
+}
+
+#[cfg(test)]
+fn translate_and_forward_test_key(
+    vk: u32,
+    scan_code: u32,
+    extended: bool,
+    pressed: bool,
+    repeat: bool,
+    mods: Modifiers,
+    text: Option<String>,
+    key_base: Option<char>,
+    generation: u64,
+) -> bool {
+    forward_host_key(
+        vk, scan_code, extended, pressed, repeat, mods, text, key_base, generation,
+    )
+}
+
+#[cfg(test)]
 thread_local! {
     static TEST_FOREGROUND: std::cell::Cell<Option<ForegroundClass>> = const { std::cell::Cell::new(None) };
     static TEST_MODIFIERS: std::cell::Cell<Option<Modifiers>> = const { std::cell::Cell::new(None) };
     static START_MASKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static TEST_HOST_SINK: std::cell::RefCell<Option<SyncSender<crate::host_supervisor::ControlMessage>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -517,7 +819,7 @@ mod input_safety_tests {
             assert_ne!(callback(vk, WM_KEYUP), 1);
         }
         TEST_FOREGROUND.with(|slot| slot.set(Some(ForegroundClass::Foreign)));
-        remember_key(0x45, KeyOwner { target: 0, key_messages: false, scan: 18,
+        remember_key(0x45, KeyOwner { target: 0, native_host: false, key_messages: false, scan: 18,
             extended: false, generation: INPUT_GENERATION.load(Ordering::SeqCst) });
         assert_eq!(callback(0x45, WM_KEYDOWN), 1, "leaked owned repeat after switch");
         assert_eq!(callback(0x45, WM_KEYUP), 1, "lost owned release after switch");
@@ -564,5 +866,65 @@ mod input_safety_tests {
         KEY_OWNERS.with(|keys| *keys.borrow_mut() = [None; 256]);
         TEST_MODIFIERS.with(|slot| slot.set(None));
         TEST_FOREGROUND.with(|slot| slot.set(None));
+    }
+
+    #[test]
+    fn hotkeys_treat_host_pid_as_shell_and_forward_lossless_keys_via_try_send() {
+        set_host_pid(55555);
+        assert!(is_host_pid(55555));
+        assert!(matches!(classify_foreground_pid(55555, true), ForegroundClass::Shell));
+        clear_host_pid(55555);
+        assert!(!is_host_pid(55555));
+
+        let (tx, rx) = sync_channel::<crate::host_supervisor::ControlMessage>(16);
+        let _sink = install_test_host_sink(tx);
+
+        // Ctrl+A with key_base 'ф' (Russian layout)
+        let ev_ctrl_a = translate_and_forward_test_key(
+            0x41, 30, false, true, false,
+            Modifiers { ctrl: true, ..Modifiers::default() },
+            None, Some('ф'), 9,
+        );
+        assert!(ev_ctrl_a, "focused native host must forward Ctrl+A");
+
+        // Enter key
+        assert!(translate_and_forward_test_key(
+            0x0D, 28, false, true, false,
+            Modifiers::default(),
+            None, None, 9,
+        ));
+
+        // Escape triggers FocusLost + forwards Escape cleanly
+        assert!(translate_and_forward_test_key(
+            0x1B, 1, false, true, false,
+            Modifiers::default(),
+            None, None, 9,
+        ));
+
+        let msg1 = rx.try_recv().expect("Ctrl+A message");
+        match msg1 {
+            crate::host_supervisor::ControlMessage::InjectKey { generation, vk, ctrl, key_base, .. } => {
+                assert_eq!(generation, 9);
+                assert_eq!(vk, 0x41);
+                assert!(ctrl);
+                assert_eq!(key_base, Some('ф'));
+            }
+            other => panic!("expected InjectKey for Ctrl+A, got {other:?}"),
+        }
+        let msg2 = rx.try_recv().expect("Enter message");
+        assert!(matches!(msg2, crate::host_supervisor::ControlMessage::InjectKey { vk: 0x0D, .. }));
+
+        // Verify Escape sent and FocusLost emitted on blur/reset
+        let mut saw_escape = false;
+        let mut saw_focus_lost = false;
+        while let Ok(m) = rx.try_recv() {
+            match m {
+                crate::host_supervisor::ControlMessage::InjectKey { vk: 0x1B, .. } => saw_escape = true,
+                crate::host_supervisor::ControlMessage::FocusLost { .. } => saw_focus_lost = true,
+                _ => {}
+            }
+        }
+        assert!(saw_escape, "Escape must forward");
+        assert!(saw_focus_lost, "Escape/reset must emit FocusLost");
     }
 }

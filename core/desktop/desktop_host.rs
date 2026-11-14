@@ -20,6 +20,107 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static HOST: Mutex<Option<String>> = Mutex::new(None);
+static TEMP_FILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Holds process-wide ownership of a named Win32 mutex for single-instance exclusion.
+/// Intentionally `!Send`: Win32 mutexes must be released by the owning thread.
+pub struct NamedMutexGuard(windows::Win32::Foundation::HANDLE);
+
+impl Drop for NamedMutexGuard {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::ReleaseMutex;
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+impl NamedMutexGuard {
+    pub(crate) fn into_raw_for_test(self) -> usize {
+        let raw = self.0 .0 as usize;
+        std::mem::forget(self);
+        raw
+    }
+}
+
+/// Acquires `Local\UniDTK.DesktopHost`, recovering abandoned ownership from crashes.
+pub fn acquire_single_instance() -> Result<NamedMutexGuard, String> {
+    acquire_named_mutex("Local\\UniDTK.DesktopHost")
+}
+
+pub fn acquire_named_mutex(name: &str) -> Result<NamedMutexGuard, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let handle = CreateMutexW(None, false, PCWSTR(wide.as_ptr()))
+            .map_err(|e| format!("create desktop mutex {name}: {e}"))?;
+        let wait = WaitForSingleObject(handle, 0);
+        if wait == WAIT_OBJECT_0 {
+            return Ok(NamedMutexGuard(handle));
+        }
+        if wait == WAIT_ABANDONED {
+            note(&format!("recovered abandoned desktop host mutex {name}"));
+            return Ok(NamedMutexGuard(handle));
+        }
+        let _ = CloseHandle(handle);
+        Err(format!("desktop host instance mutex {name} already held"))
+    }
+}
+
+/// Resolves the current process user SID and builds a protected SDDL granting full
+/// access strictly to that user and LocalSystem (`SY`). Avoids `OW`, whose rights vary
+/// across elevation boundaries and atomic file replacement.
+pub fn user_owner_system_sddl() -> Result<String, String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    struct TokenHandle(HANDLE);
+    impl Drop for TokenHandle {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    unsafe {
+        let mut raw_token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token)
+            .map_err(|e| format!("OpenProcessToken: {e}"))?;
+        let token = TokenHandle(raw_token);
+
+        let mut needed = 0u32;
+        let _ = GetTokenInformation(token.0, TokenUser, None, 0, &mut needed);
+        if needed == 0 {
+            return Err("GetTokenInformation(TokenUser) returned zero length".into());
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        GetTokenInformation(token.0, TokenUser, Some(buffer.as_mut_ptr().cast()), needed, &mut needed)
+            .map_err(|e| format!("GetTokenInformation(TokenUser): {e}"))?;
+
+        let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
+        let mut sid_pwstr = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut sid_pwstr)
+            .map_err(|e| format!("ConvertSidToStringSidW: {e}"))?;
+        let mut len = 0usize;
+        while *sid_pwstr.0.add(len) != 0 {
+            len += 1;
+        }
+        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(sid_pwstr.0, len));
+        let _ = LocalFree(HLOCAL(sid_pwstr.0.cast()));
+        Ok(format!("D:P(A;;GA;;;{sid})(A;;GA;;;SY)"))
+    }
+}
 
 pub fn random_token() -> Result<String, String> {
     use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
@@ -28,9 +129,9 @@ pub fn random_token() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// The DACL is protected at creation, before any token byte exists. Only the file
-/// owner and SYSTEM can read it; atomic replacement preserves these permissions.
-pub fn write_private_token(path: &std::path::Path, token: &str) -> Result<(), String> {
+/// The DACL is protected at creation, before any secret byte exists. Only the resolved
+/// `TokenUser` SID and SYSTEM can read it; atomic replacement preserves these permissions.
+pub fn write_private_file_atomic(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
     use std::io::Write;
     use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
     use windows::core::PCWSTR;
@@ -38,34 +139,49 @@ pub fn write_private_token(path: &std::path::Path, token: &str) -> Result<(), St
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
     use windows::Win32::Storage::FileSystem::{CreateFileW, MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-    let temporary = path.with_extension(format!("{}.{}.tmp", std::process::id(), &token[..16]));
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create private dir: {e}"))?;
+        }
+    }
+    let sddl = user_owner_system_sddl()?;
+    let sddl_wide: Vec<u16> = std::ffi::OsStr::new(&sddl).encode_wide().chain(Some(0)).collect();
+    let seq = TEMP_FILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("tmp");
+    let temporary = path.with_extension(format!("{ext}.{}.{seq}.tmp", std::process::id()));
     let wide = |path: &std::path::Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
     let source = wide(&temporary);
     let target = wide(path);
     unsafe {
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(w!("D:P(A;;GA;;;OW)(A;;GA;;;SY)"), SDDL_REVISION_1, &mut descriptor, None)
-            .map_err(|e| format!("token ACL: {e}"))?;
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(sddl_wide.as_ptr()), SDDL_REVISION_1, &mut descriptor, None)
+            .map_err(|e| format!("private ACL: {e}"))?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: descriptor.0, bInheritHandle: BOOL(0),
         };
         let created = CreateFileW(PCWSTR(source.as_ptr()), GENERIC_WRITE.0, FILE_SHARE_READ, Some(&attributes), CREATE_NEW, FILE_ATTRIBUTE_NORMAL, None);
         let _ = LocalFree(HLOCAL(descriptor.0));
-        let handle = created.map_err(|e| format!("create private token: {e}"))?;
+        let handle = created.map_err(|e| format!("create private file: {e}"))?;
         let mut file = std::fs::File::from_raw_handle(handle.0);
-        let written = file.write_all(token.as_bytes()).and_then(|_| file.sync_all());
+        let written = file.write_all(contents).and_then(|_| file.sync_all());
         drop(file);
         if let Err(error) = written {
             let _ = std::fs::remove_file(&temporary);
-            return Err(format!("write token: {error}"));
+            return Err(format!("write private file: {error}"));
         }
         if let Err(error) = MoveFileExW(PCWSTR(source.as_ptr()), PCWSTR(target.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) {
             let _ = std::fs::remove_file(&temporary);
-            return Err(format!("publish token: {error}"));
+            return Err(format!("publish private file: {error}"));
         }
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+pub fn write_private_token(path: &std::path::Path, token: &str) -> Result<(), String> {
+    write_private_file_atomic(path, token.as_bytes())
 }
 
 pub fn note(line: &str) {
@@ -489,8 +605,9 @@ pub fn set_hit_region(hwnd: isize, rects: &[[i32; 4]]) -> Result<(), String> {
             CombineRgn(region, region, part, RGN_OR);
             let _ = DeleteObject(part);
         }
-        // The system owns the region from here on.
-        if SetWindowRgn(hwnd, region, true) == 0 {
+        // The system owns the region from here on; skip synchronous DWM repaint (`false`)
+        // because Rune presents asynchronously through DirectComposition.
+        if SetWindowRgn(hwnd, region, false) == 0 {
             let _ = DeleteObject(region);
             return Err("SetWindowRgn failed".into());
         }

@@ -585,6 +585,25 @@ fn set_desktop_input_focus(app: tauri::AppHandle, focused: bool) -> Result<(), S
     hotkeys::set_input_focus(&app, focused)
 }
 
+#[tauri::command(async)]
+fn host_register(
+    pid: u32,
+    generation: u64,
+    instance_nonce: String,
+    inspector_port: u16,
+    attached: bool,
+    ready: bool,
+) -> Result<(), String> {
+    host_supervisor::register_host(
+        pid,
+        generation,
+        &instance_nonce,
+        inspector_port,
+        attached,
+        ready,
+    )
+}
+
 #[allow(dead_code)]
 fn _placeholder() {}
 
@@ -943,13 +962,17 @@ pub(crate) fn switch_desk_host(app: &tauri::AppHandle, target: HostMode) -> Resu
                     let _ = window.destroy();
                 }
                 WALLPAPER_DESTROYING.store(false, std::sync::atomic::Ordering::Release);
+                input::start_native_listeners();
                 Ok(())
             });
             host_supervisor::start_host(ws::port(), ws::token())?;
         }
         HostMode::Web => {
             host_supervisor::stop_host(true);
-            run_on_main_thread(app, |app| create_wallpaper_window(&app))?;
+            run_on_main_thread(app, |app| {
+                input::stop_native_listeners();
+                create_wallpaper_window(&app)
+            })?;
             request_wallpaper_attach(app, true);
         }
     }
@@ -1435,6 +1458,7 @@ fn main() {
             open_explorer,
             desk_host_get,
             desk_host_set,
+            host_register,
             // core hotkeys & focus
             hotkeys_list,
             hotkey_toggle,
@@ -1637,6 +1661,7 @@ fn main() {
                     request_wallpaper_visible(app.handle());
                 }
                 HostMode::Native => {
+                    input::start_native_listeners();
                     if let Err(err) = host_supervisor::start_host(ws::port(), ws::token()) {
                         log_line(format!("setup: failed to start native host: {err}"));
                     }

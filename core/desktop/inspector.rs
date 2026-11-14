@@ -4,7 +4,8 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use base64::Engine;
@@ -12,6 +13,8 @@ use serde_json::{json, Value};
 use crate::protocol::{self, PORT};
 
 const MAX_CLIENTS: usize = 4;
+const PRIORITY_SLOTS: usize = 1;
+const PRIORITY_READ_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Default)]
 pub struct Snapshot {
@@ -34,9 +37,13 @@ pub struct Inspector {
     pub window: Mutex<Option<rune::WindowHandle>>,
     pub stopping: AtomicBool,
     pub failure: Mutex<Option<String>>,
+    data_dir: PathBuf,
     started: Instant,
     token: String,
+    supervised: AtomicBool,
+    bound_port: AtomicU16,
     clients: AtomicUsize,
+    priority_clients: AtomicUsize,
     listener: Mutex<Option<TcpListener>>,
     input: Mutex<()>,
     capture: Mutex<()>,
@@ -45,47 +52,124 @@ pub struct Inspector {
 
 impl Inspector {
     pub fn new() -> Result<Arc<Self>, String> {
+        Self::new_in(unidtk_api::paths::data_dir())
+    }
+
+    pub fn new_in(data_dir: PathBuf) -> Result<Arc<Self>, String> {
         Ok(Arc::new(Self {
             snapshot: Mutex::new(Snapshot::default()), hwnd: AtomicIsize::new(0),
             input_count: AtomicU64::new(0), window: Mutex::new(None),
             stopping: AtomicBool::new(false), failure: Mutex::new(None),
+            data_dir,
             started: Instant::now(), token: crate::desktop_host::random_token()?,
-            clients: AtomicUsize::new(0), listener: Mutex::new(None), input: Mutex::new(()), capture: Mutex::new(()),
+            supervised: AtomicBool::new(false), bound_port: AtomicU16::new(0),
+            clients: AtomicUsize::new(0), priority_clients: AtomicUsize::new(0),
+            listener: Mutex::new(None), input: Mutex::new(()), capture: Mutex::new(()),
             quit: Mutex::new(None),
         }))
     }
 
-    pub fn start(self: &Arc<Self>, quit: impl Fn() + Send + Sync + 'static) -> Result<(), String> {
-        // Binding first makes a duplicate start harmless to the current run's token.
-        let listener = TcpListener::bind(("127.0.0.1", PORT)).map_err(|e| format!("bind {PORT}: {e}"))?;
-        crate::desktop_host::write_private_token(&token_path(), &self.token)?;
+    pub fn port(&self) -> u16 {
+        self.bound_port.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_normal_clients(&self) -> usize {
+        self.clients.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_priority_clients(&self) -> usize {
+        self.priority_clients.load(Ordering::Acquire)
+    }
+
+    pub fn start(self: &Arc<Self>, supervised: bool, quit: impl Fn() + Send + Sync + 'static) -> Result<(), String> {
+        let preferred = if supervised { 0 } else { PORT };
+        self.start_on_port(supervised, preferred, quit)
+    }
+
+    pub(crate) fn start_on_port(
+        self: &Arc<Self>,
+        supervised: bool,
+        preferred_port: u16,
+        quit: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        let listener = if supervised || preferred_port == 0 {
+            TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind ephemeral: {e}"))?
+        } else {
+            match TcpListener::bind(("127.0.0.1", preferred_port)) {
+                Ok(listener) => listener,
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                    crate::desktop_host::note(&format!(
+                        "inspector: standalone port {preferred_port} in use ({error}), falling back to ephemeral"
+                    ));
+                    TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind fallback ephemeral: {e}"))?
+                }
+                Err(error) => return Err(format!("bind {preferred_port}: {error}")),
+            }
+        };
+        let port = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?.port();
+        self.supervised.store(supervised, Ordering::Release);
+        self.bound_port.store(port, Ordering::Release);
+
+        // Publish per-PID (and standalone when unsupervised) metadata only after binding succeeded.
+        write_metadata(&self.data_dir, std::process::id(), port, &self.token, supervised)?;
+
         let accepting = match listener.try_clone() {
             Ok(accepting) => accepting,
-            Err(error) => { self.remove_token(); return Err(format!("clone listener: {error}")); }
+            Err(error) => { self.remove_metadata(); return Err(format!("clone listener: {error}")); }
         };
         *self.listener.lock().unwrap() = Some(listener);
         *self.quit.lock().map_err(|e| e.to_string())? = Some(Box::new(quit));
         let inspector = self.clone();
         if let Err(error) = std::thread::Builder::new().name("host-inspector".into()).spawn(move || {
-            for stream in accepting.incoming().flatten() {
+            for mut stream in accepting.incoming().flatten() {
                 if inspector.stopping.load(Ordering::Acquire) { break; }
-                // Reserve before spawning: even a connect storm has at most four workers.
-                if inspector.clients.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_CLIENTS).then_some(n + 1)).is_err() {
+                let priority_only = if inspector.clients
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_CLIENTS).then_some(n + 1))
+                    .is_ok()
+                {
+                    false
+                } else if inspector.priority_clients
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < PRIORITY_SLOTS).then_some(n + 1))
+                    .is_ok()
+                {
+                    true
+                } else {
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(50)));
+                    let busy = json!({ "v": protocol::VERSION, "ok": false, "error": "busy: inspector client limit reached" });
+                    let _ = writeln!(stream, "{busy}");
+                    let _ = stream.flush();
                     drop(stream);
                     continue;
-                }
+                };
                 let worker = inspector.clone();
                 if std::thread::Builder::new().name("host-request".into()).spawn(move || {
-                    struct Permit(Arc<Inspector>);
-                    impl Drop for Permit {
-                        fn drop(&mut self) { self.0.clients.fetch_sub(1, Ordering::AcqRel); }
+                    struct Permit {
+                        inspector: Arc<Inspector>,
+                        priority_only: bool,
                     }
-                    let permit = Permit(worker);
-                    permit.0.serve(stream);
-                }).is_err() { inspector.clients.fetch_sub(1, Ordering::AcqRel); }
+                    impl Drop for Permit {
+                        fn drop(&mut self) {
+                            if self.priority_only {
+                                self.inspector.priority_clients.fetch_sub(1, Ordering::AcqRel);
+                            } else {
+                                self.inspector.clients.fetch_sub(1, Ordering::AcqRel);
+                            }
+                        }
+                    }
+                    let permit = Permit { inspector: worker, priority_only };
+                    permit.inspector.serve(stream, priority_only);
+                }).is_err() {
+                    if priority_only {
+                        inspector.priority_clients.fetch_sub(1, Ordering::AcqRel);
+                    } else {
+                        inspector.clients.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
             }
         }) {
-            self.remove_token();
+            self.remove_metadata();
             self.listener.lock().unwrap().take();
             return Err(format!("inspector thread: {error}"));
         }
@@ -94,18 +178,26 @@ impl Inspector {
 
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
-        // Keep the port reserved through cleanup: a following run must not publish
-        // a token between this run's comparison and its removal.
-        self.remove_token();
+        self.remove_metadata();
         // Wake the blocking listener once; idle serving installs no polling timer.
-        let _ = TcpStream::connect_timeout(&([127, 0, 0, 1], PORT).into(), Duration::from_millis(100));
+        let port = self.bound_port.load(Ordering::Acquire);
+        if port != 0 {
+            let _ = TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(100));
+        }
         self.listener.lock().unwrap().take();
     }
 
-    fn remove_token(&self) {
-        let path = token_path();
-        if std::fs::read_to_string(&path).ok().as_deref() == Some(self.token.as_str()) {
-            let _ = std::fs::remove_file(path);
+    fn remove_metadata(&self) {
+        let pid = std::process::id();
+        let pid_path = pid_metadata_path(&self.data_dir, pid);
+        if metadata_matches(&pid_path, pid, &self.token) {
+            let _ = std::fs::remove_file(pid_path);
+        }
+        if !self.supervised.load(Ordering::Acquire) {
+            let standalone = standalone_metadata_path(&self.data_dir);
+            if metadata_matches(&standalone, pid, &self.token) {
+                let _ = std::fs::remove_file(standalone);
+            }
         }
     }
 
@@ -122,14 +214,19 @@ impl Inspector {
         }
     }
 
-    fn serve(&self, mut stream: TcpStream) {
+    fn serve(&self, mut stream: TcpStream, priority_only: bool) {
         let _ = stream.set_write_timeout(Some(protocol::IO_DEADLINE));
         let mut quitting = false;
-        let result = protocol::read_line(&mut stream, protocol::MAX_REQUEST)
+        let read_window = if priority_only { PRIORITY_READ_WINDOW } else { protocol::IO_DEADLINE };
+        let result = protocol::read_line_within(&mut stream, protocol::MAX_REQUEST, read_window)
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|e| format!("bad json: {e}")))
             .and_then(|request| {
+                let cmd = request["cmd"].as_str().ok_or("cmd must be a string")?;
+                if priority_only && !matches!(cmd, "ping" | "quit") {
+                    return Err("busy: priority slot accepts only ping or quit".into());
+                }
                 let result = self.dispatch(&request)?;
-                quitting = request["cmd"] == "quit";
+                quitting = cmd == "quit";
                 Ok(result)
             });
         let reply = match result {
@@ -163,6 +260,8 @@ impl Inspector {
             };
             return Ok(json!({
                 "pid": std::process::id(), "proto": protocol::VERSION,
+                "port": self.port(),
+                "supervised": self.supervised.load(Ordering::Acquire),
                 "uptime_ms": self.started.elapsed().as_millis() as u64,
                 "attached": attached, "ready": ready,
                 "input_count": self.input_count.load(Ordering::Acquire),
@@ -267,7 +366,34 @@ impl Inspector {
     }
 }
 
-fn token_path() -> std::path::PathBuf { unidtk_api::paths::data_dir().join("host-inspector.token") }
+fn pid_metadata_path(dir: &std::path::Path, pid: u32) -> PathBuf {
+    dir.join(format!("host-inspector.{pid}.json"))
+}
+
+fn standalone_metadata_path(dir: &std::path::Path) -> PathBuf {
+    dir.join("host-standalone.json")
+}
+
+fn write_metadata(dir: &std::path::Path, pid: u32, port: u16, token: &str, supervised: bool) -> Result<(), String> {
+    let payload = json!({
+        "pid": pid,
+        "port": port,
+        "token": token,
+        "supervised": supervised,
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|e| format!("serialize host metadata: {e}"))?;
+    crate::desktop_host::write_private_file_atomic(&pid_metadata_path(dir, pid), &bytes)?;
+    if !supervised {
+        crate::desktop_host::write_private_file_atomic(&standalone_metadata_path(dir), &bytes)?;
+    }
+    Ok(())
+}
+
+fn metadata_matches(path: &std::path::Path, pid: u32, token: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else { return false; };
+    let Ok(meta) = serde_json::from_str::<Value>(&raw) else { return false; };
+    meta["pid"].as_u64() == Some(pid as u64) && meta["token"].as_str() == Some(token)
+}
 
 fn coordinates(args: &Value) -> Result<[f64; 2], String> {
     let x = args["x"].as_f64().ok_or("requires finite {x, y} in points")?;

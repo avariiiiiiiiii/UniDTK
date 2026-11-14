@@ -287,10 +287,20 @@ static ROUTES: &[(&str, Handler)] = &[
     ),
     (crate::command_inventory::DESK_HOST_GET.name, handle_desk_host_get),
     (crate::command_inventory::DESK_HOST_SET.name, handle_desk_host_set),
+    (crate::command_inventory::HOST_REGISTER.name, handle_host_register),
+    (
+        crate::command_inventory::SET_DESKTOP_INPUT_FOCUS.name,
+        handle_set_desktop_input_focus,
+    ),
+    (crate::command_inventory::HOST_PING.name, handle_host_ping),
+    (crate::command_inventory::HOST_TREE.name, handle_host_tree),
+    (crate::command_inventory::HOST_FRAMES.name, handle_host_frames),
+    (crate::command_inventory::HOST_HIT.name, handle_host_hit),
 ];
 
-fn handle_ping(_server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({
+pub(crate) fn ping_payload() -> serde_json::Value {
+    let snap = crate::host_supervisor::runtime_snapshot();
+    serde_json::json!({
         "pong": true,
         // What this build speaks and can do. A client compares `proto` with its own
         // and refuses to guess when they differ (an installed bridge and the app are
@@ -304,7 +314,19 @@ fn handle_ping(_server: &IpcServer, _args: &Args) -> Result<serde_json::Value, S
         // guards it is deliberately NOT reported here — this reply travels over the
         // unauthenticated tool door.
         "wsPort": crate::ws::port(),
-    }))
+        "host": {
+            "mode": crate::current_host_mode().as_str(),
+            "pid": snap.pid,
+            "generation": snap.generation,
+            "inspectorPort": snap.inspector_port,
+            "attached": snap.attached,
+            "ready": snap.ready,
+        },
+    })
+}
+
+fn handle_ping(_server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+    Ok(ping_payload())
 }
 
 fn handle_logs(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
@@ -457,6 +479,118 @@ fn handle_desk_host_set(server: &IpcServer, args: &Args) -> Result<serde_json::V
     Ok(serde_json::json!({ "ok": true, "mode": target.as_str() }))
 }
 
+fn handle_host_register(_server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let pid = args
+        .get("pid")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or("host_register requires valid {pid}")?;
+    let generation = args
+        .get("generation")
+        .and_then(|v| v.as_u64())
+        .ok_or("host_register requires {generation}")?;
+    let instance_nonce = args
+        .get("instanceNonce")
+        .and_then(|v| v.as_str())
+        .ok_or("host_register requires {instanceNonce}")?;
+    let inspector_port = args
+        .get("inspectorPort")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+        .ok_or("host_register requires valid {inspectorPort}")?;
+    let attached = args.get("attached").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ready = args.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    crate::host_supervisor::register_host(
+        pid,
+        generation,
+        instance_nonce,
+        inspector_port,
+        attached,
+        ready,
+    )?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+fn handle_set_desktop_input_focus(
+    server: &IpcServer,
+    args: &Args,
+) -> Result<serde_json::Value, String> {
+    let focused = args
+        .get("focused")
+        .and_then(|v| v.as_bool())
+        .ok_or("set_desktop_input_focus requires {focused}")?;
+    crate::hotkeys::set_input_focus(&server.app, focused)?;
+    Ok(serde_json::Value::Null)
+}
+
+pub(crate) fn proxy_host_request(
+    port: Option<u16>,
+    cmd: &str,
+    args: &Args,
+) -> Result<serde_json::Value, String> {
+    let port = match port {
+        Some(p) => p,
+        None => crate::host_supervisor::runtime_snapshot()
+            .inspector_port
+            .ok_or_else(|| "native host inspector is not registered".to_string())?,
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let timeout = std::time::Duration::from_millis(250);
+    let mut stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100))
+        .map_err(|e| format!("host proxy connect :{port}: {e}"))?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+
+    let payload = serde_json::json!({
+        "v": 1,
+        "cmd": cmd,
+        "args": args,
+    });
+    writeln!(stream, "{payload}").map_err(|e| format!("host proxy write: {e}"))?;
+    let _ = stream.flush();
+
+    let mut line = String::new();
+    let n = BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|e| format!("host proxy read: {e}"))?;
+    if n == 0 {
+        return Err("host proxy closed without reply".into());
+    }
+    let reply: serde_json::Value =
+        serde_json::from_str(line.trim()).map_err(|e| format!("host proxy bad json: {e}"))?;
+    if reply.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        Ok(reply.get("result").cloned().unwrap_or(serde_json::Value::Null))
+    } else {
+        Err(reply
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("native host request failed")
+            .to_string())
+    }
+}
+
+fn handle_host_ping(_server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    proxy_host_request(None, "ping", args)
+}
+
+fn handle_host_tree(_server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    proxy_host_request(None, "tree", args)
+}
+
+fn handle_host_frames(_server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    proxy_host_request(None, "frames", args)
+}
+
+fn handle_host_hit(_server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    if args.get("x").and_then(|v| v.as_f64()).is_none()
+        || args.get("y").and_then(|v| v.as_f64()).is_none()
+    {
+        return Err("host_hit requires numeric {x, y}".into());
+    }
+    proxy_host_request(None, "hit", args)
+}
+
 #[cfg(test)]
 mod route_tests {
     use super::*;
@@ -595,5 +729,64 @@ mod route_tests {
                  modules answer their own commands through `Module::dispatch`"
             );
         }
+    }
+
+    #[test]
+    fn ping_includes_host_status_block() {
+        let _guard = crate::host_supervisor::test_lock();
+        let ping = ping_payload();
+        assert_eq!(ping["pong"], true);
+        let host = ping.get("host").expect("ping payload must include host block");
+        assert!(host["mode"].is_string());
+        assert!(host.get("pid").is_some());
+        assert!(host.get("generation").is_some());
+        assert!(host.get("inspectorPort").is_some());
+        assert!(host.get("attached").is_some());
+        assert!(host.get("ready").is_some());
+    }
+
+    #[test]
+    fn host_read_proxies_declared_in_inventory_and_forward_lock_free() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        assert!(door("host_register", Door::Socket).is_err());
+        assert!(door("host_register", Door::Ui).is_ok());
+        for name in ["host_ping", "host_tree", "host_frames", "host_hit"] {
+            assert!(door(name, Door::Socket).is_ok(), "{name} must be on Socket");
+            assert!(door(name, Door::Ui).is_err(), "{name} is cli-only");
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&mut stream).read_line(&mut line).unwrap();
+                let req: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                let reply = match req["cmd"].as_str().unwrap_or("") {
+                    "ping" => serde_json::json!({ "v": 1, "ok": true, "result": { "port": port, "ready": true } }),
+                    "tree" => serde_json::json!({ "v": 1, "ok": true, "result": [{ "key": "g0-card" }] }),
+                    "frames" => serde_json::json!({ "v": 1, "ok": true, "result": { "drawn": 3 } }),
+                    "hit" => serde_json::json!({ "v": 1, "ok": true, "result": { "x": req["args"]["x"], "in_region": true } }),
+                    other => serde_json::json!({ "v": 1, "ok": false, "error": format!("unexpected {other}") }),
+                };
+                writeln!(stream, "{reply}").unwrap();
+            }
+        });
+
+        let ping = proxy_host_request(Some(port), "ping", &Args::new()).unwrap();
+        assert_eq!(ping["port"], port);
+        let tree = proxy_host_request(Some(port), "tree", &Args::new()).unwrap();
+        assert_eq!(tree[0]["key"], "g0-card");
+        let frames = proxy_host_request(Some(port), "frames", &Args::new()).unwrap();
+        assert_eq!(frames["drawn"], 3);
+        let mut hit_args = Args::new();
+        hit_args.insert("x".into(), serde_json::json!(24.0));
+        hit_args.insert("y".into(), serde_json::json!(48.0));
+        let hit = proxy_host_request(Some(port), "hit", &hit_args).unwrap();
+        assert_eq!(hit["in_region"], true);
+        let _ = server.join();
     }
 }

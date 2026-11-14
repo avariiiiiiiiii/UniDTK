@@ -1157,8 +1157,53 @@ fn local_timestamp_string() -> String {
     )
 }
 
+fn is_native_host_ping(ping_result: &serde_json::Value) -> bool {
+    ping_result
+        .get("host")
+        .and_then(|h| h.get("mode"))
+        .and_then(|m| m.as_str())
+        == Some("native")
+}
+
+fn native_host_ping_verdict(ping_result: &serde_json::Value) -> Result<String, String> {
+    let host = ping_result
+        .get("host")
+        .ok_or_else(|| "missing host status in kernel ping".to_string())?;
+    if host.get("mode").and_then(|m| m.as_str()) != Some("native") {
+        return Err("kernel ping is not in native host mode".into());
+    }
+    let pid = host
+        .get("pid")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "native host has no active pid".to_string())?;
+    let port = host
+        .get("inspectorPort")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "native host has not registered an inspector port".to_string())?;
+    if host.get("attached").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(format!(
+            "native host pid={pid} port={port} is not attached to the desktop"
+        ));
+    }
+    if host.get("ready").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(format!(
+            "native host pid={pid} port={port} has not drawn its first frame"
+        ));
+    }
+    let gen_id = host.get("generation").and_then(|v| v.as_u64()).unwrap_or(0);
+    Ok(format!(
+        "native host: pid={pid}, gen={gen_id}, inspector=:{port} (attached + ready)"
+    ))
+}
+
 fn shot_cmd(args: &[String]) -> Result<String, String> {
-    if args.iter().any(|a| a == "--host") { return host::shot(args); }
+    if args.iter().any(|a| a == "--host")
+        || host::probe_kernel_ping()
+            .as_ref()
+            .is_some_and(is_native_host_ping)
+    {
+        return host::shot(args);
+    }
     let json_flag = args.iter().any(|a| a == "--json" || a == "-j");
     let quiet_flag = args.iter().any(|a| a == "--quiet" || a == "-q");
 
@@ -1738,18 +1783,26 @@ fn stop_verdict(left: &[u32], killed: usize) -> Result<String, String> {
 /// again: success is reported only when nothing of the install is left running.
 fn stop_cmd() -> Result<String, String> {
     let install = install_dir();
-    let mut graceful = host::quit().is_ok();
-    match Cdp::open() {
-        Ok(mut cdp) => match cdp.evaluate(
-            "(() => { const h = window.__UNIDTK_HARNESS__; if (!h) return false; h.invoke('quit_app').catch(() => {}); return true; })()",
-        ) {
-            Ok(v) if v.as_bool() == Some(true) => graceful = true,
-            _ => {}
-        },
-        Err(_) => {}
+    let is_native = host::probe_kernel_ping()
+        .as_ref()
+        .is_some_and(is_native_host_ping);
+    // In supervised native mode the kernel's Job Object owns unidtk-desktop.exe and
+    // HostSupervisor would immediately respawn an exited child, so skip host::quit()
+    // and let killing unidtk.exe tear down the job cleanly.
+    let mut graceful = if !is_native { host::quit().is_ok() } else { false };
+    if !is_native {
+        match Cdp::open() {
+            Ok(mut cdp) => match cdp.evaluate(
+                "(() => { const h = window.__UNIDTK_HARNESS__; if (!h) return false; h.invoke('quit_app').catch(() => {}); return true; })()",
+            ) {
+                Ok(v) if v.as_bool() == Some(true) => graceful = true,
+                _ => {}
+            },
+            Err(_) => {}
+        }
     }
-    let grace_ms = if graceful { 3500 } else { 0 };
-    let deadline = std::time::Instant::now() + Duration::from_millis(grace_ms + 2500);
+    let grace_ms = if graceful { 6000 } else if is_native { 0 } else { 2500 };
+    let deadline = std::time::Instant::now() + Duration::from_millis(grace_ms);
     let mut killed = 0usize;
     loop {
         let pids = list_processes_from(&install);
@@ -3329,16 +3382,37 @@ fn run_ping_check() -> (bool, String) {
                             {
                                 out.push_str(&format!("  [OK] logs telemetry: {stats_out}\n"));
                             }
-                            // The kernel can answer while its WebView is gone, which leaves
-                            // the desk empty: the page has to answer too.
-                            match page_alive() {
-                                Ok(pages) => {
-                                    out.push_str(&format!("  [OK] page: {pages} WebView2 page(s) answer over CDP\n"));
-                                    (true, out)
+                            let ping_result = &val["result"];
+                            if is_native_host_ping(ping_result) {
+                                match native_host_ping_verdict(ping_result) {
+                                    Ok(summary) => out.push_str(&format!("  [OK] {summary}\n")),
+                                    Err(e) => {
+                                        out.push_str(&format!("  [FAIL] {e}\n"));
+                                        return (false, out);
+                                    }
                                 }
-                                Err(e) => {
-                                    out.push_str(&format!("  [FAIL] page: the kernel answers, the WebView does not ({e})\n"));
-                                    (false, out)
+                                match ipc(json!({"cmd": command_inventory::HOST_PING.name})) {
+                                    Ok(host_ping) => {
+                                        out.push_str(&format!("  [OK] host_ping proxy: {host_ping}\n"));
+                                        (true, out)
+                                    }
+                                    Err(e) => {
+                                        out.push_str(&format!("  [FAIL] host_ping proxy: {e}\n"));
+                                        (false, out)
+                                    }
+                                }
+                            } else {
+                                // The kernel can answer while its WebView is gone, which leaves
+                                // the desk empty: the page has to answer too.
+                                match page_alive() {
+                                    Ok(pages) => {
+                                        out.push_str(&format!("  [OK] page: {pages} WebView2 page(s) answer over CDP\n"));
+                                        (true, out)
+                                    }
+                                    Err(e) => {
+                                        out.push_str(&format!("  [FAIL] page: the kernel answers, the WebView does not ({e})\n"));
+                                        (false, out)
+                                    }
                                 }
                             }
                         } else {
@@ -3500,16 +3574,17 @@ fn run_simulation(out: &mut String) -> bool {
 
     // 1. IPC Ping — the command name comes from the inventory, not a literal.
     let t0 = std::time::Instant::now();
-    match ipc(json!({ "cmd": command_inventory::SIMULATE_PING })) {
+    let ping_json: Option<serde_json::Value> = match ipc(json!({ "cmd": command_inventory::SIMULATE_PING })) {
         Ok(res) => {
             let d = t0.elapsed().as_millis();
             out.push_str(&format!("  [OK] IPC Ping ({d}ms): {res}\n"));
+            serde_json::from_str(&res).ok()
         }
         Err(e) => {
             out.push_str(&format!("  [FAIL] IPC Ping: {e}\n"));
             return true;
         }
-    }
+    };
 
     // 2. Redb Log Store Health — name from the inventory.
     let t0 = std::time::Instant::now();
@@ -3588,6 +3663,55 @@ fn run_simulation(out: &mut String) -> bool {
             Ok(status) => out.push_str(&format!("  [OK] {}: {status}\n", probe.label)),
             Err(_) => out.push_str(&format!("  [INFO] {}: (idle or offline)\n", probe.label)),
         }
+    }
+
+    if ping_json.as_ref().is_some_and(is_native_host_ping) {
+        out.push_str("\n  native host runtime simulation (kernel -> host socket proxies):\n");
+        if let Some(ping) = ping_json.as_ref() {
+            match native_host_ping_verdict(ping) {
+                Ok(summary) => out.push_str(&format!("    [OK] {summary}\n")),
+                Err(e) => {
+                    any_failure = true;
+                    out.push_str(&format!("    [FAIL] {e}\n"));
+                }
+            }
+        }
+        match ipc(json!({ "cmd": command_inventory::HOST_PING.name })) {
+            Ok(raw) => out.push_str(&format!("    [OK] host_ping: {}\n", raw.trim())),
+            Err(e) => {
+                any_failure = true;
+                out.push_str(&format!("    [FAIL] host_ping: {e}\n"));
+            }
+        }
+        match ipc(json!({ "cmd": command_inventory::HOST_TREE.name })) {
+            Ok(raw) => {
+                let count = serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .and_then(|v| v.as_array().map(|a| a.len()))
+                    .unwrap_or(0);
+                out.push_str(&format!("    [OK] host_tree: {count} element(s)\n"));
+            }
+            Err(e) => {
+                any_failure = true;
+                out.push_str(&format!("    [FAIL] host_tree: {e}\n"));
+            }
+        }
+        match ipc(json!({ "cmd": command_inventory::HOST_FRAMES.name })) {
+            Ok(raw) => out.push_str(&format!("    [OK] host_frames: {}\n", raw.trim())),
+            Err(e) => {
+                any_failure = true;
+                out.push_str(&format!("    [FAIL] host_frames: {e}\n"));
+            }
+        }
+        match ipc(json!({ "cmd": command_inventory::HOST_HIT.name, "args": { "x": 1, "y": 1 } })) {
+            Ok(raw) => out.push_str(&format!("    [OK] host_hit(1,1): {}\n", raw.trim())),
+            Err(e) => {
+                any_failure = true;
+                out.push_str(&format!("    [FAIL] host_hit(1,1): {e}\n"));
+            }
+        }
+        out.push('\n');
+        return any_failure;
     }
 
     // 6. Live Frontend Code Function Simulation (CDP)
@@ -4297,6 +4421,28 @@ mod tests {
             "staged module with a source counterpart must not be treated as stale"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cli_ping_and_shot_recognize_native_host_mode() {
+        let ready_ping = serde_json::json!({
+            "pong": true,
+            "host": { "mode": "native", "pid": 4242, "generation": 1, "inspectorPort": 54321, "attached": true, "ready": true }
+        });
+        assert!(is_native_host_ping(&ready_ping));
+        assert!(native_host_ping_verdict(&ready_ping).is_ok());
+
+        let unattached = serde_json::json!({
+            "pong": true,
+            "host": { "mode": "native", "pid": 4242, "generation": 1, "inspectorPort": 54321, "attached": false, "ready": false }
+        });
+        assert!(native_host_ping_verdict(&unattached).is_err());
+
+        let web_ping = serde_json::json!({
+            "pong": true,
+            "host": { "mode": "web", "pid": null, "generation": 0, "inspectorPort": null, "attached": false, "ready": false }
+        });
+        assert!(!is_native_host_ping(&web_ping));
     }
 }
 

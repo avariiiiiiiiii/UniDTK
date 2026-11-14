@@ -152,13 +152,104 @@ pub fn doctor(args: &[String]) -> Result<String, String> {
     Ok(out)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Endpoint {
+    pub port: u16,
+    pub token: String,
+}
+
+#[derive(serde::Deserialize)]
+struct InspectorMetadata {
+    pid: u32,
+    port: u16,
+    token: String,
+    #[allow(dead_code)]
+    supervised: bool,
+}
+
+fn read_metadata(path: &std::path::Path) -> Result<InspectorMetadata, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("{}: {e} (is the host running?)", path.display()))?;
+    serde_json::from_str::<InspectorMetadata>(&raw)
+        .map_err(|e| format!("{}: bad metadata json: {e}", path.display()))
+}
+
+pub(crate) fn probe_kernel_ping() -> Option<Value> {
+    use std::io::BufRead;
+    let addr: std::net::SocketAddr = super::IPC.parse().ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+    writeln!(stream, r#"{{"cmd":"ping"}}"#).ok()?;
+    let _ = stream.flush();
+    let mut line = String::new();
+    if std::io::BufReader::new(stream).read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    let reply: Value = serde_json::from_str(line.trim()).ok()?;
+    if reply.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        Some(reply.get("result").cloned().unwrap_or(Value::Null))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn resolve_endpoint_in(
+    data_dir: &std::path::Path,
+    kernel_ping: Option<&Value>,
+) -> Result<Endpoint, String> {
+    if let Some(ping) = kernel_ping {
+        if let Some(host) = ping.get("host") {
+            if host.get("mode").and_then(|m| m.as_str()) == Some("native") {
+                let pid = host
+                    .get("pid")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .ok_or_else(|| "native host mode is active without a host PID".to_string())?;
+                let port = host
+                    .get("inspectorPort")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u16::try_from(v).ok())
+                    .ok_or_else(|| {
+                        "native host has not registered its inspector port yet".to_string()
+                    })?;
+                let meta_path = data_dir.join(format!("host-inspector.{pid}.json"));
+                let meta = read_metadata(&meta_path)?;
+                if meta.pid != pid || meta.port != port {
+                    return Err(format!(
+                        "{}: metadata mismatch (pid={}, port={}) vs ping (pid={pid}, port={port})",
+                        meta_path.display(),
+                        meta.pid,
+                        meta.port
+                    ));
+                }
+                return Ok(Endpoint {
+                    port,
+                    token: meta.token,
+                });
+            }
+        }
+    }
+
+    let standalone = read_metadata(&data_dir.join("host-standalone.json"))?;
+    Ok(Endpoint {
+        port: standalone.port,
+        token: standalone.token,
+    })
+}
+
+fn resolve_endpoint() -> Result<Endpoint, String> {
+    let ping = probe_kernel_ping();
+    resolve_endpoint_in(&unidtk_api::paths::data_dir_view(), ping.as_ref())
+}
+
 fn token() -> Result<String, String> {
-    let path = unidtk_api::paths::data_dir_view().join("host-inspector.token");
-    std::fs::read_to_string(&path).map(|s| s.trim().to_string()).map_err(|e| format!("{}: {e} (is the host running?)", path.display()))
+    resolve_endpoint().map(|ep| ep.token)
 }
 
 fn request(body: Value) -> Result<Value, String> {
-    let address = std::net::SocketAddr::from(([127, 0, 0, 1], protocol::PORT));
+    let ep = resolve_endpoint()?;
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], ep.port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|e| format!("native inspector unavailable at {address}: {e}"))?;
     stream.set_write_timeout(Some(protocol::IO_DEADLINE)).map_err(|e| e.to_string())?;
@@ -170,4 +261,52 @@ fn request(body: Value) -> Result<Value, String> {
     if reply["v"] != protocol::VERSION { return Err("incompatible native inspector protocol".into()); }
     if reply["ok"] == true { Ok(reply["result"].clone()) }
     else { Err(reply["error"].as_str().unwrap_or("inspector error").to_string()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_resolves_host_port_from_ping_or_standalone_and_routes_native_checks() {
+        let dir = std::env::temp_dir().join(format!(
+            "unidtk-cli-host-resolve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("host-standalone.json"),
+            r#"{"pid":101,"port":26541,"token":"standalone-tok","supervised":false}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("host-inspector.777.json"),
+            r#"{"pid":777,"port":54321,"token":"sup-tok","supervised":true}"#,
+        )
+        .unwrap();
+
+        let sup_ping = json!({
+            "host": { "mode": "native", "pid": 777, "generation": 2, "inspectorPort": 54321, "attached": true, "ready": true }
+        });
+        let ep = resolve_endpoint_in(&dir, Some(&sup_ping)).expect("supervised ping resolution");
+        assert_eq!(ep.port, 54321);
+        assert_eq!(ep.token, "sup-tok");
+
+        let pending_ping = json!({
+            "host": { "mode": "native", "pid": 777, "generation": 2, "inspectorPort": null, "attached": false, "ready": false }
+        });
+        assert!(
+            resolve_endpoint_in(&dir, Some(&pending_ping)).is_err(),
+            "native mode without inspectorPort must not fall back to stale standalone metadata"
+        );
+
+        let standalone = resolve_endpoint_in(&dir, None).expect("offline standalone fallback");
+        assert_eq!(standalone.port, 26541);
+        assert_eq!(standalone.token, "standalone-tok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

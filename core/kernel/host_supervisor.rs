@@ -51,6 +51,23 @@ pub enum ControlMessage {
     TaskbarCreated,
     Show,
     Stop,
+    InjectKey {
+        generation: u64,
+        vk: u32,
+        scan_code: u32,
+        extended: bool,
+        pressed: bool,
+        repeat: bool,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        win: bool,
+        text: Option<String>,
+        key_base: Option<char>,
+    },
+    FocusLost {
+        generation: u64,
+    },
 }
 
 pub fn encode_control(msg: &ControlMessage) -> Result<String, String> {
@@ -62,6 +79,80 @@ pub struct HostStatus {
     pub pid: Option<u32>,
     pub generation: u64,
     pub running: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostRuntimeSnapshot {
+    pub pid: Option<u32>,
+    pub generation: u64,
+    pub inspector_port: Option<u16>,
+    pub attached: bool,
+    pub ready: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct HostRuntimeTracker {
+    pid: Option<u32>,
+    generation: u64,
+    instance_nonce: String,
+    inspector_port: Option<u16>,
+    attached: bool,
+    ready: bool,
+}
+
+impl HostRuntimeTracker {
+    pub fn begin_generation(&mut self, pid: u32, generation: u64, instance_nonce: String) {
+        self.pid = Some(pid);
+        self.generation = generation;
+        self.instance_nonce = instance_nonce;
+        self.inspector_port = None;
+        self.attached = false;
+        self.ready = false;
+    }
+
+    pub fn register(
+        &mut self,
+        pid: u32,
+        generation: u64,
+        instance_nonce: &str,
+        inspector_port: u16,
+        attached: bool,
+        ready: bool,
+    ) -> Result<(), String> {
+        if self.pid != Some(pid) {
+            return Err("host_register pid does not match active host".into());
+        }
+        if self.generation != generation {
+            return Err("host_register generation does not match active host".into());
+        }
+        if self.instance_nonce.is_empty() || self.instance_nonce != instance_nonce {
+            return Err("host_register instanceNonce invalid".into());
+        }
+        self.inspector_port = Some(inspector_port);
+        self.attached = attached;
+        self.ready = ready;
+        Ok(())
+    }
+
+    pub fn clear_generation(&mut self, generation: u64) {
+        if self.generation == generation {
+            self.pid = None;
+            self.instance_nonce.clear();
+            self.inspector_port = None;
+            self.attached = false;
+            self.ready = false;
+        }
+    }
+
+    pub fn snapshot(&self) -> HostRuntimeSnapshot {
+        HostRuntimeSnapshot {
+            pid: self.pid,
+            generation: self.generation,
+            inspector_port: self.inspector_port,
+            attached: self.attached,
+            ready: self.ready,
+        }
+    }
 }
 
 pub struct OwnedHandle(HANDLE);
@@ -362,6 +453,7 @@ impl Default for SupervisorState {
 
 struct Supervisor {
     state: Mutex<SupervisorState>,
+    runtime: Mutex<HostRuntimeTracker>,
     exit_cv: Condvar,
 }
 
@@ -370,6 +462,7 @@ fn supervisor() -> &'static Arc<Supervisor> {
     INSTANCE.get_or_init(|| {
         Arc::new(Supervisor {
             state: Mutex::new(SupervisorState::default()),
+            runtime: Mutex::new(HostRuntimeTracker::default()),
             exit_cv: Condvar::new(),
         })
     })
@@ -385,9 +478,10 @@ fn spawn_and_watch(
         return Err(format!("native host binary missing at {}", exe.display()));
     }
     let mut child = spawn_in_job(&exe, &["--supervised"])?;
+    let nonce = child.instance_nonce.clone();
     let start_msg = ControlMessage::Start {
         generation: child.generation,
-        instance_nonce: child.instance_nonce.clone(),
+        instance_nonce: nonce.clone(),
         ws_port,
         ws_token,
     };
@@ -407,7 +501,11 @@ fn spawn_and_watch(
             return Err("host supervisor stopped during spawn".into());
         }
         guard.active = Some(child);
+        if let Ok(mut rt) = sup.runtime.lock() {
+            rt.begin_generation(pid, generation, nonce);
+        }
     }
+    crate::hotkeys::set_host_pid(pid);
 
     let sup_clone = sup.clone();
     std::thread::Builder::new()
@@ -424,6 +522,7 @@ fn spawn_and_watch(
             crate::log_line(format!(
                 "host_supervisor: gen={generation} pid={pid} exited code={code}"
             ));
+            crate::hotkeys::clear_host_pid(pid);
 
             let should_restart = {
                 let Ok(mut guard) = sup_clone.state.lock() else {
@@ -431,6 +530,9 @@ fn spawn_and_watch(
                 };
                 if guard.active.as_ref().is_some_and(|a| a.generation == generation) {
                     guard.active = None;
+                }
+                if let Ok(mut rt) = sup_clone.runtime.lock() {
+                    rt.clear_generation(generation);
                 }
                 sup_clone.exit_cv.notify_all();
                 if guard.shutting_down || STOPPING.load(Ordering::Acquire) || !guard.desired_running {
@@ -550,12 +652,21 @@ fn stop_internal(wait: bool, permanent: bool) {
         active.close_stdin();
     }
     if !wait {
+        let mut cleared_pid = None;
         if let Some(active) = guard.active.take() {
+            cleared_pid = Some(active.pid);
+            if let Ok(mut rt) = sup.runtime.lock() {
+                rt.clear_generation(active.generation);
+            }
             active.terminate_job();
         }
         sup.exit_cv.notify_all();
         if !permanent {
             STOPPING.store(false, Ordering::Release);
+        }
+        drop(guard);
+        if let Some(pid) = cleared_pid {
+            crate::hotkeys::clear_host_pid(pid);
         }
         return;
     }
@@ -573,17 +684,64 @@ fn stop_internal(wait: bool, permanent: bool) {
             .unwrap_or_else(|e| e.into_inner())
             .0;
     }
+    let mut cleared_pid = None;
     if let Some(active) = g.active.take() {
         crate::log_line(format!(
             "host_supervisor: stop timed out for pid={}, terminating job",
             active.pid
         ));
+        cleared_pid = Some(active.pid);
+        if let Ok(mut rt) = sup.runtime.lock() {
+            rt.clear_generation(active.generation);
+        }
         active.terminate_job();
     }
     sup.exit_cv.notify_all();
     if !permanent {
         STOPPING.store(false, Ordering::Release);
     }
+    drop(g);
+    if let Some(pid) = cleared_pid {
+        crate::hotkeys::clear_host_pid(pid);
+    }
+}
+
+pub fn register_host(
+    pid: u32,
+    generation: u64,
+    instance_nonce: &str,
+    inspector_port: u16,
+    attached: bool,
+    ready: bool,
+) -> Result<(), String> {
+    let sup = supervisor();
+    let mut rt = sup.runtime.lock().map_err(|e| e.to_string())?;
+    rt.register(pid, generation, instance_nonce, inspector_port, attached, ready)
+}
+
+pub fn runtime_snapshot() -> HostRuntimeSnapshot {
+    supervisor()
+        .runtime
+        .lock()
+        .map(|rt| rt.snapshot())
+        .unwrap_or_default()
+}
+
+pub fn active_generation() -> Option<u64> {
+    supervisor()
+        .runtime
+        .lock()
+        .ok()
+        .and_then(|rt| rt.pid.map(|_| rt.generation))
+}
+
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 #[allow(dead_code)]
@@ -673,5 +831,34 @@ mod tests {
         drop(child_sleep);
         let exited = unsafe { WaitForSingleObject(proc_watch.raw(), 3000) == WAIT_OBJECT_0 };
         assert!(exited, "JobObject KILL_ON_JOB_CLOSE must kill process on drop");
+    }
+
+    #[test]
+    fn host_supervisor_register_verifies_nonce_generation_and_clears_on_exit() {
+        let mut tracker = HostRuntimeTracker::default();
+        tracker.begin_generation(4242, 7, "nonce-secret".into());
+        assert_eq!(tracker.snapshot().pid, Some(4242));
+        assert_eq!(tracker.snapshot().generation, 7);
+        assert_eq!(tracker.snapshot().inspector_port, None);
+
+        assert!(tracker.register(9999, 7, "nonce-secret", 51234, true, true).is_err());
+        assert!(tracker.register(4242, 6, "nonce-secret", 51234, true, true).is_err());
+        assert!(tracker.register(4242, 7, "wrong-nonce", 51234, true, true).is_err());
+
+        tracker.register(4242, 7, "nonce-secret", 51234, true, true).expect("matching registration");
+        let snap = tracker.snapshot();
+        assert_eq!(snap.pid, Some(4242));
+        assert_eq!(snap.generation, 7);
+        assert_eq!(snap.inspector_port, Some(51234));
+        assert!(snap.attached);
+        assert!(snap.ready);
+
+        tracker.clear_generation(7);
+        let after = tracker.snapshot();
+        assert_eq!(after.pid, None);
+        assert_eq!(after.inspector_port, None);
+        assert!(!after.attached);
+        assert!(!after.ready);
+        assert_eq!(after.generation, 7);
     }
 }

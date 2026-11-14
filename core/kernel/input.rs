@@ -31,6 +31,86 @@ struct WindowContext {
 
 static WINDOWS: OnceLock<Mutex<Vec<WindowContext>>> = OnceLock::new();
 static RAW_INPUT_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static NATIVE_LISTENERS_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativePointerAction {
+    KeepFocusHostOwnsClick,
+    BlurFocus,
+}
+
+#[inline]
+pub(crate) fn native_click_policy(
+    native_mode: bool,
+    hits_host_window: bool,
+    _hits_own_webview: bool,
+) -> NativePointerAction {
+    if native_mode && !hits_host_window {
+        NativePointerAction::BlurFocus
+    } else {
+        NativePointerAction::KeepFocusHostOwnsClick
+    }
+}
+
+#[inline]
+pub(crate) fn should_emit_webview_wheel(
+    native_mode: bool,
+    hits_host_window: bool,
+    _own_only: bool,
+    hits_webview_or_desktop: bool,
+) -> bool {
+    !native_mode && !hits_host_window && hits_webview_or_desktop
+}
+
+fn point_in_hrgn(
+    rgn: windows::Win32::Graphics::Gdi::HRGN,
+    client_x: i32,
+    client_y: i32,
+) -> bool {
+    if rgn.is_invalid() {
+        return false;
+    }
+    unsafe { windows::Win32::Graphics::Gdi::PtInRegion(rgn, client_x, client_y).as_bool() }
+}
+
+fn hwnd_point_in_region(hwnd: HWND, screen_point: POINT) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        CreateRectRgn, DeleteObject, GetWindowRgn, PtInRect, COMPLEXREGION, NULLREGION,
+        SIMPLEREGION,
+    };
+    unsafe {
+        if !WindowsAndMessaging::IsWindow(hwnd).as_bool() {
+            return false;
+        }
+        let mut rect = RECT::default();
+        if WindowsAndMessaging::GetWindowRect(hwnd, &mut rect).is_err() {
+            return false;
+        }
+        let rgn = CreateRectRgn(0, 0, 0, 0);
+        if rgn.is_invalid() {
+            return PtInRect(&rect, screen_point).as_bool();
+        }
+        let kind = GetWindowRgn(hwnd, rgn);
+        let inside = if kind == SIMPLEREGION || kind == COMPLEXREGION {
+            point_in_hrgn(rgn, screen_point.x - rect.left, screen_point.y - rect.top)
+        } else if kind == NULLREGION {
+            false
+        } else {
+            PtInRect(&rect, screen_point).as_bool()
+        };
+        let _ = DeleteObject(rgn);
+        inside
+    }
+}
+
+fn is_host_window_at(hwnd: HWND, screen_point: POINT) -> bool {
+    let mut pid = 0u32;
+    unsafe {
+        WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    crate::hotkeys::is_host_pid(pid) && hwnd_point_in_region(hwnd, screen_point)
+}
 
 static LEFT_BUTTON_HELD: AtomicBool = AtomicBool::new(false);
 static RIGHT_BUTTON_HELD: AtomicBool = AtomicBool::new(false);
@@ -123,6 +203,20 @@ fn make_lparam(low: isize, high: isize) -> LPARAM {
 fn send_mouse_input(msg: u32, point: POINT, w_param: WPARAM) {
     unsafe {
         let hwnd_under_cursor = WindowsAndMessaging::WindowFromPoint(point);
+        let hits_host = is_host_window_at(hwnd_under_cursor, point);
+        if crate::is_native_host() {
+            if matches!(
+                msg,
+                WindowsAndMessaging::WM_LBUTTONDOWN | WindowsAndMessaging::WM_RBUTTONDOWN
+            ) && native_click_policy(true, hits_host, false) == NativePointerAction::BlurFocus
+            {
+                crate::hotkeys::reset_input_focus();
+            }
+            return;
+        }
+        if hits_host {
+            return;
+        }
         let is_desktop = is_desktop_class(hwnd_under_cursor);
 
         let Some(windows) = WINDOWS.get() else { return; };
@@ -224,9 +318,16 @@ pub fn is_key_target(target: HWND) -> bool {
 /// divides by devicePixelRatio. `own_only` (touchpad) skips desktop-class
 /// windows: there Windows already synthesizes a wheel that the hook forwards.
 fn send_mouse_wheel(point: POINT, wheel_delta: i32, own_only: bool) {
+    if crate::is_native_host() {
+        return;
+    }
     let mut targets = Vec::new();
     unsafe {
         let hwnd_under_cursor = WindowsAndMessaging::WindowFromPoint(point);
+        let hits_host = is_host_window_at(hwnd_under_cursor, point);
+        if hits_host {
+            return;
+        }
         let is_desktop = is_desktop_class(hwnd_under_cursor);
 
         let Some(windows) = WINDOWS.get() else { return; };
@@ -238,13 +339,15 @@ fn send_mouse_wheel(point: POINT, wheel_delta: i32, own_only: bool) {
                 let is_own_window = hwnd_under_cursor == win_hwnd
                     || WindowsAndMessaging::IsChild(win_hwnd, hwnd_under_cursor)
                         .as_bool();
-                if !is_own_window && (own_only || !is_desktop) {
+                let eligible = is_own_window || (!own_only && is_desktop);
+                if !should_emit_webview_wheel(false, hits_host, own_only, eligible) {
                     continue;
                 }
 
                 let mut client_point = point;
                 if ScreenToClient(win_hwnd, &mut client_point).as_bool() {
                     targets.push(client_point);
+                    break;
                 }
             }
         }
@@ -604,30 +707,7 @@ fn start_wheel_hook() {
     });
 }
 
-pub fn start_input_forwarding(hwnd: HWND, forward_mouse_input: bool, forward_keyboard_input: bool) {
-    // If we are not forwarding mouse or keyboard input, return
-    if !forward_mouse_input && !forward_keyboard_input {
-        return;
-    }
-
-    if forward_mouse_input {
-        start_wheel_hook();
-    }
-
-    let hwnd_raw = hwnd.0 as isize;
-    let windows = WINDOWS.get_or_init(|| Mutex::new(Vec::new()));
-    if let Ok(mut windows_lock) = windows.lock() {
-        // attach() can race (fallback + frontend + single-instance). Never keep
-        // duplicate targets — each extra entry multiplies every key/mouse post.
-        windows_lock.retain(|window| window.window_handle != hwnd_raw);
-        windows_lock.push(WindowContext {
-            window_handle: hwnd_raw,
-            forward_mouse_input,
-            forward_keyboard_input,
-            last_key_target: hwnd_raw,
-        });
-    }
-
+fn ensure_raw_input_window() {
     if RAW_INPUT_WINDOW.load(Ordering::SeqCst) != 0 {
         return;
     }
@@ -693,27 +773,75 @@ pub fn start_input_forwarding(hwnd: HWND, forward_mouse_input: bool, forward_key
     }
 }
 
+fn maybe_destroy_raw_input_window(windows_empty: bool) {
+    if windows_empty && !NATIVE_LISTENERS_ACTIVE.load(Ordering::Acquire) {
+        let prev = RAW_INPUT_WINDOW.swap(0, Ordering::SeqCst);
+        if prev != 0 {
+            unsafe {
+                let _ = WindowsAndMessaging::DestroyWindow(HWND(prev as _));
+            }
+        }
+    }
+}
+
+pub fn start_native_listeners() {
+    NATIVE_LISTENERS_ACTIVE.store(true, Ordering::Release);
+    start_wheel_hook();
+    ensure_raw_input_window();
+}
+
+pub fn stop_native_listeners() {
+    NATIVE_LISTENERS_ACTIVE.store(false, Ordering::Release);
+    let empty = WINDOWS
+        .get()
+        .and_then(|w| w.lock().ok())
+        .is_none_or(|g| g.is_empty());
+    maybe_destroy_raw_input_window(empty);
+}
+
+pub fn start_input_forwarding(hwnd: HWND, forward_mouse_input: bool, forward_keyboard_input: bool) {
+    // If we are not forwarding mouse or keyboard input, return
+    if !forward_mouse_input && !forward_keyboard_input {
+        return;
+    }
+
+    if forward_mouse_input {
+        start_wheel_hook();
+    }
+
+    let hwnd_raw = hwnd.0 as isize;
+    let windows = WINDOWS.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut windows_lock) = windows.lock() {
+        // attach() can race (fallback + frontend + single-instance). Never keep
+        // duplicate targets — each extra entry multiplies every key/mouse post.
+        windows_lock.retain(|window| window.window_handle != hwnd_raw);
+        windows_lock.push(WindowContext {
+            window_handle: hwnd_raw,
+            forward_mouse_input,
+            forward_keyboard_input,
+            last_key_target: hwnd_raw,
+        });
+    }
+
+    ensure_raw_input_window();
+}
+
 pub fn stop_input_forwarding(hwnd: HWND) {
     let hwnd_raw = hwnd.0 as isize;
     if let Some(windows) = WINDOWS.get() {
         if let Ok(mut windows_lock) = windows.lock() {
             windows_lock.retain(|window| window.window_handle != hwnd_raw);
-
-            if windows_lock.is_empty() {
-                let prev = RAW_INPUT_WINDOW.swap(0, Ordering::SeqCst);
-                if prev != 0 {
-                    unsafe {
-                        let _ = WindowsAndMessaging::DestroyWindow(HWND(prev as _));
-                    }
-                }
-            }
+            maybe_destroy_raw_input_window(windows_lock.is_empty());
         }
     }
 }
 
 #[cfg(test)]
 mod lparam_tests {
-    use super::make_lparam;
+    use super::{
+        make_lparam, native_click_policy, point_in_hrgn, should_emit_webview_wheel,
+        NativePointerAction,
+    };
 
     fn x_of(l: isize) -> i16 {
         (l & 0xFFFF) as u16 as i16
@@ -741,5 +869,31 @@ mod lparam_tests {
     fn positive_coordinates_are_unchanged() {
         let l = make_lparam(1919, 1079).0;
         assert_eq!((x_of(l), y_of(l)), (1919, 1079));
+    }
+
+    #[test]
+    fn input_respects_set_window_rgn_never_blurs_host_pid_and_targets_hovered_wheel() {
+        use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject};
+
+        let rgn = unsafe { CreateRectRgn(24, 24, 124, 124) };
+        assert!(point_in_hrgn(rgn, 50, 50));
+        assert!(!point_in_hrgn(rgn, 10, 10));
+        unsafe { let _ = DeleteObject(rgn); }
+
+        assert_eq!(
+            native_click_policy(true, true, false),
+            NativePointerAction::KeepFocusHostOwnsClick
+        );
+        assert_eq!(
+            native_click_policy(true, false, true),
+            NativePointerAction::BlurFocus
+        );
+        assert_eq!(
+            native_click_policy(true, false, false),
+            NativePointerAction::BlurFocus
+        );
+        assert!(!should_emit_webview_wheel(true, true, false, false));
+        assert!(!should_emit_webview_wheel(true, false, false, true));
+        assert!(should_emit_webview_wheel(false, false, false, true));
     }
 }
