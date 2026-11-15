@@ -34,6 +34,10 @@ pub enum ControlCommand {
     FocusLost {
         generation: u64,
     },
+    /// A press on the desktop outside the host's region (`host_supervisor::ControlMessage`).
+    PointerOutside {
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +55,7 @@ pub trait ControlSink {
     fn on_stop(&mut self, reason: &str);
     fn on_inject_key(&mut self, _cmd: ControlCommand) {}
     fn on_focus_lost(&mut self, _generation: u64) {}
+    fn on_pointer_outside(&mut self, _generation: u64) {}
 }
 
 pub fn read_control_stream<R: BufRead, S: ControlSink>(
@@ -94,6 +99,7 @@ pub fn read_control_stream<R: BufRead, S: ControlSink>(
                     Ok(ControlCommand::Show) => sink.on_show(),
                     Ok(cmd @ ControlCommand::InjectKey { .. }) => sink.on_inject_key(cmd),
                     Ok(ControlCommand::FocusLost { generation }) => sink.on_focus_lost(generation),
+                    Ok(ControlCommand::PointerOutside { generation }) => sink.on_pointer_outside(generation),
                     Ok(ControlCommand::Stop) => {
                         sink.on_stop("stop");
                         return Ok(());

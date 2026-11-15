@@ -40,6 +40,9 @@ use windows::Win32::System::Threading::{
 
 const STOP_WAIT_BUDGET: Duration = Duration::from_secs(2);
 const STABLE_UPTIME_FOR_BACKOFF_RESET: Duration = Duration::from_secs(30);
+/// Crashes in a row, each before `STABLE_UPTIME_FOR_BACKOFF_RESET`, after which the supervisor
+/// stops restarting the host and the desk goes back to the page.
+const CRASHES_BEFORE_FALLBACK: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -68,6 +71,12 @@ pub enum ControlMessage {
         key_base: Option<char>,
     },
     FocusLost {
+        generation: u64,
+    },
+    /// A button went down on the desktop outside the host's region: the host closes its top
+    /// surface, as the page closes one on an outside pointerdown. The host cannot see such a
+    /// press itself, because the region sends it to whatever lies under it.
+    PointerOutside {
         generation: u64,
     },
 }
@@ -551,6 +560,14 @@ fn spawn_and_watch(
             };
 
             if !should_restart {
+                return;
+            }
+            let attempts = sup_clone.state.lock().map(|g| g.restart_attempts).unwrap_or(0);
+            if attempts >= CRASHES_BEFORE_FALLBACK {
+                crate::fall_back_to_web(&format!(
+                    "the native host exited {attempts} times in a row, each within {} s of its start",
+                    STABLE_UPTIME_FOR_BACKOFF_RESET.as_secs()
+                ));
                 return;
             }
 

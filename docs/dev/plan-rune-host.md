@@ -116,6 +116,20 @@ Scope decisions (revised in session 142, at the user's word that the port is a f
 - **Clock** ([`core/desktop/faces.rs`](../../core/desktop/faces.rs)): the tile in both materials (jelly body, sheen, depth, rims, drop shadows and the 64 px grain; flat glass with its border and computed shadows) and all thirteen faces of the page's switcher, each laid out in its `.clock-container` as `clock.css` styles it (`gooey`'s digits from its own SVG paths; `gothic` as the page draws it, black SVG fills, because `clock.css` has no rules for it). A record without `version` draws `digital`, as `renderClock` does; only the module's default placement names `rings`. A press opens the dashboard (400 x 420 round the tile, the face flying into the 160 px `.dash-clock`, the month calendar and the connection badge); a press on it, a press on the bare desk, or Escape closes it. Fonts are the theme's: Ndot and Geist embedded (Geist converted from the page's WOFF2 to TrueType), Segoe UI and Consolas from the system.
 - **Differences that remain, named:** the edit-mode face switcher (G2, with the arrange mode); `gooey`'s 220 ms settle when a digit changes; `backdrop-filter` blur under a flat card (Rune cannot blur the wallpaper behind a child window); while the dashboard is open the whole canvas takes input, so the first press on a desktop icon closes the dashboard instead of selecting the icon.
 
+## G2 moved ahead of the rest of G1 (session 142, the user's order)
+
+In `native` nothing could be changed: no menu, no arrange mode, no folders. The user ordered the kernel's own interface (`r[kernel.menu-in-core]`) before more widgets; the Glyph Bar waits. Three read-only surveys inventoried `core/ui` (the menu with every control, the surface and motion system, arrange mode, folders, nesting, input), and five critics reviewed the plan (races, Win32 input, memory and CPU, parity with the page, cold start and the mode switch). The user decided: everything stays in the desk window (no second window), so text fields take keys forwarded by the kernel, Latin and Cyrillic only, no IME; the Explorer overlay stays in G4.
+
+Five batches, one build each, each checked live in `native` with screenshots beside the page's:
+
+1. **Kernel and host foundations.** `desk_apply` (named operations in one transaction, `baseRev` conflicts, first-run seeding from the generated module table, the page's migrations) and the whole blob in `desk-layout-changed {rev, instance, config}`; the native switch refused without the WebSocket door and rolled back when the host does not start; five quick crashes send the desk back to the page; `PointerOutside` from the kernel's mouse path instead of a full-canvas catcher; Escape forwarded with the host's focus intact. In the host: requests answered once (reply, timeout, or lost when the link drops), the layout with `hidden`/`nested`, the `hit:` key prefix for the input region, the inspector's tree rebuilt on commit only, `motion.rs` with the page's tokens, and the clock's dashboard as a clip morph on `expoOut` / `surfaceExit`.
+2. **Controls and the menu's shell and "Вид" pane**, with a draft theme kept apart from the stored one and committed through `desk_apply`, toasts and the debug line.
+3. **"Стол" pane**: modules, folders, the Start picker, the VPN pane.
+4. **Arrange mode**, drafts held in the host until Done (one `desk_apply` with `baseRev`), mouse capture during drags, display changes.
+5. **Folder widgets, the nesting zone with the real VPN panel, every widget's expansion, the wheel.**
+
+Gate: every setting the page offers works in `native`; the menu's screenshots in both themes match the page's; host memory at or under 80 MB after every batch, the current 90.8 MB measured apart first.
+
 ## Measurements
 
 Every gate records, per process (kernel, WebView2 tree, host), after a one-minute warm-up and over a five-minute idle window:

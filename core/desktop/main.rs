@@ -15,8 +15,11 @@
 //! inspector door (`inspector.rs`), which `udtk host ...` talks to.
 
 mod desk;
+#[path = "../kernel/module_table.rs"]
+mod module_table;
 mod desktop_host;
 mod faces;
+mod motion;
 mod host;
 mod inspector;
 mod protocol;

@@ -83,6 +83,8 @@ pub struct Theme {
     pub radius_card: f32,
     pub radius_surface: f32,
     pub motion_scale: f32,
+    /// `motionProfile`: responsive, balanced or fluid (`motion.rs`).
+    pub motion_profile: &'static str,
     pub glass_grain: f32,
     pub glass_depth: f32,
     pub ink_depth: f32,
@@ -141,6 +143,7 @@ impl Theme {
             radius_card: 16.0,
             radius_surface: 24.0,
             motion_scale: 1.0,
+            motion_profile: "balanced",
             glass_grain: 0.0,
             glass_depth: 0.0,
             ink_depth: 0.3,
@@ -281,6 +284,9 @@ impl Theme {
                 *slot = stack;
             }
         }
+        if let Some(profile) = field("motionProfile").as_str().and_then(|value| ["responsive", "balanced", "fluid"].into_iter().find(|p| *p == value)) {
+            self.motion_profile = profile;
+        }
         match field("material").as_str() {
             Some("flat") => self.material = Material::Flat,
             Some("jelly") => self.material = Material::Jelly,
@@ -337,9 +343,10 @@ impl Theme {
         if list == "ui-monospace" { Family::SystemMono } else { Family::Named(list) }
     }
 
-    /// Seconds a CSS duration token takes under this theme's motion scale (`motion.js`).
-    pub fn duration(&self, milliseconds: f32) -> f32 {
-        milliseconds / 1000.0 * self.motion_scale
+    /// The motion this theme asks for (`motionProfile`, `motionScale`), with the system's
+    /// reduced-motion setting.
+    pub fn motion(&self) -> crate::motion::Motion {
+        crate::motion::Motion::new(crate::motion::Profile::parse(self.motion_profile), self.motion_scale)
     }
 }
 
@@ -365,6 +372,28 @@ fn linear_of(l: f32, c: f32, h: f32) -> [f32; 3] {
 
 fn in_gamut(rgb: [f32; 3]) -> bool {
     rgb.iter().all(|v| (-1e-4..=1.0 + 1e-4).contains(v))
+}
+
+/// Whether an OKLCH colour fits sRGB as it is (`inGamut(oklchToLinear(...))`).
+pub fn linear_in_gamut(l: f32, c: f32, h: f32) -> bool {
+    in_gamut(linear_of(l, c, h))
+}
+
+/// `linearToHex(oklchToLinear(l, c, h))`: `#rrggbb`, each channel clipped and rounded.
+pub fn oklch_hex(l: f32, c: f32, h: f32) -> String {
+    let encode = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        let s = if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+        (s.clamp(0.0, 1.0) * 255.0).round() as u8
+    };
+    let [r, g, b] = linear_of(l, c, h).map(encode);
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// The OKLCH hue of a `#rrggbb` colour, in degrees (`hexToOklch(hex)[2]` in degrees).
+pub fn hue_degrees(hex_color: &str) -> f64 {
+    let (_, _, h) = oklch_of(hex(hex_color).unwrap_or(Color::BLACK));
+    f64::from(h).to_degrees()
 }
 
 /// An OKLCH color with its chroma reduced until it fits sRGB, as `inkFor` does and as CSS

@@ -10,11 +10,12 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use rune::el::{col, el, row, text, Align, El};
-use rune::{Color, LineCap, Pixels, Shadow, Shape, Spring, TextStyle};
+use rune::{Color, LineCap, Pixels, Shadow, Shape, TextStyle};
 use serde_json::Value;
 
 pub use crate::faces::Face;
 use crate::faces::Frame;
+use crate::motion::Motion;
 use crate::theme::{derived, mix_oklch, scaled, Material, Theme};
 
 pub const CLOCK: &str = "clock";
@@ -117,38 +118,66 @@ impl Record {
     }
 }
 
-/// The kernel's `desk-layout-changed` payload: the revision, every widget's record and the
-/// theme the widgets are painted with.
+/// The desk as the kernel stores it: `desk-layout-changed` and `desk_layout_get` both carry
+/// `{rev, instance, config}` with the whole blob.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
     pub rev: u64,
+    /// The kernel run the revision belongs to; revisions of two runs do not compare.
+    pub instance: String,
     records: BTreeMap<String, Record>,
+    /// `config.hidden`: widgets switched off the desk.
+    pub hidden: Vec<String>,
+    /// `config.nested`: `{host: [child]}` as the user arranged it.
+    pub nested: BTreeMap<String, Vec<String>>,
     pub theme: Theme,
 }
 
 impl Layout {
-    /// A desk the kernel has not described, as a page with nothing stored draws it: the
-    /// modules' default placements and the default theme. The host never writes it back.
+    /// A desk with nothing stored, as the page draws its first run: the modules' default
+    /// layout (`getDefaultWidgetConfig`) and the default theme. The host never writes it back;
+    /// the kernel seeds the same layout on the first change.
     pub fn empty() -> Layout {
-        Layout { rev: 0, records: BTreeMap::new(), theme: Theme::normalize(&Value::Null) }
+        Layout::from_config(0, String::new(), &crate::module_table::default_layout())
     }
 
-    /// The answer of `desk_layout_get`: `{rev, config: {positions, theme}}`.
-    pub fn from_reply(body: &Value) -> Option<Layout> {
-        let config = body.get("config")?;
-        let theme = config.get("theme").cloned().unwrap_or(Value::Null);
-        Layout::from_event(&serde_json::json!({ "rev": body.get("rev")?, "positions": config.get("positions")?, "theme": theme }))
-    }
-
-    /// `positions` is the whole map of the event, never a delta.
+    /// A `desk-layout-changed` frame or a `desk_layout_get` answer. A `config` of `null`
+    /// (nothing stored) is the first-run layout.
     pub fn from_event(payload: &Value) -> Option<Layout> {
         let rev = payload.get("rev")?.as_u64()?;
-        let positions = payload.get("positions")?.as_object()?;
-        Some(Layout {
+        let instance = payload.get("instance").and_then(Value::as_str).unwrap_or_default().to_string();
+        match payload.get("config") {
+            Some(Value::Null) | None => Some(Layout { rev, instance, ..Layout::empty() }),
+            Some(config) if config.is_object() => Some(Layout::from_config(rev, instance, config)),
+            Some(_) => None,
+        }
+    }
+
+    fn from_config(rev: u64, instance: String, config: &Value) -> Layout {
+        let positions = config.get("positions").and_then(Value::as_object);
+        let strings = |list: &Value| list.as_array().map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+        Layout {
             rev,
-            records: positions.iter().map(|(id, record)| (id.clone(), Record::parse(record))).collect(),
-            theme: Theme::normalize(payload.get("theme").unwrap_or(&Value::Null)),
-        })
+            instance,
+            records: positions.map(|p| p.iter().map(|(id, record)| (id.clone(), Record::parse(record))).collect()).unwrap_or_default(),
+            hidden: config.get("hidden").map(strings).unwrap_or_default(),
+            nested: config
+                .get("nested")
+                .and_then(Value::as_object)
+                .map(|hosts| hosts.iter().map(|(host, children)| (host.clone(), strings(children))).collect())
+                .unwrap_or_default(),
+            theme: Theme::normalize(config.get("theme").unwrap_or(&Value::Null)),
+        }
+    }
+
+    /// Whether this layout replaces `known`: a newer revision of the same kernel run, or any
+    /// revision of a new run (its clock may have stepped back).
+    pub fn supersedes(&self, known: &Layout) -> bool {
+        self.instance != known.instance || self.rev >= known.rev
+    }
+
+    pub fn is_hidden(&self, id: &str) -> bool {
+        self.hidden.iter().any(|hidden| hidden == id)
     }
 
     /// The clock the desk draws: its stored record, else the module's default placement.
@@ -239,16 +268,6 @@ impl ClockTime {
         const MONTHS: [&str; 12] = ["ЯНВАРЬ", "ФЕВРАЛЬ", "МАРТ", "АПРЕЛЬ", "МАЙ", "ИЮНЬ", "ИЮЛЬ", "АВГУСТ", "СЕНТЯБРЬ", "ОКТЯБРЬ", "НОЯБРЬ", "ДЕКАБРЬ"];
         MONTHS[(self.month.clamp(1, 12) - 1) as usize]
     }
-}
-
-/// `--dur-hover`, `--dur-motion` and `--dur-layout` (`styles.css`), in milliseconds.
-const DUR_HOVER: f32 = 120.0;
-const DUR_MOTION: f32 = 300.0;
-
-/// `--ease-standard` is a cubic-bezier with no overshoot; a critically damped spring of the
-/// same visual duration lands the same way.
-fn standard(theme: &Theme, milliseconds: f32) -> Spring {
-    Spring::from_motion(theme.duration(milliseconds).max(0.001), 0.0)
 }
 
 fn shadow(x: f32, y: f32, blur: f32, spread: f32, color: Color, inset: bool) -> Shadow {
@@ -482,26 +501,64 @@ pub struct ClockView<'a> {
     pub tile: Placement,
     pub canvas: (f32, f32),
     pub theme: &'a Theme,
+    pub motion: &'a Motion,
     pub grain: &'a Pixels,
     pub grain_size: (f32, f32),
     pub expanded: bool,
+    /// The running open or close: its duration, as `surface-manager.js` computed it.
+    pub transition: f32,
     pub online: bool,
 }
 
-/// The clock card: the tile on the desk, or its dashboard. Both are one element whose box
-/// springs between the two, with the face flying from the tile's centre to the dashboard's
-/// left column (`r[motion.clip-morph]`, `r[motion.shared-flight]`).
+/// The clock's open and close timing (`surface-manager.js`): an open takes
+/// `calculateDuration` on `expoOut`; a close takes `0.65 x T x sqrt(remaining)` on
+/// `surfaceExit`, where `remaining` is how much of the open it has to undo, so a close that
+/// interrupts an opening is shorter (`r[motion.reversal]`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MorphClock {
+    /// When the last open started and how long it ran.
+    opened: Option<(std::time::Instant, f32)>,
+}
+
+impl MorphClock {
+    pub fn open(&mut self, motion: &Motion, tile: Placement, canvas: (f32, f32)) -> f32 {
+        let target = dashboard_box(tile, canvas);
+        let duration = motion.surface_duration((target.w, target.h), (tile.w, tile.h));
+        self.opened = Some((std::time::Instant::now(), duration));
+        duration
+    }
+
+    pub fn close(&mut self) -> f32 {
+        let Some((started, duration)) = self.opened.take() else { return 0.0 };
+        if duration <= 0.0 {
+            return 0.0;
+        }
+        let elapsed = (started.elapsed().as_secs_f32() / duration).clamp(0.0, 1.0);
+        let remaining = crate::motion::EXPO_OUT.eval(elapsed).clamp(0.0, 1.0);
+        0.65 * duration * remaining.sqrt()
+    }
+}
+
+/// The clock card, the tile on the desk and its dashboard as one surface (`r[motion.clip-morph]`):
+/// the dashboard's box never moves; what animates is the visible part of it, from the tile's
+/// rectangle and radius to the whole box and the surface radius, while the content keeps its
+/// place in the box. The face is the one part that flies, from the tile's container to the
+/// dashboard's (`r[motion.shared-flight]`). The press handler sets the transaction's curve.
 pub fn clock_card(view: ClockView<'_>) -> El {
-    let ClockView { face: kind, time, tile, canvas, theme, grain, grain_size, expanded, online } = view;
+    let ClockView { face: kind, time, tile, canvas, theme, motion, grain, grain_size, expanded, transition, online } = view;
     let tint = theme.tint(CLOCK, "calm", "lilac");
     let ink = theme.ink_on(tint);
-    let at = if expanded { dashboard_box(tile, canvas) } else { tile };
+    let target = dashboard_box(tile, canvas);
+    // The visible window in the box's coordinates.
+    let shown = if expanded {
+        Placement { x: 0.0, y: 0.0, w: target.w, h: target.h }
+    } else {
+        Placement { x: tile.x - target.x, y: tile.y - target.y, w: tile.w, h: tile.h }
+    };
     let radius = match (theme.material, expanded) {
         (Material::Jelly, true) => theme.radius_surface,
         _ => theme.radius_card,
     };
-    let motion = standard(theme, DUR_MOTION);
-    let card = card_paint(el().key("widget:clock").label("Clock").absolute(at.x, at.y), theme, tint, at.w, at.h, expanded).motion(motion);
 
     // Inside `.clock-dash-layout`: 16 px body padding, the no-header card's 10 px top and the
     // body's 2 px, then the layout's own 10 px; columns share 368 px at 1.2 : 1 with a 20 px gap.
@@ -514,38 +571,56 @@ pub fn clock_card(view: ClockView<'_>) -> El {
 
     // The tile's `.clock-container` fills the card under its 10 px top padding and has 10 px of
     // its own; the dashboard's is the 180 px `.dash-clock` centred in the left column, padded
-    // the same way.
+    // the same way. Both in the box's coordinates.
     let frame = if expanded {
         let (cx, cy) = (content_x + left / 2.0, layout_y + row_h / 2.0);
         Frame { x: cx - 80.0, y: cy - 80.0, w: 160.0, h: 160.0 }
     } else {
-        Frame { x: 10.0, y: 20.0, w: (at.w - 20.0).max(0.0), h: (at.h - 30.0).max(0.0) }
+        Frame { x: shown.x + 10.0, y: shown.y + 20.0, w: (tile.w - 20.0).max(0.0), h: (tile.h - 30.0).max(0.0) }
     };
-    let mut inside = el().absolute(0.0, 0.0).size(at.w, at.h).clip_rounded(radius);
+
+    // Content fades with the clip: in over T on `content`, out over 0.45 of the close on
+    // `smooth`; the wash in over 0.3 T on `expoOut`, out over the second half of the close.
+    let (content_fade, wash_fade) = if expanded {
+        (motion.tween(transition, crate::motion::CONTENT), motion.tween(0.3 * transition, crate::motion::EXPO_OUT))
+    } else {
+        let mut wash = motion.tween(0.5 * transition, crate::motion::SURFACE_EXIT);
+        wash.delay = 0.5 * transition;
+        (motion.tween(0.45 * transition, crate::motion::SMOOTH), wash)
+    };
+
+    // Everything inside is placed in the box and shifted by the window's offset, so it stays
+    // still while the window moves over it.
+    let shift = |element: El, x: f32, y: f32| element.absolute(x - shown.x, y - shown.y);
+    let mut inside = el().absolute(0.0, 0.0).size(shown.w, shown.h).clip_rounded(radius);
     if theme.material == Material::Jelly {
         let hi = Color::WHITE;
-        let sheen = el().absolute(0.0, 0.0).size(at.w, at.h)
-            .radial_gradient([0.18, 0.08], [1.2 * at.w, 0.95 * at.h], [(0.0, hi.alpha(theme.glass_sheen * 0.7)), (0.58, hi.alpha(0.0))]);
-        // `::after`: the expanded wash, faded in with the morph.
-        let wash = el().absolute(0.0, 0.0).size(at.w, at.h)
+        let sheen = el().absolute(0.0, 0.0).size(shown.w, shown.h)
+            .radial_gradient([0.18, 0.08], [1.2 * shown.w, 0.95 * shown.h], [(0.0, hi.alpha(theme.glass_sheen * 0.7)), (0.58, hi.alpha(0.0))]);
+        // `::after`: the expanded wash.
+        let wash = el().absolute(0.0, 0.0).size(shown.w, shown.h)
             .fill(mix_oklch(tint, theme.surface_tint, hi))
-            .radial_gradient([0.15, 0.0], [1.2 * at.w, 0.7 * at.h], [(0.0, hi.alpha(theme.glass_sheen * 0.55)), (0.6, hi.alpha(0.0))])
-            .child(el().absolute(0.0, 0.0).w(at.w).h(1.5).fill(hi.alpha(theme.glass_rim * 0.9)))
-            .opacity(if expanded { 1.0 } else { 0.0 });
+            .radial_gradient([0.15, 0.0], [1.2 * shown.w, 0.7 * shown.h], [(0.0, hi.alpha(theme.glass_sheen * 0.55)), (0.6, hi.alpha(0.0))])
+            .child(el().absolute(0.0, 0.0).w(shown.w).h(1.5).fill(hi.alpha(theme.glass_rim * 0.9)))
+            .opacity(if expanded { 1.0 } else { 0.0 })
+            .opacity_motion(wash_fade);
         inside = inside
             .child(sheen)
             .child(wash)
-            .child(el().absolute(0.0, 0.0).size(grain_size.0, grain_size.1).pixels(grain));
+            .child(shift(el().size(grain_size.0, grain_size.1).pixels(grain), 0.0, 0.0));
     }
-    let dashboard = col()
-        .absolute(content_x + left + 20.0, layout_y + (row_h - right_h) / 2.0)
+    let dashboard = shift(col(), content_x + left + 20.0, layout_y + (row_h - right_h) / 2.0)
         .w(right)
         .gap(15.0)
         .child(calendar_el)
         .child(internet(online, theme, ink, right))
         .opacity(if expanded { 1.0 } else { 0.0 })
-        .motion(standard(theme, if expanded { DUR_MOTION } else { DUR_HOVER }));
-    card.child(inside.child(dashboard).child(crate::faces::face(kind, time, frame, theme, ink, expanded)))
+        .opacity_motion(content_fade);
+    let face_layer = shift(el().size(target.w, target.h), 0.0, 0.0)
+        .child(crate::faces::face(kind, time, frame, theme, ink, expanded));
+    let window = card_paint(el().key("widget:clock").label("Clock").absolute(shown.x, shown.y), theme, tint, shown.w, shown.h, expanded)
+        .child(inside.child(dashboard).child(face_layer));
+    el().absolute(target.x, target.y).size(target.w, target.h).child(window)
 }
 
 #[cfg(test)]
@@ -554,7 +629,7 @@ mod tests {
     use serde_json::json;
 
     fn layout(positions: Value) -> Layout {
-        Layout::from_event(&json!({ "rev": 7, "positions": positions })).unwrap()
+        Layout::from_event(&json!({ "rev": 7, "instance": "a", "config": { "positions": positions } })).unwrap()
     }
 
     #[test]
@@ -588,7 +663,7 @@ mod tests {
 
     #[test]
     fn a_record_without_a_size_takes_the_themes_then_the_pages() {
-        let themed = Layout::from_event(&json!({ "rev": 1, "positions": { "clock": { "x": 0, "y": 0 } }, "theme": { "id": "sea-glass", "schemaVersion": 4 } })).unwrap();
+        let themed = Layout::from_event(&json!({ "rev": 1, "config": { "positions": { "clock": { "x": 0, "y": 0 } }, "theme": { "id": "sea-glass", "schemaVersion": 4 } } })).unwrap();
         assert_eq!(themed.clock_place((1280.0, 720.0)).w, 207.0);
         let mut bare = layout(json!({ "clock": { "x": 0, "y": 0 } }));
         bare.theme = Theme::normalize(&json!({ "id": "mine", "schemaVersion": 4, "sizes": {} }));
@@ -604,13 +679,28 @@ mod tests {
     }
 
     #[test]
-    fn layouts_come_from_events_and_replies_with_their_theme() {
-        assert!(Layout::from_event(&json!({ "positions": {} })).is_none());
-        assert!(Layout::from_event(&json!({ "rev": 1, "positions": [] })).is_none());
-        let reply = json!({ "rev": 9, "config": { "positions": { "clock": { "version": "digital" } }, "theme": { "id": "sea-glass", "schemaVersion": 4 } } });
-        let from_reply = Layout::from_reply(&reply).unwrap();
-        assert_eq!((from_reply.rev, face_of(&from_reply.clock()), from_reply.theme.material), (9, Face::Digital, Material::Jelly));
+    fn layouts_carry_the_whole_desk() {
+        assert!(Layout::from_event(&json!({ "config": {} })).is_none(), "no revision");
+        assert!(Layout::from_event(&json!({ "rev": 1, "config": [] })).is_none());
+        let reply = json!({ "rev": 9, "instance": "k1", "config": {
+            "positions": { "clock": { "version": "digital" } },
+            "hidden": ["telegram", 3], "nested": { "clock": ["vpn"] },
+            "theme": { "id": "sea-glass", "schemaVersion": 4 },
+        } });
+        let layout = Layout::from_event(&reply).unwrap();
+        assert_eq!((layout.rev, face_of(&layout.clock()), layout.theme.material), (9, Face::Digital, Material::Jelly));
+        assert!(layout.is_hidden("telegram") && !layout.is_hidden("clock"));
+        assert_eq!(layout.nested["clock"], vec!["vpn".to_string()]);
+        // Nothing stored: the first-run layout, with the default theme.
+        let first = Layout::from_event(&json!({ "rev": 2, "instance": "k1", "config": null })).unwrap();
+        assert_eq!((first.rev, face_of(&first.clock())), (2, Face::Rings));
+        assert_eq!(first.nested["clock"], vec!["vpn".to_string()]);
         assert_eq!(Layout::empty().theme, Theme::nothing_classic());
+        // A new kernel run supersedes whatever revision it starts from.
+        let older_run = Layout { rev: 10, instance: "k0".into(), ..layout.clone() };
+        assert!(layout.supersedes(&older_run));
+        let later_same_run = Layout { rev: 10, ..layout.clone() };
+        assert!(!layout.supersedes(&later_same_run));
     }
 
     #[test]

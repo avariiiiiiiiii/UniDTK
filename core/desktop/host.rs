@@ -23,8 +23,11 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../assets/fonts/Geist/Geist[wght].ttf"),
 ];
 
-/// Widget elements carry this key prefix; the hit region is built from them.
-const WIDGET_KEY: &str = "widget:";
+/// Elements that take input carry one of these key prefixes, and the hit region is built from
+/// exactly them: widgets (`widget:clock`), and everything else the host puts on the desk that
+/// a click must reach (`hit:` — the menu, its sheets, toasts, the arrange bar). Anything else
+/// lets clicks through to the desktop.
+const HIT_KEYS: [&str; 2] = ["widget:", "hit:"];
 
 struct Host {
     inspector: Arc<Inspector>,
@@ -40,14 +43,20 @@ struct Host {
     grain_made_for: Option<(u32, u32, u32)>,
     /// The clock is open as its dashboard.
     expanded: bool,
+    /// Timing of the clock's open and close, and the duration of the one running now.
+    morph: desk::MorphClock,
+    transition: f32,
+    motion: crate::motion::Motion,
     /// `navigator.onLine` as the dashboard read it when it opened.
     online: bool,
 }
 
 impl Host {
     fn accept_layout(&mut self, layout: Layout) {
-        // A reply and an event can arrive in either order; the newer revision wins.
-        if self.layout.as_ref().map_or(true, |known| layout.rev >= known.rev) {
+        // A reply and an event can arrive in either order; the newer revision wins, and any
+        // revision of a new kernel run.
+        if self.layout.as_ref().map_or(true, |known| layout.supersedes(known)) {
+            self.motion = layout.theme.motion();
             self.layout = Some(layout);
             self.refresh_grain();
         }
@@ -77,43 +86,64 @@ impl Host {
 }
 
 fn view(state: &Host, _: &mut rune::runtime::Cx<Host>) -> rune::el::El {
-    let mut root = el().w_full().h_full();
-    // An open dashboard closes on a press on the bare desk, as the page's empty-click does: the
-    // whole canvas joins the hit region while it is open, so that press reaches the host.
-    if state.expanded {
-        root = root.child(
-            el().key("widget:desk").label("Desk").absolute(0.0, 0.0).w_full().h_full()
-                .on_press(|state: &mut Host| state.expanded = false),
-        );
-    }
+    let root = el().w_full().h_full();
     let Some(layout) = &state.layout else { return root };
+    // A widget switched off the desk (`config.hidden`) is not drawn; its record stays.
+    if layout.is_hidden(desk::CLOCK) {
+        return root;
+    }
     let card = desk::clock_card(desk::ClockView {
         face: desk::face_of(&layout.clock()),
         time: state.time,
         tile: layout.clock_place(state.canvas),
         canvas: state.canvas,
         theme: &layout.theme,
+        motion: &state.motion,
         grain: &state.grain,
         grain_size: state.grain_size(),
         expanded: state.expanded,
+        transition: state.transition,
         online: state.online,
     });
     // A press opens the dashboard and a press on the dashboard closes it, as the page's
     // `toggleWidget` does for the header-less clock card.
-    root.child(card.on_press(|state: &mut Host| {
+    root.child(card.on_press_tx(|state: &mut Host, tx: &mut Tx| {
         state.inspector.input_count.fetch_add(1, Ordering::AcqRel);
-        if !state.expanded {
-            state.online = crate::desktop_host::is_online();
+        if state.expanded {
+            state.close_dashboard(tx);
+        } else {
+            state.open_dashboard(tx);
         }
-        state.expanded = !state.expanded;
     }))
+}
+
+impl Host {
+    /// The open runs on `expoOut` for `calculateDuration` of the growth.
+    fn open_dashboard(&mut self, tx: &mut Tx) {
+        let Some(layout) = &self.layout else { return };
+        let tile = layout.clock_place(self.canvas);
+        self.online = crate::desktop_host::is_online();
+        self.transition = self.morph.open(&self.motion, tile, self.canvas);
+        tx.motion_curve(self.motion.tween(self.transition, crate::motion::EXPO_OUT));
+        self.expanded = true;
+    }
+
+    /// The close runs on `surfaceExit`, shorter when it interrupts the open.
+    fn close_dashboard(&mut self, tx: &mut Tx) {
+        if !self.expanded {
+            return;
+        }
+        self.transition = self.morph.close();
+        tx.motion_curve(self.motion.tween(self.transition, crate::motion::SURFACE_EXIT));
+        self.expanded = false;
+    }
 }
 
 /// Escape folds the open dashboard (`collapseAllShellWidgets`); the kernel forwards the desk's
 /// keys to the host.
-fn on_key(state: &mut Host, event: &rune::KeyEvent, _: &mut Tx) -> bool {
+fn on_key(state: &mut Host, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
     if event.key == rune::Key::Escape && state.expanded {
-        state.expanded = false;
+        state.close_dashboard(tx);
         return true;
     }
     false
@@ -154,7 +184,7 @@ fn layout_link(ui: rune::AppHandle<Host>, outbox: Arc<Outbox>) -> LinkConfig {
         on_inbound: Box::new(move |inbound| match inbound {
             Inbound::Event { event, payload, .. } if event == "desk-layout-changed" => deliver(Layout::from_event(&payload)),
             Inbound::Gap { event } if event == "desk-layout-changed" => ask_again(),
-            Inbound::Reply { ok: true, body, .. } => deliver(Layout::from_reply(&body)),
+            Inbound::Reply { ok: true, body, .. } => deliver(Layout::from_event(&body)),
             _ => {}
         }),
     }
@@ -262,8 +292,14 @@ pub fn run() -> Result<(), String> {
                 grain: Pixels::new(),
                 grain_made_for: None,
                 expanded: false,
+                morph: desk::MorphClock::default(),
+                transition: 0.0,
+                motion: crate::motion::Motion::new(crate::motion::Profile::Balanced, 1.0),
                 online: true,
             };
+            if let Some(layout) = &host.layout {
+                host.motion = layout.theme.motion();
+            }
             host.refresh_grain();
             host
         })
@@ -388,6 +424,15 @@ pub fn run() -> Result<(), String> {
                 if let Some(w) = window {
                     w.inject_key(ev);
                 }
+            }
+
+            /// A press on the bare desk closes the open dashboard, as the page's empty-desk
+            /// click does (`setupDesktopOutsideClickHandler`).
+            fn on_pointer_outside(&mut self, generation: u64) {
+                if generation != self.active_generation.load(Ordering::Acquire) {
+                    return;
+                }
+                self.ui.update(|state, tx| state.close_dashboard(tx));
             }
 
             fn on_focus_lost(&mut self, generation: u64) {
@@ -539,11 +584,13 @@ fn sync_tree_snapshot(
     from_commit: bool,
 ) -> u64 {
     let infos = rt.elements();
-    let elements = infos.iter().map(|element| json!({
+    // The inspector's tree is rebuilt when the tree commits, not on every drawn frame of an
+    // animation, where only the hit rects move.
+    let elements: Option<Vec<serde_json::Value>> = from_commit.then(|| infos.iter().map(|element| json!({
         "path": element.path, "key": element.key, "role": element.role,
         "label": element.label, "text": element.text, "rect": element.rect,
         "opacity": element.opacity,
-    })).collect();
+    })).collect());
     let has_focused_text = infos.iter().any(|element| element.focused && element.focusable && !element.exiting);
     if focused_input.swap(has_focused_text, Ordering::AcqRel) != has_focused_text {
         if let Ok(slot) = ws_slot.lock() {
@@ -555,11 +602,12 @@ fn sync_tree_snapshot(
     let drawn_seq = {
         let mut snapshot = inspector.snapshot.lock().unwrap();
         // ElementInfo.parent indexes runtime nodes, not this filtered list.
-        // The interactive surfaces are the widgets, identified by their stable keys.
         snapshot.widget_rects = infos.iter().filter(|element| {
-            element.key.as_deref().is_some_and(|key| key.starts_with(WIDGET_KEY)) && !element.exiting
+            element.key.as_deref().is_some_and(|key| HIT_KEYS.iter().any(|prefix| key.starts_with(prefix))) && !element.exiting
         }).map(|element| element.rect).collect();
-        snapshot.elements = elements;
+        if let Some(elements) = elements {
+            snapshot.elements = elements;
+        }
         if from_commit {
             snapshot.committed += 1;
         }

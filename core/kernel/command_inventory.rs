@@ -63,6 +63,11 @@ pub const DESK_POSITION_SET: CommandSpec = CommandSpec::write(
     "Merge the position fields of one widget into the desk layout and publish it",
     "{id, x?, y?, ax?, ay?, w?, h?, anchor?, version?}",
 );
+pub const DESK_APPLY: CommandSpec = CommandSpec::write(
+    "desk_apply",
+    "Apply a list of named desk operations (position, hide, show, nest, eject, instances, theme) in one transaction and publish the layout",
+    "{ops: [{op, ...}], baseRev?}",
+);
 pub const DESK_LAYOUT_GET: CommandSpec = CommandSpec::read_only(
     "desk_layout_get",
     "The stored desk layout with the revision that the desk-layout-changed events continue from",
@@ -160,6 +165,7 @@ pub static ALL: &[&CommandSpec] = &[
     &DESK_HOST_GET,
     &DESK_HOST_SET,
     &DESK_POSITION_SET,
+    &DESK_APPLY,
     &DESK_LAYOUT_GET,
     &HOST_REGISTER,
     &SET_DESKTOP_INPUT_FOCUS,

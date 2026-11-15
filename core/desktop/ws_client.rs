@@ -7,9 +7,12 @@
 //! the host sends. The outbox is bounded; a command with a key replaces an unsent one with
 //! the same key (a drag sends only its latest position); a *sticky* command (the host
 //! registration, the input focus) is also replayed after every reconnect, so the kernel
-//! never keeps an older state than the host last reported.
+//! never keeps an older state than the host last reported. A command sent with
+//! [`Outbox::request`] is answered exactly once: by its reply, by a timeout, or as lost when
+//! the link drops after it left (the kernel may or may not have run it; the caller reads the
+//! state again).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -26,6 +29,19 @@ use windows::Win32::Networking::WinSock::{
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent, WaitForSingleObject};
 
 use std::os::windows::io::AsRawSocket;
+
+/// How long a requested command waits for its reply.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What a requester hears: the reply's result or error, or why there is none.
+pub type ReplyHandler = Box<dyn FnOnce(Result<Value, String>) + Send>;
+
+struct Pending {
+    deadline: Instant,
+    /// The command left the outbox; a dropped link loses its reply.
+    sent: bool,
+    handler: ReplyHandler,
+}
 
 /// Unsent commands the outbox holds; one more is refused, loudly.
 const OUTBOX_CAPACITY: usize = 64;
@@ -93,6 +109,7 @@ pub struct Outbox {
     state: Mutex<OutboxState>,
     next_id: AtomicU64,
     wake: OwnedEvent,
+    pending: Mutex<HashMap<u64, Pending>>,
 }
 
 impl Outbox {
@@ -101,7 +118,74 @@ impl Outbox {
             state: Mutex::new(OutboxState::default()),
             next_id: AtomicU64::new(1),
             wake: OwnedEvent::new_manual_reset()?,
+            pending: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// Sends a command and calls `handler` once with what came of it (on the link's thread):
+    /// the reply, a timeout after [`REPLY_TIMEOUT`], or lost when the link dropped after the
+    /// command left. A command that never left is sent again on the next session.
+    pub fn request(&self, cmd: &str, args: Value, handler: ReplyHandler) -> Result<u64, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.pending.lock().map_err(|e| e.to_string())?.insert(id, Pending { deadline: Instant::now() + REPLY_TIMEOUT, sent: false, handler });
+        let queued = {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            if state.queue.len() >= OUTBOX_CAPACITY {
+                false
+            } else {
+                state.queue.push_back(Queued { id, key: None, cmd: cmd.to_string(), args });
+                true
+            }
+        };
+        if !queued {
+            let pending = self.pending.lock().ok().and_then(|mut p| p.remove(&id));
+            let error = format!("the kernel link's outbox is full ({OUTBOX_CAPACITY} commands)");
+            if let Some(pending) = pending {
+                (pending.handler)(Err(error.clone()));
+            }
+            return Err(error);
+        }
+        self.wake.signal();
+        Ok(id)
+    }
+
+    /// A reply arrived: true when a requester was waiting for it.
+    fn resolve(&self, id: u64, result: Result<Value, String>) -> bool {
+        let pending = self.pending.lock().ok().and_then(|mut p| p.remove(&id));
+        match pending {
+            Some(pending) => {
+                (pending.handler)(result);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Times out the requests past their deadline; returns how long until the next one is due.
+    fn expire(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let expired: Vec<Pending> = {
+            let Ok(mut pending) = self.pending.lock() else { return None };
+            let ids: Vec<u64> = pending.iter().filter(|(_, p)| p.deadline <= now).map(|(id, _)| *id).collect();
+            ids.into_iter().filter_map(|id| pending.remove(&id)).collect()
+        };
+        for pending in expired {
+            (pending.handler)(Err("timeout: the kernel did not answer".into()));
+        }
+        let pending = self.pending.lock().ok()?;
+        pending.values().map(|p| p.deadline.saturating_duration_since(now)).min()
+    }
+
+    /// The link dropped: every request that had left loses its reply.
+    fn lose_sent(&self) {
+        let lost: Vec<Pending> = {
+            let Ok(mut pending) = self.pending.lock() else { return };
+            let ids: Vec<u64> = pending.iter().filter(|(_, p)| p.sent).map(|(id, _)| *id).collect();
+            ids.into_iter().filter_map(|id| pending.remove(&id)).collect()
+        };
+        for pending in lost {
+            (pending.handler)(Err("lost: the link to the kernel dropped before the reply".into()));
+        }
     }
 
     /// Queues a command and returns its `id`, which the reply carries. A `key` replaces an
@@ -165,6 +249,11 @@ impl Outbox {
         if let Ok(mut state) = self.state.lock() {
             if state.queue.front().is_some_and(|q| q.id == id) {
                 state.queue.pop_front();
+            }
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            if let Some(pending) = pending.get_mut(&id) {
+                pending.sent = true;
             }
         }
     }
@@ -344,7 +433,9 @@ pub fn connect_link(
             let mut backoff_ms = 250u64;
             while !stop_flag.load(Ordering::Acquire) {
                 let started = Instant::now();
-                match run_session(port, &token, &stop_flag, &stop_sig, &link_outbox, &config) {
+                let session = run_session(port, &token, &stop_flag, &stop_sig, &link_outbox, &config);
+                link_outbox.lose_sent();
+                match session {
                     Ok(()) => {}
                     Err(err) => {
                         if stop_flag.load(Ordering::Acquire) {
@@ -467,8 +558,15 @@ fn run_session(
                     send_pong(&mut ws, data)?;
                 }
                 Ok(tungstenite::Message::Text(text)) => {
-                    if let Some(inbound) = parse_inbound(&text) {
-                        (config.on_inbound)(inbound);
+                    match parse_inbound(&text) {
+                        Some(Inbound::Reply { id, ok, body }) => {
+                            let result = if ok { Ok(body.clone()) } else { Err(body.as_str().map_or_else(|| body.to_string(), str::to_string)) };
+                            if !outbox.resolve(id, result) {
+                                (config.on_inbound)(Inbound::Reply { id, ok, body });
+                            }
+                        }
+                        Some(inbound) => (config.on_inbound)(inbound),
+                        None => {}
                     }
                 }
                 Ok(_) => {}
@@ -479,7 +577,12 @@ fn run_session(
             }
         }
 
-        let res = unsafe { WSAWaitForMultipleEvents(&handles, false, WSA_INFINITE, false) };
+        // Idle with nothing awaited, the wait has no timeout: no timer wakes the host.
+        let wait = outbox.expire().map_or(WSA_INFINITE, |due| due.as_millis().clamp(1, u32::MAX as u128) as u32);
+        let res = unsafe { WSAWaitForMultipleEvents(&handles, false, wait, false) };
+        if res.0 == windows::Win32::Networking::WinSock::WSA_WAIT_TIMEOUT {
+            continue;
+        }
         if res.0 == WAIT_OBJECT_0.0 + 1 {
             let _ = ws.close(None);
             return Ok(());

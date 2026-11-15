@@ -211,6 +211,11 @@ fn send_mouse_input(msg: u32, point: POINT, w_param: WPARAM) {
             ) && native_click_policy(true, hits_host, false) == NativePointerAction::BlurFocus
             {
                 crate::hotkeys::reset_input_focus();
+                if let Some(generation) = crate::host_supervisor::active_generation() {
+                    let _ = crate::hotkeys::send_host_control(
+                        crate::host_supervisor::ControlMessage::PointerOutside { generation },
+                    );
+                }
             }
             return;
         }

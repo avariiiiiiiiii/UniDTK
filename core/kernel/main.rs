@@ -24,6 +24,7 @@ mod panic_hook;
 pub mod registry;
 mod command_inventory;
 mod desk_layout;
+mod module_table;
 mod events;
 mod host_supervisor;
 mod ws;
@@ -508,6 +509,21 @@ fn desk_position_set(
     desk_layout::set_position(&state, &patch)
 }
 
+/// Applies named desk operations in one transaction (`desk_layout::apply`).
+#[tauri::command(async)]
+fn desk_apply(
+    state: tauri::State<Arc<UniDtkDatabase>>,
+    ops: Vec<serde_json::Value>,
+    base_rev: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let mut args = serde_json::Map::new();
+    args.insert("ops".into(), serde_json::Value::Array(ops));
+    if let Some(base) = base_rev {
+        args.insert("baseRev".into(), serde_json::json!(base));
+    }
+    desk_layout::apply(&state, &args)
+}
+
 #[tauri::command(async)]
 fn get_disabled_modules(state: tauri::State<Arc<UniDtkDatabase>>) -> Result<Vec<String>, String> {
     state.get_disabled_modules()
@@ -988,6 +1004,12 @@ pub(crate) fn switch_desk_host(app: &tauri::AppHandle, target: HostMode) -> Resu
     if is_shutting_down() {
         return Err("application is shutting down".into());
     }
+    // The native host learns the desk only over the WebSocket door: without it the host would
+    // draw nothing and never be told otherwise, so the switch is refused before anything
+    // changes.
+    if target == HostMode::Native && (ws::port().is_none() || ws::token().is_none()) {
+        return Err("the interface door is not running; the native host could not read the desk".into());
+    }
 
     if let Some(db) = app.try_state::<Arc<UniDtkDatabase>>() {
         db.set_desk_host(target.as_str())?;
@@ -1013,7 +1035,14 @@ pub(crate) fn switch_desk_host(app: &tauri::AppHandle, target: HostMode) -> Resu
             if is_shutting_down() {
                 return Err("application is shutting down".into());
             }
-            host_supervisor::start_host(ws::port(), ws::token())?;
+            if let Err(error) = host_supervisor::start_host(ws::port(), ws::token()) {
+                // The wallpaper page is gone and no host started: put the page back, and the
+                // stored mode with it, so the next start does not repeat a bare desk.
+                drop(_guard);
+                log_line(format!("host: native host did not start ({error}); back to the web desk"));
+                let _ = switch_desk_host(app, HostMode::Web);
+                return Err(error);
+            }
         }
         HostMode::Web => {
             host_supervisor::stop_host(true);
@@ -1030,6 +1059,19 @@ pub(crate) fn switch_desk_host(app: &tauri::AppHandle, target: HostMode) -> Resu
     }
     unidtk_api::emit("desk-host-changed", serde_json::json!({ "mode": target.as_str() }));
     Ok(())
+}
+
+/// The supervisor gave up on a host that keeps crashing: the desk goes back to the page, which
+/// says why in the log and the tray, instead of a desk that flickers every few seconds.
+pub(crate) fn fall_back_to_web(reason: &str) {
+    log_line(format!("host: {reason}; back to the web desk"));
+    let Some(app) = APP_HANDLE.get().cloned() else { return };
+    let reason = reason.to_string();
+    std::thread::spawn(move || {
+        if let Err(error) = switch_desk_host(&app, HostMode::Web) {
+            log_line(format!("host: falling back to the web desk failed ({error}) after: {reason}"));
+        }
+    });
 }
 
 /// CDP port of this run, published to the CLI through the IPC `ping` response.
@@ -1528,6 +1570,7 @@ fn main() {
             desk_host_set,
             desk_layout_get,
             desk_position_set,
+            desk_apply,
             host_register,
             // core hotkeys & focus
             hotkeys_list,

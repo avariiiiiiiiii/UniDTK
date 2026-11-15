@@ -344,13 +344,15 @@ impl Inspector {
         }
     }
 
-    /// `desk_position_set` for a person at the CLI: the fields go to the kernel through the host's
-    /// own link, which validates and merges them like any other writer's.
+    /// One widget's position fields for a person at the CLI, as a `desk_apply` position
+    /// operation through the host's own link, which the kernel validates and merges like any
+    /// other writer's (and seeds a first layout for, when nothing is stored).
     fn desk(&self, args: &Value) -> Result<Value, String> {
-        let mut fields = args.as_object().cloned().ok_or("desk takes an object")?;
-        fields.remove("token");
+        let mut op = args.as_object().cloned().ok_or("desk takes an object")?;
+        op.remove("token");
+        op.insert("op".into(), json!("position"));
         let outbox = self.outbox.lock().map_err(|e| e.to_string())?.clone().ok_or("the host has no kernel link (it was not started by the kernel)")?;
-        let id = outbox.send("desk_position_set", Value::Object(fields), None)?;
+        let id = outbox.send("desk_apply", json!({ "ops": [Value::Object(op)] }), None)?;
         Ok(json!({ "queued": id }))
     }
 

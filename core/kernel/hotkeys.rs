@@ -86,7 +86,7 @@ pub fn is_host_pid(pid: u32) -> bool {
     pid != 0 && HOST_PID.load(Ordering::Acquire) == pid
 }
 
-fn send_host_control(msg: crate::host_supervisor::ControlMessage) -> bool {
+pub(crate) fn send_host_control(msg: crate::host_supervisor::ControlMessage) -> bool {
     #[cfg(test)]
     {
         let sent = TEST_HOST_SINK.with(|slot| {
@@ -255,9 +255,14 @@ fn foreground_class() -> ForegroundClass {
 /// The release uses the original validated target, never a newly focused HWND.
 fn forward_escape_to_shell(vk: u32, msg: u32, scan_code: isize) {
     let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-    // Original failsafe: Esc always releases the text-input capture,
-    // otherwise after the field closes the hook would keep swallowing typing into a foreign window.
-    reset_input_focus();
+    // The page's failsafe: Esc always releases the text-input capture, otherwise after the
+    // field closes the hook would keep swallowing typing into a foreign window. The native
+    // host instead receives the Escape with its focus intact and decides what it does (one
+    // press blurs a field, the next closes the top surface, `r[motion.lifo-stack]`); it reports
+    // the focus it is left with, and a foreign foreground already resets it in the hook.
+    if !crate::is_native_host() {
+        reset_input_focus();
+    }
 
     if crate::is_native_host() {
         if is_down {
@@ -476,11 +481,6 @@ fn forward_host_key(
         text,
         key_base,
     });
-    if sent && pressed && vk == VK_ESCAPE.0 as u32 {
-        let _ = send_host_control(crate::host_supervisor::ControlMessage::FocusLost {
-            generation,
-        });
-    }
     sent
 }
 
@@ -894,7 +894,7 @@ mod input_safety_tests {
             None, None, 9,
         ));
 
-        // Escape triggers FocusLost + forwards Escape cleanly
+        // Escape is forwarded with the host's focus intact: the host decides what it does
         assert!(translate_and_forward_test_key(
             0x1B, 1, false, true, false,
             Modifiers::default(),
@@ -914,7 +914,7 @@ mod input_safety_tests {
         let msg2 = rx.try_recv().expect("Enter message");
         assert!(matches!(msg2, crate::host_supervisor::ControlMessage::InjectKey { vk: 0x0D, .. }));
 
-        // Verify Escape sent and FocusLost emitted on blur/reset
+        // Escape arrives, and no FocusLost runs ahead of it or after it
         let mut saw_escape = false;
         let mut saw_focus_lost = false;
         while let Ok(m) = rx.try_recv() {
@@ -925,6 +925,6 @@ mod input_safety_tests {
             }
         }
         assert!(saw_escape, "Escape must forward");
-        assert!(saw_focus_lost, "Escape/reset must emit FocusLost");
+        assert!(!saw_focus_lost, "the host blurs its field itself; a FocusLost would close two layers with one press");
     }
 }

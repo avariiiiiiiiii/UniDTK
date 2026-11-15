@@ -518,6 +518,32 @@ fn lint_simulate_metadata() {
     println!("cargo:rerun-if-changed=../modules");
 }
 
+/// The module table the kernel and the native host read instead of the files the page loads
+/// at runtime: every `modules/<id>/ui/metadata.json` that parses, with its `icon.svg`, as
+/// `OUT_DIR/modules.json` (`[{"id", "meta", "icon"}]`, sorted by id). The page's catalogue
+/// skips `explorer` (`readModuleMetadata`); the table keeps it and each reader decides.
+fn generate_module_table() {
+    let Ok(out_dir) = std::env::var("OUT_DIR") else { return };
+    let mut modules = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("../modules") {
+        for entry in entries.flatten() {
+            let ui = entry.path().join("ui");
+            let meta_path = ui.join("metadata.json");
+            let icon_path = ui.join("icon.svg");
+            println!("cargo:rerun-if-changed={}", meta_path.display());
+            println!("cargo:rerun-if-changed={}", icon_path.display());
+            let Ok(text) = std::fs::read_to_string(&meta_path) else { continue };
+            let Ok(meta) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            let icon = std::fs::read_to_string(&icon_path).unwrap_or_default();
+            let id = entry.file_name().to_string_lossy().into_owned();
+            modules.push(serde_json::json!({ "id": id, "meta": meta, "icon": icon }));
+        }
+    }
+    modules.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let table = serde_json::to_string(&modules).expect("module table serializes");
+    std::fs::write(Path::new(&out_dir).join("modules.json"), table).expect("write OUT_DIR/modules.json");
+}
+
 /// Bake the repo `.env` (tdlib keys) into every binary of this package as
 /// compile-time env vars.
 ///
@@ -553,6 +579,7 @@ fn main() {
     lint_ui_imports();
     lint_simulate_metadata();
     lint_module_contracts();
+    generate_module_table();
     embed_dotenv();
     println!("cargo:rerun-if-changed=../opt/tdlib-native/win32-x64");
     println!("cargo:rerun-if-changed=../opt/libmpv");
