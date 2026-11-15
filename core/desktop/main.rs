@@ -85,6 +85,7 @@ fn probe_transparency(report: std::path::PathBuf) {
     let points = sample_points();
     let before = desktop_host::read_pixels(&points, "before");
     let attached = Arc::new(AtomicBool::new(false));
+    desktop_host::ensure_dpi_awareness();
     let (width, height) = desktop_host::primary_size();
 
     let spec = AppSpec::new("UniDTK desktop", (width as f32, height as f32), || Probe, view);
@@ -93,6 +94,7 @@ fn probe_transparency(report: std::path::PathBuf) {
         borderless: true,
         click_through: true,
         resizable: false,
+        no_redirection_bitmap: true,
         physical_size: Some((width as u32, height as u32)),
         position: Some((0, 0)),
         ..Default::default()

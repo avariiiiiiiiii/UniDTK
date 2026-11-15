@@ -1,22 +1,37 @@
-//! Event-driven zero-wake WebSocket client connecting `unidtk-desktop` to the
-//! kernel UI door (`ws.rs`). Uses `WSAEventSelect` + Win32 manual-reset Event so
-//! idle waits consume 0 timers and shutdown wakes instantaneously.
+//! Event-driven zero-wake WebSocket link between `unidtk-desktop` and the kernel UI door
+//! (`ws.rs`). Uses `WSAEventSelect` + Win32 manual-reset events, so idle waits consume no
+//! timers and shutdown wakes instantly.
+//!
+//! The link carries three things: subscriptions (the kernel's event frames and `gap`
+//! frames come back as [`Inbound`]), replies to commands by `id`, and an outbox of commands
+//! the host sends. The outbox is bounded; a command with a key replaces an unsent one with
+//! the same key (a drag sends only its latest position); a *sticky* command (the host
+//! registration, the input focus) is also replayed after every reconnect, so the kernel
+//! never keeps an older state than the host last reported.
 
+use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use serde_json::{json, Value};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Networking::WinSock::{
     WSACloseEvent, WSACreateEvent, WSAEnumNetworkEvents, WSAEventSelect,
-    WSAWaitForMultipleEvents, FD_CLOSE, FD_READ, SOCKET, WSAEVENT, WSANETWORKEVENTS,
+    WSAWaitForMultipleEvents, FD_CLOSE, FD_READ, FD_WRITE, SOCKET, WSAEVENT, WSANETWORKEVENTS,
     WSA_INFINITE, WSA_WAIT_FAILED,
 };
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent, WaitForSingleObject};
 
 use std::os::windows::io::AsRawSocket;
+
+/// Unsent commands the outbox holds; one more is refused, loudly.
+const OUTBOX_CAPACITY: usize = 64;
+/// A session shorter than this does not reset the reconnect back-off: a kernel that accepts
+/// and drops at once must not be called every 250 ms.
+const STABLE_SESSION: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRegistrationInfo {
@@ -28,13 +43,132 @@ pub struct HostRegistrationInfo {
     pub ready: bool,
 }
 
-struct RegistrationState {
-    info: HostRegistrationInfo,
-    dirty: bool,
-    focus_pending: Option<bool>,
+/// What the kernel sent that is not the answer to the handshake.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Inbound {
+    /// An event frame; `snapshot` marks the catch-up frame of a state event.
+    Event { event: String, seq: u64, payload: Value, snapshot: bool },
+    /// The kernel could not replay the event from the cursor: read the state again.
+    Gap { event: String },
+    /// The answer to the command sent with this `id`.
+    Reply { id: u64, ok: bool, body: Value },
 }
 
-type SharedRegistration = Arc<(Mutex<RegistrationState>, OwnedEvent)>;
+/// Parses one text frame of the kernel; `None` for frames the host does not use.
+pub fn parse_inbound(text: &str) -> Option<Inbound> {
+    let frame: Value = serde_json::from_str(text).ok()?;
+    match frame.get("type").and_then(Value::as_str) {
+        Some("event") => Some(Inbound::Event {
+            event: frame.get("event")?.as_str()?.to_string(),
+            seq: frame.get("seq").and_then(Value::as_u64).unwrap_or(0),
+            payload: frame.get("payload").cloned().unwrap_or(Value::Null),
+            snapshot: frame.get("snapshot").and_then(Value::as_bool).unwrap_or(false),
+        }),
+        Some("gap") => Some(Inbound::Gap { event: frame.get("event")?.as_str()?.to_string() }),
+        _ => {
+            let id = frame.get("id")?.as_u64()?;
+            let ok = frame.get("ok").and_then(Value::as_bool).unwrap_or(false);
+            let body = if ok { frame.get("result") } else { frame.get("error") };
+            Some(Inbound::Reply { id, ok, body: body.cloned().unwrap_or(Value::Null) })
+        }
+    }
+}
+
+struct Queued {
+    id: u64,
+    key: Option<String>,
+    cmd: String,
+    args: Value,
+}
+
+#[derive(Default)]
+struct OutboxState {
+    queue: VecDeque<Queued>,
+    /// Latest value per key of the commands that survive a reconnect.
+    sticky: Vec<(String, String, Value)>,
+}
+
+/// The host's commands to the kernel, shared by every thread that sends one.
+pub struct Outbox {
+    state: Mutex<OutboxState>,
+    next_id: AtomicU64,
+    wake: OwnedEvent,
+}
+
+impl Outbox {
+    pub fn new() -> Result<Arc<Self>, String> {
+        Ok(Arc::new(Self {
+            state: Mutex::new(OutboxState::default()),
+            next_id: AtomicU64::new(1),
+            wake: OwnedEvent::new_manual_reset()?,
+        }))
+    }
+
+    /// Queues a command and returns its `id`, which the reply carries. A `key` replaces an
+    /// unsent command with the same key. A full outbox is an error, not a silent drop.
+    pub fn send(&self, cmd: &str, args: Value, key: Option<&str>) -> Result<u64, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            let queued = Queued { id, key: key.map(str::to_string), cmd: cmd.to_string(), args };
+            let same_key = key.and_then(|k| state.queue.iter().position(|q| q.key.as_deref() == Some(k)));
+            match same_key {
+                Some(index) => state.queue[index] = queued,
+                None if state.queue.len() >= OUTBOX_CAPACITY => {
+                    return Err(format!("the kernel link's outbox is full ({OUTBOX_CAPACITY} commands)"));
+                }
+                None => state.queue.push_back(queued),
+            }
+        }
+        self.wake.signal();
+        Ok(id)
+    }
+
+    /// Like [`Outbox::send`], and the latest command of this key is sent again after every
+    /// reconnect.
+    pub fn send_sticky(&self, key: &str, cmd: &str, args: Value) -> Result<u64, String> {
+        {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            match state.sticky.iter_mut().find(|(k, ..)| k == key) {
+                Some(entry) => *entry = (key.to_string(), cmd.to_string(), args.clone()),
+                None => state.sticky.push((key.to_string(), cmd.to_string(), args.clone())),
+            }
+        }
+        self.send(cmd, args, Some(key))
+    }
+
+    /// A session begins: every sticky command goes first, then what was waiting.
+    fn begin_session(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            let mut stale = std::mem::take(&mut state.queue);
+            let replay: Vec<_> = state.sticky.clone();
+            for (key, cmd, args) in replay {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                state.queue.push_back(Queued { id, key: Some(key), cmd, args });
+            }
+            for q in stale.drain(..) {
+                if q.key.as_ref().is_none_or(|k| !state.queue.iter().any(|n| n.key.as_ref() == Some(k))) {
+                    state.queue.push_back(q);
+                }
+            }
+        }
+    }
+
+    /// The front command, kept in the queue until `confirm_sent` so that a failed send
+    /// does not lose it.
+    fn front(&self) -> Option<(u64, String, Value)> {
+        let state = self.state.lock().ok()?;
+        state.queue.front().map(|q| (q.id, q.cmd.clone(), q.args.clone()))
+    }
+
+    fn confirm_sent(&self, id: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.queue.front().is_some_and(|q| q.id == id) {
+                state.queue.pop_front();
+            }
+        }
+    }
+}
 
 struct OwnedEvent(HANDLE);
 unsafe impl Send for OwnedEvent {}
@@ -70,37 +204,89 @@ impl Drop for OwnedEvent {
     }
 }
 
+/// What a link does besides sending: which events it follows and who hears what arrives.
+/// The callbacks run on the link's thread and must not block.
+pub struct LinkConfig {
+    pub subscriptions: Vec<&'static str>,
+    /// After every (re)connect, once subscribed: the place to read the state again.
+    pub on_connected: Box<dyn Fn() + Send + Sync>,
+    pub on_inbound: Box<dyn Fn(Inbound) + Send + Sync>,
+}
+
+impl LinkConfig {
+    /// A link that follows `desk-host-changed` and discards what arrives: the kernel's
+    /// registration needs nothing else.
+    fn registration_only() -> Self {
+        Self {
+            subscriptions: vec!["desk-host-changed"],
+            on_connected: Box::new(|| {}),
+            on_inbound: Box::new(|_| {}),
+        }
+    }
+}
+
 pub struct WsClientHandle {
     stopping: Arc<AtomicBool>,
     stop_event: Arc<OwnedEvent>,
-    registration: Option<SharedRegistration>,
+    outbox: Arc<Outbox>,
+    /// What the kernel was last told about this host.
+    registration: Mutex<Option<HostRegistrationInfo>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WsClientHandle {
-    pub fn update_registration(&self, inspector_port: u16, attached: bool, ready: bool) {
-        let Some((state, ev)) = self.registration.as_deref() else { return };
-        if let Ok(mut guard) = state.lock() {
-            if guard.info.inspector_port == inspector_port
-                && guard.info.attached == attached
-                && guard.info.ready == ready
-            {
-                return;
-            }
-            guard.info.inspector_port = inspector_port;
-            guard.info.attached = attached;
-            guard.info.ready = ready;
-            guard.dirty = true;
+    /// Tells the kernel who this host is; sent again after every reconnect.
+    pub fn set_registration(&self, info: HostRegistrationInfo) {
+        self.send_registration(&info);
+        if let Ok(mut slot) = self.registration.lock() {
+            *slot = Some(info);
         }
-        ev.signal();
     }
 
-    pub fn report_input_focus(&self, focused: bool) {
-        let Some((state, ev)) = self.registration.as_deref() else { return };
-        if let Ok(mut guard) = state.lock() {
-            guard.focus_pending = Some(focused);
+    /// The host's attach state as the kernel should know it; nothing is sent when it did
+    /// not change.
+    pub fn update_registration(&self, inspector_port: u16, attached: bool, ready: bool) {
+        let Ok(mut slot) = self.registration.lock() else { return };
+        let Some(info) = slot.as_mut() else { return };
+        if info.inspector_port == inspector_port && info.attached == attached && info.ready == ready {
+            return;
         }
-        ev.signal();
+        info.inspector_port = inspector_port;
+        info.attached = attached;
+        info.ready = ready;
+        let info = info.clone();
+        drop(slot);
+        self.send_registration(&info);
+    }
+
+    fn send_registration(&self, info: &HostRegistrationInfo) {
+        let _ = self.outbox.send_sticky(
+            "host_register",
+            "host_register",
+            json!({
+                "pid": info.pid,
+                "generation": info.generation,
+                "instanceNonce": info.instance_nonce,
+                "inspectorPort": info.inspector_port,
+                "attached": info.attached,
+                "ready": info.ready,
+            }),
+        );
+    }
+
+    /// Whether a text field of the desktop has the keyboard; the full state is sent after
+    /// every reconnect, so the kernel's flag cannot stay stale.
+    pub fn report_input_focus(&self, focused: bool) {
+        let _ = self.outbox.send_sticky(
+            "set_desktop_input_focus",
+            "set_desktop_input_focus",
+            json!({ "focused": focused }),
+        );
+    }
+
+    #[allow(dead_code)] // Used by the desk model, which sends its own commands.
+    pub fn outbox(&self) -> &Arc<Outbox> {
+        &self.outbox
     }
 
     pub fn stop(mut self) {
@@ -124,56 +310,53 @@ impl Drop for WsClientHandle {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn connect_loop(port: u16, token: String) -> Result<WsClientHandle, String> {
-    connect_internal(port, token, None)
+    connect_link(port, token, Outbox::new()?, LinkConfig::registration_only())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn connect_with_registration(
     port: u16,
     token: String,
     initial: HostRegistrationInfo,
 ) -> Result<WsClientHandle, String> {
-    let reg = Arc::new((
-        Mutex::new(RegistrationState {
-            info: initial,
-            dirty: true,
-            focus_pending: None,
-        }),
-        OwnedEvent::new_manual_reset()?,
-    ));
-    connect_internal(port, token, Some(reg))
+    let handle = connect_loop(port, token)?;
+    handle.set_registration(initial);
+    Ok(handle)
 }
 
-fn connect_internal(
+/// Starts the link's thread. It connects, follows `config.subscriptions`, replays the
+/// outbox's sticky commands, and reconnects with back-off until the handle is stopped.
+pub fn connect_link(
     port: u16,
     token: String,
-    registration: Option<SharedRegistration>,
+    outbox: Arc<Outbox>,
+    config: LinkConfig,
 ) -> Result<WsClientHandle, String> {
     let stopping = Arc::new(AtomicBool::new(false));
     let stop_event = Arc::new(OwnedEvent::new_manual_reset()?);
 
     let stop_flag = stopping.clone();
     let stop_sig = stop_event.clone();
-    let reg_clone = registration.clone();
+    let link_outbox = outbox.clone();
     let thread = std::thread::Builder::new()
         .name("host-ws-client".into())
         .spawn(move || {
             let mut backoff_ms = 250u64;
             while !stop_flag.load(Ordering::Acquire) {
-                match run_session(port, &token, &stop_flag, &stop_sig, reg_clone.as_ref()) {
-                    Ok(()) => {
-                        backoff_ms = 250;
-                    }
+                let started = Instant::now();
+                match run_session(port, &token, &stop_flag, &stop_sig, &link_outbox, &config) {
+                    Ok(()) => {}
                     Err(err) => {
                         if stop_flag.load(Ordering::Acquire) {
                             break;
                         }
                         crate::desktop_host::note(&format!("ws_client: {err}"));
-                        backoff_ms = (backoff_ms * 2).min(5000);
                     }
                 }
                 if stop_flag.load(Ordering::Acquire) {
                     break;
                 }
+                backoff_ms = if started.elapsed() >= STABLE_SESSION { 250 } else { (backoff_ms * 2).min(5000) };
                 let wait = unsafe { WaitForSingleObject(stop_sig.0, backoff_ms as u32) };
                 if wait == WAIT_OBJECT_0 {
                     break;
@@ -182,61 +365,36 @@ fn connect_internal(
         })
         .map_err(|e| format!("spawn host-ws-client: {e}"))?;
 
-    Ok(WsClientHandle {
-        stopping,
-        stop_event,
-        registration,
-        thread: Some(thread),
-    })
+    Ok(WsClientHandle { stopping, stop_event, outbox, registration: Mutex::new(None), thread: Some(thread) })
 }
 
-fn flush_pending_state(
-    ws: &mut tungstenite::WebSocket<TcpStream>,
-    registration: Option<&SharedRegistration>,
-    force_register: bool,
-    next_id: &mut u64,
-) -> Result<(), String> {
-    let Some((state, _)) = registration.map(|r| (&r.0, &r.1)) else {
-        return Ok(());
-    };
-    let (reg_info, focus_update) = {
-        let mut guard = state.lock().map_err(|e| e.to_string())?;
-        let send_reg = force_register || guard.dirty;
-        guard.dirty = false;
-        let info = send_reg.then(|| guard.info.clone());
-        let focus = guard.focus_pending.take();
-        (info, focus)
-    };
-    if let Some(info) = reg_info {
-        let id = *next_id;
-        *next_id += 1;
-        let payload = serde_json::json!({
-            "id": id,
-            "cmd": "host_register",
-            "args": {
-                "pid": info.pid,
-                "generation": info.generation,
-                "instanceNonce": info.instance_nonce,
-                "inspectorPort": info.inspector_port,
-                "attached": info.attached,
-                "ready": info.ready,
-            }
-        });
-        ws.send(tungstenite::Message::Text(payload.to_string()))
-            .map_err(|e| format!("host_register send: {e}"))?;
+/// A send on the non-blocking socket that hits `WouldBlock` has queued the frame inside
+/// tungstenite; the link flushes it when the socket is writable again.
+fn send_text(ws: &mut tungstenite::WebSocket<TcpStream>, text: String) -> Result<(), String> {
+    match ws.send(tungstenite::Message::Text(text)) {
+        Ok(()) => Ok(()),
+        Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => Ok(()),
+        Err(e) => Err(format!("send: {e}")),
     }
-    if let Some(focused) = focus_update {
-        let id = *next_id;
-        *next_id += 1;
-        let payload = serde_json::json!({
-            "id": id,
-            "cmd": "set_desktop_input_focus",
-            "args": { "focused": focused }
-        });
-        ws.send(tungstenite::Message::Text(payload.to_string()))
-            .map_err(|e| format!("set_desktop_input_focus send: {e}"))?;
+}
+
+fn flush(ws: &mut tungstenite::WebSocket<TcpStream>) -> Result<(), String> {
+    match ws.flush() {
+        Ok(()) => Ok(()),
+        Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => Ok(()),
+        Err(tungstenite::Error::ConnectionClosed) => Ok(()),
+        Err(e) => Err(format!("flush: {e}")),
     }
-    Ok(())
+}
+
+/// Sends every queued command, front first; a command leaves the queue only after its send
+/// was accepted.
+fn drain_outbox(ws: &mut tungstenite::WebSocket<TcpStream>, outbox: &Outbox) -> Result<(), String> {
+    while let Some((id, cmd, args)) = outbox.front() {
+        send_text(ws, json!({ "id": id, "cmd": cmd, "args": args }).to_string())?;
+        outbox.confirm_sent(id);
+    }
+    flush(ws)
 }
 
 fn run_session(
@@ -244,7 +402,8 @@ fn run_session(
     token: &str,
     stopping: &AtomicBool,
     stop_event: &OwnedEvent,
-    registration: Option<&SharedRegistration>,
+    outbox: &Outbox,
+    config: &LinkConfig,
 ) -> Result<(), String> {
     let addr = (std::net::Ipv4Addr::LOCALHOST, port)
         .to_socket_addrs()
@@ -260,33 +419,28 @@ fn run_session(
     let (mut ws, _) =
         tungstenite::client(url, tcp).map_err(|e| format!("ws handshake failed: {e}"))?;
 
-    ws.send(tungstenite::Message::Text(
-        serde_json::json!({ "hello": { "token": token } }).to_string(),
-    ))
-    .map_err(|e| format!("hello send: {e}"))?;
+    ws.send(tungstenite::Message::Text(json!({ "hello": { "token": token } }).to_string()))
+        .map_err(|e| format!("hello send: {e}"))?;
 
     let ready_txt = match ws.read() {
         Ok(tungstenite::Message::Text(t)) => t,
         Ok(_) => return Err("unexpected non-text ready frame".into()),
         Err(e) => return Err(format!("hello read: {e}")),
     };
-    let ready_json: serde_json::Value =
-        serde_json::from_str(&ready_txt).map_err(|e| format!("bad ready json: {e}"))?;
-    if ready_json.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+    let ready_json: Value = serde_json::from_str(&ready_txt).map_err(|e| format!("bad ready json: {e}"))?;
+    if ready_json.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(format!("ws hello rejected: {ready_json}"));
     }
 
-    // Subscribe to host change events so the connection exercises event-driven wakeups cleanly.
-    ws.send(tungstenite::Message::Text(
-        serde_json::json!({ "type": "subscribe", "event": "desk-host-changed" }).to_string(),
-    ))
-    .map_err(|e| format!("subscribe send: {e}"))?;
-
-    let mut next_id = 1u64;
-    if let Some((_, ev)) = registration.map(|r| (&r.0, &r.1)) {
-        ev.reset();
+    for event in &config.subscriptions {
+        ws.send(tungstenite::Message::Text(json!({ "type": "subscribe", "event": event }).to_string()))
+            .map_err(|e| format!("subscribe send: {e}"))?;
     }
-    flush_pending_state(&mut ws, registration, true, &mut next_id)?;
+
+    outbox.wake.reset();
+    outbox.begin_session();
+    (config.on_connected)();
+    drain_outbox(&mut ws, outbox)?;
 
     let sock = SOCKET(ws.get_ref().as_raw_socket() as usize);
     let sock_event = unsafe { WSACreateEvent() }.map_err(|e| format!("WSACreateEvent: {e}"))?;
@@ -300,21 +454,21 @@ fn run_session(
         }
     }
     let _guard = SockGuard(sock, sock_event);
-    if unsafe { WSAEventSelect(sock, sock_event, (FD_READ | FD_CLOSE) as i32) } != 0 {
+    if unsafe { WSAEventSelect(sock, sock_event, (FD_READ | FD_WRITE | FD_CLOSE) as i32) } != 0 {
         return Err("WSAEventSelect failed".into());
     }
 
-    let mut handles = vec![HANDLE(sock_event.0 as _), stop_event.0];
-    if let Some((_, ev)) = registration.map(|r| (&r.0, &r.1)) {
-        handles.push(ev.0);
-    }
+    let handles = [HANDLE(sock_event.0 as _), stop_event.0, outbox.wake.0];
     while !stopping.load(Ordering::Acquire) {
         loop {
             match ws.read() {
                 Ok(tungstenite::Message::Close(_)) => return Ok(()),
                 Ok(tungstenite::Message::Ping(data)) => {
-                    if ws.send(tungstenite::Message::Pong(data)).is_err() {
-                        return Ok(());
+                    send_pong(&mut ws, data)?;
+                }
+                Ok(tungstenite::Message::Text(text)) => {
+                    if let Some(inbound) = parse_inbound(&text) {
+                        (config.on_inbound)(inbound);
                     }
                 }
                 Ok(_) => {}
@@ -331,11 +485,9 @@ fn run_session(
             return Ok(());
         }
         if res.0 == WAIT_OBJECT_0.0 + 2 {
-            if let Some((_, ev)) = registration.map(|r| (&r.0, &r.1)) {
-                // Reset manual-reset event before draining state so concurrent updates re-signal it.
-                ev.reset();
-            }
-            flush_pending_state(&mut ws, registration, false, &mut next_id)?;
+            // Reset the manual-reset event before draining so a concurrent send re-signals it.
+            outbox.wake.reset();
+            drain_outbox(&mut ws, outbox)?;
             continue;
         }
         if res.0 == WSA_WAIT_FAILED {
@@ -346,32 +498,53 @@ fn run_session(
             unsafe {
                 let _ = WSAEnumNetworkEvents(sock, sock_event, &mut ne);
             }
+            // The socket became writable: whatever tungstenite buffered can go out now.
+            flush(&mut ws)?;
         }
     }
     Ok(())
+}
+
+fn send_pong(ws: &mut tungstenite::WebSocket<TcpStream>, data: Vec<u8>) -> Result<(), String> {
+    match ws.send(tungstenite::Message::Pong(data)) {
+        Ok(()) => Ok(()),
+        Err(tungstenite::Error::Io(e)) if e.kind() == ErrorKind::WouldBlock => Ok(()),
+        Err(e) => Err(format!("pong: {e}")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::TcpListener;
-    use std::time::Instant;
+    use std::sync::mpsc;
+
+    fn info(attached: bool, ready: bool) -> HostRegistrationInfo {
+        HostRegistrationInfo {
+            pid: 4242,
+            generation: 9,
+            instance_nonce: "nonce-xyz".into(),
+            inspector_port: 51111,
+            attached,
+            ready,
+        }
+    }
+
+    fn ok_reply() -> String {
+        json!({ "v": 1, "ok": true, "result": { "ready": true } }).to_string()
+    }
 
     #[test]
     fn ws_client_authenticates_and_exits_immediately_on_stop() {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (hello_tx, hello_rx) = std::sync::mpsc::channel();
+        let (hello_tx, hello_rx) = mpsc::channel();
         let server_thread = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut ws = tungstenite::accept(stream).unwrap();
-            let hello: serde_json::Value =
-                serde_json::from_str(&ws.read().unwrap().into_text().unwrap()).unwrap();
+            let hello: Value = serde_json::from_str(&ws.read().unwrap().into_text().unwrap()).unwrap();
             let _ = hello_tx.send(hello);
-            ws.send(tungstenite::Message::Text(
-                serde_json::json!({ "v": 1, "ok": true, "result": { "ready": true } }).to_string(),
-            ))
-            .unwrap();
+            ws.send(tungstenite::Message::Text(ok_reply())).unwrap();
             let _ = ws.read();
         });
 
@@ -381,59 +554,38 @@ mod tests {
 
         let t0 = Instant::now();
         client.stop();
-        assert!(
-            t0.elapsed() < Duration::from_millis(300),
-            "ws client must wake immediately from WSA_INFINITE on stop"
-        );
+        assert!(t0.elapsed() < Duration::from_millis(300), "the link must wake at once from WSA_INFINITE on stop");
         let _ = server_thread.join();
     }
 
     #[test]
-    fn ws_client_sends_host_register_on_connect_and_wakes_on_state_update_without_timers() {
+    fn registration_is_sent_on_connect_and_a_change_wakes_the_link_without_timers() {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (frame_tx, frame_rx) = std::sync::mpsc::channel();
+        let (frame_tx, frame_rx) = mpsc::channel();
         let server_thread = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut ws = tungstenite::accept(stream).unwrap();
             let hello = ws.read().unwrap().into_text().unwrap();
             let _ = frame_tx.send(hello);
-            ws.send(tungstenite::Message::Text(
-                serde_json::json!({ "v": 1, "ok": true, "result": { "ready": true } }).to_string(),
-            ))
-            .unwrap();
+            ws.send(tungstenite::Message::Text(ok_reply())).unwrap();
             while let Ok(msg) = ws.read() {
                 if let tungstenite::Message::Text(txt) = msg {
                     let _ = frame_tx.send(txt.clone());
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
-                        if let Some(id) = val.get("id").cloned() {
-                            let _ = ws.send(tungstenite::Message::Text(
-                                serde_json::json!({ "v": 1, "id": id, "ok": true, "result": { "ok": true } })
-                                    .to_string(),
-                            ));
-                        }
+                    if let Some(id) = serde_json::from_str::<Value>(&txt).ok().and_then(|v| v.get("id").cloned()) {
+                        let _ = ws.send(tungstenite::Message::Text(
+                            json!({ "v": 1, "id": id, "ok": true, "result": { "ok": true } }).to_string(),
+                        ));
                     }
                 }
             }
         });
 
-        let client = connect_with_registration(
-            port,
-            "client-secret".into(),
-            HostRegistrationInfo {
-                pid: 4242,
-                generation: 9,
-                instance_nonce: "nonce-xyz".into(),
-                inspector_port: 51111,
-                attached: false,
-                ready: false,
-            },
-        )
-        .unwrap();
-
-        let _hello: serde_json::Value = serde_json::from_str(&frame_rx.recv_timeout(Duration::from_secs(2)).unwrap()).unwrap();
-        let _sub: serde_json::Value = serde_json::from_str(&frame_rx.recv_timeout(Duration::from_secs(2)).unwrap()).unwrap();
-        let reg1: serde_json::Value = serde_json::from_str(&frame_rx.recv_timeout(Duration::from_secs(2)).unwrap()).unwrap();
+        let client = connect_with_registration(port, "client-secret".into(), info(false, false)).unwrap();
+        let recv = || serde_json::from_str::<Value>(&frame_rx.recv_timeout(Duration::from_secs(2)).unwrap()).unwrap();
+        let _hello = recv();
+        let _sub = recv();
+        let reg1 = recv();
         assert_eq!(reg1["cmd"], "host_register");
         assert_eq!(reg1["args"]["pid"], 4242);
         assert_eq!(reg1["args"]["generation"], 9);
@@ -444,12 +596,136 @@ mod tests {
 
         let t_upd = Instant::now();
         client.update_registration(51111, true, true);
-        let reg2: serde_json::Value = serde_json::from_str(&frame_rx.recv_timeout(Duration::from_secs(2)).unwrap()).unwrap();
-        assert!(t_upd.elapsed() < Duration::from_millis(300), "registration wake must be event-driven");
+        let reg2 = recv();
+        assert!(t_upd.elapsed() < Duration::from_millis(300), "a registration change must be event-driven");
         assert_eq!(reg2["cmd"], "host_register");
         assert_eq!(reg2["args"]["attached"], true);
         assert_eq!(reg2["args"]["ready"], true);
 
+        client.stop();
+        let _ = server_thread.join();
+    }
+
+    #[test]
+    fn inbound_frames_are_parsed_into_events_gaps_and_replies() {
+        assert_eq!(
+            parse_inbound(r#"{"v":1,"type":"event","event":"desk-layout-changed","seq":7,"payload":{"rev":3},"snapshot":true}"#),
+            Some(Inbound::Event { event: "desk-layout-changed".into(), seq: 7, payload: json!({"rev": 3}), snapshot: true })
+        );
+        assert_eq!(
+            parse_inbound(r#"{"type":"event","event":"system-volume","seq":1,"payload":{"level":40}}"#),
+            Some(Inbound::Event { event: "system-volume".into(), seq: 1, payload: json!({"level": 40}), snapshot: false })
+        );
+        assert_eq!(
+            parse_inbound(r#"{"type":"gap","event":"desk-layout-changed","since":2,"error":"ring"}"#),
+            Some(Inbound::Gap { event: "desk-layout-changed".into() })
+        );
+        assert_eq!(
+            parse_inbound(r#"{"v":1,"id":5,"ok":true,"result":{"rev":9}}"#),
+            Some(Inbound::Reply { id: 5, ok: true, body: json!({"rev": 9}) })
+        );
+        assert_eq!(
+            parse_inbound(r#"{"v":1,"id":6,"ok":false,"error":"nothing stored"}"#),
+            Some(Inbound::Reply { id: 6, ok: false, body: json!("nothing stored") })
+        );
+        assert_eq!(parse_inbound("not json"), None);
+        assert_eq!(parse_inbound(r#"{"hello":1}"#), None);
+    }
+
+    #[test]
+    fn a_keyed_command_replaces_the_unsent_one_and_a_full_outbox_is_an_error() {
+        let outbox = Outbox::new().unwrap();
+        let first = outbox.send("desk_position_set", json!({"id": "clock", "x": 1}), Some("pos:clock")).unwrap();
+        let second = outbox.send("desk_position_set", json!({"id": "clock", "x": 2}), Some("pos:clock")).unwrap();
+        assert!(second > first);
+        let (id, _, args) = outbox.front().unwrap();
+        assert_eq!((id, args["x"].clone()), (second, json!(2)), "the latest position wins");
+        outbox.confirm_sent(id);
+        assert!(outbox.front().is_none());
+
+        for n in 0..OUTBOX_CAPACITY {
+            outbox.send("set_system_volume", json!({"level": n}), None).unwrap();
+        }
+        assert!(outbox.send("set_system_volume", json!({"level": 1}), None).is_err());
+    }
+
+    #[test]
+    fn a_failed_send_keeps_the_command_and_a_sticky_one_is_replayed_first() {
+        let outbox = Outbox::new().unwrap();
+        outbox.send_sticky("set_desktop_input_focus", "set_desktop_input_focus", json!({"focused": true})).unwrap();
+        let (id, ..) = outbox.front().unwrap();
+        // Not confirmed: still there for the next attempt.
+        assert_eq!(outbox.front().unwrap().0, id);
+        outbox.confirm_sent(id);
+        outbox.send("set_system_mute", json!({"muted": true}), None).unwrap();
+        outbox.begin_session();
+        let (_, cmd, args) = outbox.front().unwrap();
+        assert_eq!((cmd.as_str(), args["focused"].clone()), ("set_desktop_input_focus", json!(true)), "the focus state goes out again after a reconnect, before older commands");
+    }
+
+    #[test]
+    fn the_link_subscribes_delivers_events_replies_and_sticky_state_after_a_reconnect() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = mpsc::channel::<String>();
+        let server_thread = std::thread::spawn(move || {
+            for session in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                let mut ws = tungstenite::accept(stream).unwrap();
+                let _hello = ws.read().unwrap();
+                ws.send(tungstenite::Message::Text(ok_reply())).unwrap();
+                loop {
+                    let Ok(tungstenite::Message::Text(txt)) = ws.read() else { break };
+                    let _ = seen_tx.send(format!("{session}:{txt}"));
+                    let v: Value = serde_json::from_str(&txt).unwrap();
+                    if v["cmd"] == "desk_layout_get" {
+                        let _ = ws.send(tungstenite::Message::Text(json!({"v":1,"id":v["id"],"ok":true,"result":{"rev":11,"config":null}}).to_string()));
+                        let _ = ws.send(tungstenite::Message::Text(json!({"v":1,"type":"event","event":"desk-layout-changed","seq":4,"payload":{"rev":12,"positions":{}}}).to_string()));
+                        if session == 0 {
+                            // Drop the connection: the link must come back and replay.
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let outbox = Outbox::new().unwrap();
+        let (inbound_tx, inbound_rx) = mpsc::channel();
+        let on_outbox = outbox.clone();
+        let client = connect_link(
+            port,
+            "t".into(),
+            outbox.clone(),
+            LinkConfig {
+                subscriptions: vec!["desk-layout-changed"],
+                on_connected: Box::new(move || {
+                    let _ = on_outbox.send("desk_layout_get", json!({}), Some("snapshot:layout"));
+                }),
+                on_inbound: Box::new(move |inbound| {
+                    let _ = inbound_tx.send(inbound);
+                }),
+            },
+        )
+        .unwrap();
+        client.report_input_focus(true);
+
+        let got = |rx: &mpsc::Receiver<Inbound>| rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(got(&inbound_rx), Inbound::Reply { ok: true, .. }));
+        assert!(matches!(got(&inbound_rx), Inbound::Event { ref event, .. } if event == "desk-layout-changed"));
+        // After the drop the link reconnects, subscribes and snapshots again.
+        assert!(matches!(got(&inbound_rx), Inbound::Reply { ok: true, .. }));
+
+        let mut frames = Vec::new();
+        while let Ok(frame) = seen_rx.recv_timeout(Duration::from_millis(300)) {
+            frames.push(frame);
+        }
+        let in_session = |n: u8, needle: &str| frames.iter().any(|f| f.starts_with(&format!("{n}:")) && f.contains(needle));
+        for session in 0..2 {
+            assert!(in_session(session, r#""type":"subscribe""#), "session {session} subscribes");
+            assert!(in_session(session, "set_desktop_input_focus"), "session {session} reports the input focus");
+            assert!(in_session(session, "desk_layout_get"), "session {session} reads the layout");
+        }
         client.stop();
         let _ = server_thread.join();
     }

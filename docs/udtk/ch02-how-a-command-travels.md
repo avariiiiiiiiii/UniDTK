@@ -59,12 +59,12 @@ Each command is a `CommandSpec` value, defined in [core/api/src/commands.rs](../
 
 | Constructor | Access | Doors | Idempotency | Kernel | Modules |
 |---|---|---|---|---|---|
-| `read_only(...)` | ReadOnly | Socket and UI | Safe | 4 | 16 |
+| `read_only(...)` | ReadOnly | Socket and UI | Safe | 5 | 16 |
 | `read_only_cli(...)` | ReadOnly | Socket only (the tool's own surface) | Safe | 9 | 0 |
 | `read_ui(...)` | ReadOnly | UI only (a read the page needs, kept off the socket) | Safe | 0 | 44 |
-| `write(...)` | Write | UI only | Unsafe | 6 | 79 |
+| `write(...)` | Write | UI only | Unsafe | 7 | 79 |
 
-The manifest holds **158** commands: 19 of the kernel (the constant `ALL`, in declaration order) and 139 of the modules. Twenty-nine of them are served on the socket (including the lock-free `host_ping`, `host_tree`, `host_frames`, and `host_hit` native inspector proxies), and 149 on the UI door (including `host_register` and `set_desktop_input_focus` over the authenticated WebSocket door). The 85 writes never reach the socket by construction. Each name is written once: the kernel's route table takes the name from the constant (`COMMAND.name`), and a module's table generates its spec and its handler from one line.
+The manifest holds **160** commands: 21 of the kernel (the constant `ALL`, in declaration order) and 139 of the modules. Thirty of them are served on the socket (including the lock-free `host_ping`, `host_tree`, `host_frames`, and `host_hit` native inspector proxies), and 151 on the UI door (including `host_register` and `set_desktop_input_focus` over the authenticated WebSocket door). The 86 writes never reach the socket by construction. Each name is written once: the kernel's route table takes the name from the constant (`COMMAND.name`), and a module's table generates its spec and its handler from one line.
 
 Inventory rules that the tests enforce are listed in [Chapter 15](ch15-how-a-module-joins-the-bridge.md#chapter-15-how-a-module-joins-the-bridge).
 

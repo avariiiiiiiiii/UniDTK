@@ -88,6 +88,10 @@ pub struct WindowOptions {
     /// Whether the user can resize the window. Programmatic sizing is unaffected. A window
     /// that isn't resizable doesn't maximize either: its maximize (zoom) button is disabled.
     pub resizable: bool,
+    /// Windows only: the window has no GDI redirection bitmap, so DirectComposition alone
+    /// draws it. Without it a transparent window keeps a GDI surface and winit enables DWM
+    /// blur-behind on it, and the frame it was created with shows through every clear pixel.
+    pub no_redirection_bitmap: bool,
 }
 
 impl Default for WindowOptions {
@@ -95,7 +99,7 @@ impl Default for WindowOptions {
         Self {
             transparent: false, borderless: false, click_through: false,
             always_on_top: false, visible: true, position: None, physical_size: None,
-            min_size: None, max_size: None, resizable: true,
+            min_size: None, max_size: None, resizable: true, no_redirection_bitmap: false,
         }
     }
 }
@@ -120,7 +124,7 @@ impl WindowOptions {
         Self {
             transparent: true, borderless: true, click_through: true, always_on_top: true,
             visible: true, position: Some(display.position), physical_size: Some(display.size),
-            min_size: Some((0.0, 0.0)), max_size: None, resizable: true,
+            min_size: Some((0.0, 0.0)), max_size: None, resizable: true, no_redirection_bitmap: false,
         }
     }
 
@@ -156,6 +160,11 @@ impl WindowOptions {
         if let Some((w, h)) = self.max_size { attrs = attrs.with_max_inner_size(LogicalSize::new(w, h)); }
         if let Some((x, y)) = self.position { attrs = attrs.with_position(PhysicalPosition::new(x, y)); }
         if let Some((w, h)) = self.physical_size { attrs = attrs.with_inner_size(PhysicalSize::new(w, h)); }
+        #[cfg(target_os = "windows")]
+        if self.no_redirection_bitmap {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs.with_no_redirection_bitmap(true);
+        }
         attrs
     }
 }

@@ -106,6 +106,7 @@ fn spawn_attach_worker(
 }
 
 pub fn run() -> Result<(), String> {
+    crate::desktop_host::ensure_dpi_awareness();
     let _instance = crate::desktop_host::acquire_single_instance()?;
     let supervised = std::env::args().any(|arg| arg == "--supervised");
     let inspector = Inspector::new()?;
@@ -119,6 +120,9 @@ pub fn run() -> Result<(), String> {
             // Safe even if a covered launch never draws. Enable input only once a
             // successful attach and an actual widget region have both been published.
             click_through: true, resizable: false,
+            // DirectComposition draws the window; a GDI surface under it leaves a title bar
+            // visible through every clear pixel of the desktop child.
+            no_redirection_bitmap: true,
             physical_size: Some((width as u32, height as u32)), position: Some((0, 0)),
             ..Default::default()
         });
@@ -157,10 +161,11 @@ pub fn run() -> Result<(), String> {
                     };
                     match crate::ws_client::connect_with_registration(port, token, info) {
                         Ok(client) => {
-                            if let Ok(mut slot) = self.ws_slot.lock() {
-                                if let Some(old) = slot.replace(client) {
-                                    old.stop();
-                                }
+                            // Stopping joins the old link's thread, which can wait seconds in a
+                            // handshake: never while holding the lock the UI thread takes.
+                            let old = self.ws_slot.lock().ok().and_then(|mut slot| slot.replace(client));
+                            if let Some(old) = old {
+                                old.stop();
                             }
                             // Close the race window if a commit or attach finished while connecting.
                             sync_registration(&self.inspector, &self.ws_slot);

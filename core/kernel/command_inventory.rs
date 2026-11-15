@@ -58,6 +58,16 @@ pub const DESK_HOST_GET: CommandSpec =
     CommandSpec::read_only("desk_host_get", "Active desktop host mode (web or native)", "");
 pub const DESK_HOST_SET: CommandSpec =
     CommandSpec::write("desk_host_set", "Switch desktop host mode between web and native", "{mode}");
+pub const DESK_POSITION_SET: CommandSpec = CommandSpec::write(
+    "desk_position_set",
+    "Merge the position fields of one widget into the desk layout and publish it",
+    "{id, x?, y?, ax?, ay?, w?, h?, anchor?, version?}",
+);
+pub const DESK_LAYOUT_GET: CommandSpec = CommandSpec::read_only(
+    "desk_layout_get",
+    "The stored desk layout with the revision that the desk-layout-changed events continue from",
+    "",
+);
 pub const HOST_REGISTER: CommandSpec = CommandSpec::write(
     "host_register",
     "Register supervised native desktop host state",
@@ -149,6 +159,8 @@ pub static ALL: &[&CommandSpec] = &[
     &WEATHER_LOCATION_REQUEST,
     &DESK_HOST_GET,
     &DESK_HOST_SET,
+    &DESK_POSITION_SET,
+    &DESK_LAYOUT_GET,
     &HOST_REGISTER,
     &SET_DESKTOP_INPUT_FOCUS,
     &HOST_PING,

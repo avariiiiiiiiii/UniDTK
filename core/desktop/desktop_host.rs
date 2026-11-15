@@ -212,6 +212,14 @@ fn primary_rect() -> RECT {
     }
 }
 
+/// Per-monitor DPI awareness (V2), before the first screen metric is read: an unaware
+/// process is told scaled sizes (1280x720 on a 1920x1080 display at 150 %), and the window
+/// would be sized from them. Fails harmlessly when winit or a manifest chose already.
+pub fn ensure_dpi_awareness() {
+    use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+}
+
 pub fn primary_size() -> (i32, i32) {
     let rect = primary_rect();
     (rect.right - rect.left, rect.bottom - rect.top)

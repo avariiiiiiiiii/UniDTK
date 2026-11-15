@@ -115,6 +115,33 @@ impl UniDtkDatabase {
         Ok(())
     }
 
+    /// One read-modify-write of the layout in a single write transaction: redb serializes
+    /// writers, so a merge cannot interleave with another merge or with a whole-blob save.
+    /// `change` gets the stored layout (`None` before the first save) and returns the new
+    /// one; an error leaves the stored bytes untouched.
+    pub fn update_widget_config(
+        &self,
+        change: impl FnOnce(Option<serde_json::Value>) -> Result<serde_json::Value, String>,
+    ) -> Result<serde_json::Value, String> {
+        let txn = self.db.begin_write().map_err(|e| e.to_string())?;
+        let updated = {
+            let mut table = txn.open_table(WIDGET_SETTINGS).map_err(|e| e.to_string())?;
+            let stored = match table.get("config").map_err(|e| e.to_string())? {
+                Some(value) => Some(
+                    serde_json::from_slice::<serde_json::Value>(value.value())
+                        .map_err(|e| format!("Failed to deserialize widget config: {e}"))?,
+                ),
+                None => None,
+            };
+            let updated = change(stored)?;
+            let bytes = serde_json::to_vec(&updated).map_err(|e| e.to_string())?;
+            table.insert("config", bytes.as_slice()).map_err(|e| e.to_string())?;
+            updated
+        };
+        txn.commit().map_err(|e| e.to_string())?;
+        Ok(updated)
+    }
+
     // ─── Disabled modules ─────────────────────────────────────────────────────
     // A separate key in `widget_settings` (not part of the whole layout JSON
     // blob), so writing the layout never clobbers the disabled list.

@@ -287,6 +287,8 @@ static ROUTES: &[(&str, Handler)] = &[
     ),
     (crate::command_inventory::DESK_HOST_GET.name, handle_desk_host_get),
     (crate::command_inventory::DESK_HOST_SET.name, handle_desk_host_set),
+    (crate::command_inventory::DESK_POSITION_SET.name, handle_desk_position_set),
+    (crate::command_inventory::DESK_LAYOUT_GET.name, handle_desk_layout_get),
     (crate::command_inventory::HOST_REGISTER.name, handle_host_register),
     (
         crate::command_inventory::SET_DESKTOP_INPUT_FOCUS.name,
@@ -478,6 +480,15 @@ fn handle_desk_host_get(server: &IpcServer, _args: &Args) -> Result<serde_json::
         "generation": sup.generation,
         "supervisorRunning": sup.running,
     }))
+}
+
+fn handle_desk_layout_get(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+    crate::desk_layout::snapshot(&server.db)
+}
+
+fn handle_desk_position_set(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let patch = crate::desk_layout::parse_patch(args)?;
+    crate::desk_layout::set_position(&server.db, &patch)
 }
 
 fn handle_desk_host_set(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {

@@ -23,6 +23,7 @@ mod module_store;
 mod panic_hook;
 pub mod registry;
 mod command_inventory;
+mod desk_layout;
 mod events;
 mod host_supervisor;
 mod ws;
@@ -468,7 +469,43 @@ fn save_widget_config(
     state: tauri::State<Arc<UniDtkDatabase>>,
     config: serde_json::Value,
 ) -> Result<(), String> {
-    state.set_widget_config(&config)
+    desk_layout::save(&state, &config)
+}
+
+#[tauri::command(async)]
+fn desk_layout_get(state: tauri::State<Arc<UniDtkDatabase>>) -> Result<serde_json::Value, String> {
+    desk_layout::snapshot(&state)
+}
+
+/// Merges the given position fields of one widget into the stored layout.
+#[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
+fn desk_position_set(
+    state: tauri::State<Arc<UniDtkDatabase>>,
+    id: String,
+    x: Option<f64>,
+    y: Option<f64>,
+    ax: Option<f64>,
+    ay: Option<f64>,
+    w: Option<f64>,
+    h: Option<f64>,
+    anchor: Option<String>,
+    version: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let mut args = serde_json::Map::new();
+    args.insert("id".into(), serde_json::Value::String(id));
+    for (key, value) in [("x", x), ("y", y), ("ax", ax), ("ay", ay), ("w", w), ("h", h)] {
+        if let Some(value) = value {
+            args.insert(key.into(), serde_json::json!(value));
+        }
+    }
+    for (key, value) in [("anchor", anchor), ("version", version)] {
+        if let Some(value) = value {
+            args.insert(key.into(), serde_json::Value::String(value));
+        }
+    }
+    let patch = desk_layout::parse_patch(&args)?;
+    desk_layout::set_position(&state, &patch)
 }
 
 #[tauri::command(async)]
@@ -1489,6 +1526,8 @@ fn main() {
             open_explorer,
             desk_host_get,
             desk_host_set,
+            desk_layout_get,
+            desk_position_set,
             host_register,
             // core hotkeys & focus
             hotkeys_list,
@@ -1505,7 +1544,9 @@ fn main() {
             // for a command: building a module starts nothing, `init` below does.
             let registry = registry::Registry::new(registry::all_modules().into_iter().map(Arc::from).collect())?;
             // Before the emitter: a state's first frame must not be kept as a stream.
-            events::declare_state_events(registry.state_events())?;
+            let mut state_events = registry.state_events();
+            state_events.push(desk_layout::EVENT);
+            events::declare_state_events(state_events)?;
             hotkeys::register_module_hotkeys(registry.in_start_order().iter().flat_map(|module| module.hotkeys()));
             app.manage(registry);
 

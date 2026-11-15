@@ -8,6 +8,10 @@ r[desk.positions]
 
 A widget's position is `config.positions[id]`: `x` and `y`, plus a corner anchor `anchor ∈ {tl, tr, bl, br}` with its offset `ax`/`ay`. `placeOnCanvas` in `core/ui/unidtk-core.js` reads it; without an `anchor` the corner is `tl`. Arrange mode snaps to a 16 px grid and to corners, and writes the corner on "Done"; "Undo" or Esc restores everything it touched. The arrange island stands at the right edge, in the slot of the side menu; `config.arrangeSide` (`"left"` or `"right"`) is the user's choice of edge, a preference that "Undo" does not revert.
 
+r[desk.position-merge]
+
+A host other than the page changes a widget's position only through `desk_position_set {id, x?, y?, ax?, ay?, w?, h?, anchor?, version?}`, never by writing the layout whole. The kernel validates the fields (module settings in the same record are refused), merges them into `positions[id]` inside one redb write transaction, and publishes the state event `desk-layout-changed {rev, positions}` with the whole `positions` map. `desk_layout_get` answers `{rev, config}`; a frame with a higher `rev` is newer than that answer. Commit and publication happen under one lock, so frames leave in commit order, and the page's whole-layout save (`save_widget_config`) goes through the same lock and publishes too. A merge into a missing layout is refused: the page seeds the first layout from the modules' default placements. While `desk.host` is `native` the page does not exist, so the host is the only writer. The record also carries `w`, `h` and `version` (the clock face), which `desk.positions` does not list. Code: `core/kernel/desk_layout.rs`.
+
 r[desk.relayout-not-reset]
 
 The widget canvas is never reset (`widgetsCanvas.innerHTML = ""`) when the geometry changes, the window moves between monitors, or `display-changed` fires. `relayoutWidgets()` moves and resizes the existing widgets, so their state, network connections, and the user's input survive.
