@@ -26,7 +26,8 @@ pub fn host_cmd(args: &[String]) -> Result<String, String> {
             if sub == "click" { request_with_token(body)? } else { request(body)? }
         }
         "quit" => quit()?,
-        _ => return Err("usage: udtk host [run|ping|tree|frames|shot [path]|hit <x> <y>|click <x> <y> [--force]|quit]".into()),
+        "desk" => desk(&args[2..])?,
+        _ => return Err("usage: udtk host [run|ping|tree|frames|shot [path]|hit <x> <y>|click <x> <y> [--force]|desk <id> <field>=<value>...|quit]".into()),
     };
     serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())
 }
@@ -47,6 +48,19 @@ fn run() -> Result<String, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     Err("native host did not attach within 20 seconds; inspect udtk host ping".into())
+}
+
+/// `udtk host desk clock version=digital`: one widget's position fields, written through the
+/// host's kernel link (`desk_position_set`); numbers stay numbers, anything else is text.
+fn desk(args: &[String]) -> Result<Value, String> {
+    let id = args.first().ok_or("usage: udtk host desk <id> <field>=<value>...")?;
+    let mut fields = serde_json::Map::new();
+    fields.insert("id".into(), json!(id));
+    for pair in &args[1..] {
+        let (key, value) = pair.split_once('=').ok_or_else(|| format!("{pair}: expected <field>=<value>"))?;
+        fields.insert(key.into(), value.parse::<f64>().map_or_else(|_| json!(value), |n| json!(n)));
+    }
+    request_with_token(json!({ "cmd": "desk", "args": fields }))
 }
 
 pub fn quit() -> Result<Value, String> {
@@ -125,10 +139,11 @@ pub fn doctor(args: &[String]) -> Result<String, String> {
             other => return Err(format!("unexpected PNG path result: {other:?}")),
         }
         let tree = request(json!({ "cmd": "tree" }))?;
-        if !tree.as_array().is_some_and(|nodes| nodes.iter().any(|n| n["key"] == "g0-card")) { return Err("test card missing from element tree".into()); }
-        let receipt = request_with_token(json!({ "cmd": "click", "args": { "target": "g0-card", "force": true } }))?;
-        if receipt["handled"] != true || receipt["input_count"].as_u64() <= receipt["before"].as_u64() { return Err("Rune did not acknowledge the card press".into()); }
-        out.push_str(&format!("  [OK] card press acknowledged (forced Win32 posting): {receipt}\n"));
+        if !tree.as_array().is_some_and(|nodes| nodes.iter().any(|n| n["key"] == "widget:clock")) { return Err("clock widget missing from element tree".into()); }
+        let receipt = request_with_token(json!({ "cmd": "click", "args": { "target": "widget:clock", "force": true } }))?;
+        if receipt["handled"] != true || receipt["input_count"].as_u64() <= receipt["before"].as_u64() { return Err("Rune did not acknowledge the clock press".into()); }
+        out.push_str(&format!("  [OK] clock press acknowledged (forced Win32 posting): {receipt}
+"));
         let hit = request(json!({ "cmd": "hit", "args": { "x": 1, "y": 1 } }))?;
         if hit["host_is_child"] != true { return Err(format!("native window lost its WS_CHILD style: {hit}")); }
         if hit["in_region"] != false { return Err(format!("blank desktop is intercepted: {hit}")); }

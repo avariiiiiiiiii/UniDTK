@@ -143,7 +143,10 @@ fn current(rev: &mut u64) -> u64 {
 /// Tells every subscriber (the page, a native host) the layout changed. The caller holds
 /// the revision lock, so frames leave in the order the changes were committed.
 fn publish(config: &Value, rev: u64) {
-    unidtk_api::emit(EVENT, json!({ "rev": rev, "positions": positions_of(config) }));
+    // The theme rides along: the native host paints every widget with it and has no other
+    // way to learn that it changed.
+    let theme = config.get("theme").cloned().unwrap_or(Value::Null);
+    unidtk_api::emit(EVENT, json!({ "rev": rev, "positions": positions_of(config), "theme": theme }));
 }
 
 /// The layout as stored, with the revision it is current at. Read under the same lock as the

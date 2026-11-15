@@ -14,11 +14,14 @@
 //! Without arguments the host runs: the same window under the desktop, kept, with its
 //! inspector door (`inspector.rs`), which `udtk host ...` talks to.
 
+mod desk;
 mod desktop_host;
+mod faces;
 mod host;
 mod inspector;
 mod protocol;
 mod supervisor;
+mod theme;
 mod ws_client;
 #[cfg(test)]
 mod tests;

@@ -8,7 +8,7 @@ udtk gui [--json] [--force] <step>...
 
 ## 9.1 The steps
 
-The Rune native host is selected explicitly with `udtk gui --host tree` or `udtk gui --host click:g0-card`. The CLI discovers the supervised ephemeral port from the kernel's `ping` plus `%LOCALAPPDATA%\UniDTK\host-inspector.<pid>.json` when `desk.host` is `native`, or falls back to `host-standalone.json` when standalone (`udtk host run`). The inspector resolves a key or path from its own element tree, posts input through Win32, and waits for the card's Rune handler to increment its press counter. A covered screen target is refused; `--force` explicitly permits posted input while covered and is recorded in the receipt. This mode supports `tree` and `click` only; other steps fail without falling back to WebView2.
+The Rune native host is selected explicitly with `udtk gui --host tree` or `udtk gui --host click:widget:clock`. The CLI discovers the supervised ephemeral port from the kernel's `ping` plus `%LOCALAPPDATA%\UniDTK\host-inspector.<pid>.json` when `desk.host` is `native`, or falls back to `host-standalone.json` when standalone (`udtk host run`). The inspector resolves a key or path from its own element tree, posts input through Win32, and waits for the card's Rune handler to increment its press counter. A covered screen target is refused; `--force` explicitly permits posted input while covered and is recorded in the receipt. This mode supports `tree` and `click` only; other steps fail without falling back to WebView2.
 
 | Step | What it does |
 |---|---|

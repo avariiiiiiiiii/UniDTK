@@ -13,6 +13,7 @@ The `-j N` (or `--jobs=N`) argument sets `CARGO_BUILD_JOBS` for the build. `.car
 
 - The `udtk.exe` that runs the command must **not** be in `Program Files`. If it is, the command refuses with `udtk build cannot self-build from Program Files (ACL). Run it from the checkout's target\release\udtk.exe`. The reason is that the directory is read-only for the user.
 - The working copy must be a checkout with a `toolchain/` directory. Otherwise the command fails with `toolchain not found (run from repo root)`.
+- The compiler is the one `toolchain/rust-toolchain.toml` names (1.99.1), whatever `rustup` calls stable. Cargo 1.100 moved build-script output one directory deeper, and the build script of `ort-sys 2.0.0-rc.13` then copies the ONNX Runtime DLLs into a directory that does not exist; the file says when the pin can go.
 
 ## 14.2 The steps
 

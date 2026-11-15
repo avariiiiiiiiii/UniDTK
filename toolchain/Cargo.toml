@@ -66,6 +66,7 @@ base64 = "0.22"
 version = "0.58"
 features = [
   "Win32_UI_Input",
+  "Win32_Networking_WinInet",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
   "Win32_System_LibraryLoader",

@@ -322,6 +322,18 @@ pub fn discover_with_attempt(attempt: usize) -> Result<isize, String> {
     desktop_host_for_attempt(attempt).map(|host| host.0 as isize)
 }
 
+/// `navigator.onLine`: whether Windows has a connection that can reach the network.
+pub fn is_online() -> bool {
+    let mut flags = windows::Win32::Networking::WinInet::INTERNET_CONNECTION(0);
+    unsafe { windows::Win32::Networking::WinInet::InternetGetConnectedState(&mut flags, 0).is_ok() }
+}
+
+/// Physical pixels per point of the primary display; call after [`ensure_dpi_awareness`].
+pub fn system_scale() -> f64 {
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() };
+    if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 }
+}
+
 pub fn window_scale(hwnd: isize) -> f64 {
     let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(HWND(hwnd as _)) };
     if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }

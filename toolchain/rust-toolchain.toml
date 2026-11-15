@@ -1,0 +1,8 @@
+# Pinned to the last toolchain the release builds with. Cargo 1.100 puts build-script output
+# under `target/release/build/<crate>/<hash>/out`, one level deeper than before, and the build
+# script of `ort-sys 2.0.0-rc.13` finds the directory beside the executables by climbing three
+# levels from it: it lands in `target/release/build` and fails copying the ONNX Runtime DLLs
+# into a `build/examples` that does not exist (`dynamic_link.rs:42`). Lift the pin with an
+# `ort` that finds the directory another way.
+[toolchain]
+channel = "1.99.1"

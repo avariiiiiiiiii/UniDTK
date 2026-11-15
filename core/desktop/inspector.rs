@@ -39,6 +39,8 @@ pub struct Inspector {
     pub window: Mutex<Option<rune::WindowHandle>>,
     pub stopping: AtomicBool,
     pub failure: Mutex<Option<String>>,
+    /// The commands to the kernel (`desk` forwards a position write); set once the link exists.
+    pub outbox: Mutex<Option<Arc<crate::ws_client::Outbox>>>,
     data_dir: PathBuf,
     started: Instant,
     token: String,
@@ -61,7 +63,7 @@ impl Inspector {
         Ok(Arc::new(Self {
             snapshot: Mutex::new(Snapshot::default()), hwnd: AtomicIsize::new(0),
             input_count: AtomicU64::new(0), tree_seq: AtomicU64::new(0), window: Mutex::new(None),
-            stopping: AtomicBool::new(false), failure: Mutex::new(None),
+            stopping: AtomicBool::new(false), failure: Mutex::new(None), outbox: Mutex::new(None),
             data_dir,
             started: Instant::now(), token: crate::desktop_host::random_token()?,
             supervised: AtomicBool::new(false), bound_port: AtomicU16::new(0),
@@ -170,12 +172,12 @@ impl Inspector {
             for mut stream in accepting.incoming().flatten() {
                 if inspector.stopping.load(Ordering::Acquire) { break; }
                 let priority_only = if inspector.clients
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_CLIENTS).then_some(n + 1))
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_CLIENTS).then_some(n + 1))
                     .is_ok()
                 {
                     false
                 } else if inspector.priority_clients
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < PRIORITY_SLOTS).then_some(n + 1))
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < PRIORITY_SLOTS).then_some(n + 1))
                     .is_ok()
                 {
                     true
@@ -310,6 +312,7 @@ impl Inspector {
             }));
         }
         if cmd == "frames" { return self.frames(); }
+        if cmd == "desk" { return self.desk(args); }
         if cmd == "quit" { return Ok(json!({ "quitting": true })); }
         let hwnd = self.hwnd.load(Ordering::Acquire);
         if hwnd == 0 { return Err("host is starting: the desktop window is not attached".into()); }
@@ -339,6 +342,16 @@ impl Inspector {
             "click" => self.click(hwnd, args),
             _ => unreachable!("authorize rejected unknown commands"),
         }
+    }
+
+    /// `desk_position_set` for a person at the CLI: the fields go to the kernel through the host's
+    /// own link, which validates and merges them like any other writer's.
+    fn desk(&self, args: &Value) -> Result<Value, String> {
+        let mut fields = args.as_object().cloned().ok_or("desk takes an object")?;
+        fields.remove("token");
+        let outbox = self.outbox.lock().map_err(|e| e.to_string())?.clone().ok_or("the host has no kernel link (it was not started by the kernel)")?;
+        let id = outbox.send("desk_position_set", Value::Object(fields), None)?;
+        Ok(json!({ "queued": id }))
     }
 
     fn click(&self, hwnd: isize, args: &Value) -> Result<Value, String> {

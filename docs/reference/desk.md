@@ -10,7 +10,7 @@ A widget's position is `config.positions[id]`: `x` and `y`, plus a corner anchor
 
 r[desk.position-merge]
 
-A host other than the page changes a widget's position only through `desk_position_set {id, x?, y?, ax?, ay?, w?, h?, anchor?, version?}`, never by writing the layout whole. The kernel validates the fields (module settings in the same record are refused), merges them into `positions[id]` inside one redb write transaction, and publishes the state event `desk-layout-changed {rev, positions}` with the whole `positions` map. `desk_layout_get` answers `{rev, config}`; a frame with a higher `rev` is newer than that answer. Commit and publication happen under one lock, so frames leave in commit order, and the page's whole-layout save (`save_widget_config`) goes through the same lock and publishes too. A merge into a missing layout is refused: the page seeds the first layout from the modules' default placements. While `desk.host` is `native` the page does not exist, so the host is the only writer. The record also carries `w`, `h` and `version` (the clock face), which `desk.positions` does not list. Code: `core/kernel/desk_layout.rs`.
+A host other than the page changes a widget's position only through `desk_position_set {id, x?, y?, ax?, ay?, w?, h?, anchor?, version?}`, never by writing the layout whole. The kernel validates the fields (module settings in the same record are refused), merges them into `positions[id]` inside one redb write transaction, and publishes the state event `desk-layout-changed {rev, positions, theme}` with the whole `positions` map and the stored `theme`, which the native host paints with. `desk_layout_get` answers `{rev, config}`; a frame with a higher `rev` is newer than that answer. Commit and publication happen under one lock, so frames leave in commit order, and the page's whole-layout save (`save_widget_config`) goes through the same lock and publishes too. A merge into a missing layout is refused: the page seeds the first layout from the modules' default placements. While `desk.host` is `native` the page does not exist, so the host is the only writer. The record also carries `w`, `h` and `version` (the clock face), which `desk.positions` does not list. Code: `core/kernel/desk_layout.rs`.
 
 r[desk.relayout-not-reset]
 
@@ -38,7 +38,7 @@ r[theme.tokens-only]
 
 Appearance comes from tokens, never from hardcoded values: `--dur-*`, `--ease-*`, `--r-*`, `--blur-*`, `--theme-*`, `--z-surface-*`. The source of truth is `core/ui/motion.js` for timing and `core/ui/theme.js` for presets; the values in `:root` of `core/ui/styles.css` are only a fallback.
 
-`core/ui/theme.js` ships two presets, Nothing Classic and Sea Glass, plus user themes. A preset changes only appearance: positions are user data, sizes are preset defaults, and the user's edits win. The theme is applied before the first paint from the `paint` cache, and a change fires `unidtk-theme-changed`.
+`core/ui/theme.js` ships two presets, Nothing Classic and Sea Glass, plus user themes. A preset changes only appearance: positions are user data, sizes are preset defaults, and the user's edits win. The theme is applied before the first paint from the `paint` cache, and a change fires `unidtk-theme-changed`. The native host reads the same stored record and normalizes it as `normalizeTheme` does (`core/desktop/theme.rs`): the built-in preset of the same id is the base, Nothing Classic otherwise, and both materials (`flat`, `jelly`) and the font stacks come from it, never from constants in a widget.
 
 r[theme.module-contracts]
 

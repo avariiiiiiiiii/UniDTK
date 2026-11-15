@@ -1,31 +1,163 @@
-//! G0's standalone native window and an observable card. Production stays on WebView2.
+//! The native desk: one transparent window under the desktop icons, drawing the widgets the
+//! kernel's layout places (`desk.rs`), with the inspector door and the kernel link.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use rune::el::{col, el, text};
-use rune::{App, AppSpec, Color, FrameOutcome, WindowOptions};
+use rune::el::el;
+use rune::{App, AppSpec, FrameOutcome, Pixels, Tx, WindowOptions};
 use serde_json::json;
+use crate::desk::{self, ClockTime, Layout};
 use crate::inspector::Inspector;
 use crate::supervisor::{ControlCommand, ControlSink, StartHandshake};
-use crate::ws_client::{HostRegistrationInfo, WsClientHandle};
+use crate::ws_client::{HostRegistrationInfo, Inbound, LinkConfig, Outbox, WsClientHandle};
+
+/// Replaces Rune's bundled Inter (kept as the sans slot), with the theme's own faces: Ndot
+/// (`fontDisplay`) and Geist (`fontBody`), converted from the page's WOFF2 because Rune reads
+/// TrueType. Segoe UI, Consolas and Cascadia come from the system.
+const FONTS: &[&[u8]] = &[
+    include_bytes!("../rune/rune/assets/Inter-Regular.ttf"),
+    include_bytes!("../rune/rune/assets/Inter-Medium.ttf"),
+    include_bytes!("../rune/rune/assets/Inter-SemiBold.ttf"),
+    include_bytes!("../../assets/fonts/Ndot 55/Ndot 55.ttf"),
+    include_bytes!("../../assets/fonts/Geist/Geist[wght].ttf"),
+];
+
+/// Widget elements carry this key prefix; the hit region is built from them.
+const WIDGET_KEY: &str = "widget:";
 
 struct Host {
     inspector: Arc<Inspector>,
-    clicks: u64,
+    /// `None` until the kernel has described the desk: a supervised host draws nothing
+    /// rather than defaults that would jump to the stored positions a moment later.
+    layout: Option<Layout>,
+    time: ClockTime,
+    canvas: (f32, f32),
+    /// Physical pixels per point; the grain image is made in device pixels.
+    scale: f32,
+    grain: Pixels,
+    /// What `grain` was made for: width and height in pixels, and the strength's bits.
+    grain_made_for: Option<(u32, u32, u32)>,
+    /// The clock is open as its dashboard.
+    expanded: bool,
+    /// `navigator.onLine` as the dashboard read it when it opened.
+    online: bool,
+}
+
+impl Host {
+    fn accept_layout(&mut self, layout: Layout) {
+        // A reply and an event can arrive in either order; the newer revision wins.
+        if self.layout.as_ref().map_or(true, |known| layout.rev >= known.rev) {
+            self.layout = Some(layout);
+            self.refresh_grain();
+        }
+    }
+
+    /// The size the grain image covers: the larger of the tile and the dashboard, so the
+    /// card clips it and never stretches it while it grows.
+    fn grain_size(&self) -> (f32, f32) {
+        let Some(layout) = &self.layout else { return (0.0, 0.0) };
+        let tile = layout.clock_place(self.canvas);
+        let open = desk::dashboard_box(tile, self.canvas);
+        (tile.w.max(open.w), tile.h.max(open.h))
+    }
+
+    /// The grain is made again only when its size or the theme's grain strength changes.
+    fn refresh_grain(&mut self) {
+        let Some(layout) = &self.layout else { return };
+        let strength = layout.theme.glass_grain;
+        let (w, h) = self.grain_size();
+        let size = ((w * self.scale).round().max(1.0) as u32, (h * self.scale).round().max(1.0) as u32);
+        let made_for = (size.0, size.1, strength.to_bits());
+        if self.grain_made_for != Some(made_for) {
+            self.grain.set(size.0, size.1, desk::grain_rgba(size.0, size.1, self.scale, strength));
+            self.grain_made_for = Some(made_for);
+        }
+    }
 }
 
 fn view(state: &Host, _: &mut rune::runtime::Cx<Host>) -> rune::el::El {
-    col().w_full().h_full().padding(24.0).child(
-        el().key("g0-card").label("Native inspector test card")
-            .self_start().w(320.0).h(80.0)
-            .fill(Color::BLACK.alpha(0.45)).radius(14.0).padding(12.0)
-            .on_press(|state: &mut Host| {
-                state.clicks += 1;
-                state.inspector.input_count.fetch_add(1, Ordering::AcqRel);
-            })
-            .child(text(format!("UniDTK · Rune · G0\nPresses: {}", state.clicks)).color(Color::WHITE)),
-    )
+    let mut root = el().w_full().h_full();
+    // An open dashboard closes on a press on the bare desk, as the page's empty-click does: the
+    // whole canvas joins the hit region while it is open, so that press reaches the host.
+    if state.expanded {
+        root = root.child(
+            el().key("widget:desk").label("Desk").absolute(0.0, 0.0).w_full().h_full()
+                .on_press(|state: &mut Host| state.expanded = false),
+        );
+    }
+    let Some(layout) = &state.layout else { return root };
+    let card = desk::clock_card(desk::ClockView {
+        face: desk::face_of(&layout.clock()),
+        time: state.time,
+        tile: layout.clock_place(state.canvas),
+        canvas: state.canvas,
+        theme: &layout.theme,
+        grain: &state.grain,
+        grain_size: state.grain_size(),
+        expanded: state.expanded,
+        online: state.online,
+    });
+    // A press opens the dashboard and a press on the dashboard closes it, as the page's
+    // `toggleWidget` does for the header-less clock card.
+    root.child(card.on_press(|state: &mut Host| {
+        state.inspector.input_count.fetch_add(1, Ordering::AcqRel);
+        if !state.expanded {
+            state.online = crate::desktop_host::is_online();
+        }
+        state.expanded = !state.expanded;
+    }))
+}
+
+/// Escape folds the open dashboard (`collapseAllShellWidgets`); the kernel forwards the desk's
+/// keys to the host.
+fn on_key(state: &mut Host, event: &rune::KeyEvent, _: &mut Tx) -> bool {
+    if event.key == rune::Key::Escape && state.expanded {
+        state.expanded = false;
+        return true;
+    }
+    false
+}
+
+/// Runs at the start of every frame; one wake at the next tick is all the clock asks for.
+fn poll(state: &mut Host, _: f64, tx: &mut Tx) -> bool {
+    let Some(layout) = &state.layout else { return false };
+    let face = desk::face_of(&layout.clock());
+    let (now, nanos) = ClockTime::now();
+    let changed = now.differs(state.time, face);
+    if changed {
+        state.time = now;
+    }
+    tx.wake_at(tx.clock() + now.seconds_to_next_tick(face, nanos));
+    changed
+}
+
+/// What the kernel link brings to the UI thread: the layout, from the state event, from its
+/// catch-up frame after a (re)connect, and from the answer to a `desk_layout_get`.
+fn layout_link(ui: rune::AppHandle<Host>, outbox: Arc<Outbox>) -> LinkConfig {
+    let ui = Mutex::new(ui);
+    let refetch = outbox.clone();
+    let deliver = move |layout: Option<Layout>| {
+        if let (Some(layout), Ok(ui)) = (layout, ui.lock()) {
+            ui.update(move |state, _| state.accept_layout(layout));
+        }
+    };
+    let ask = move || {
+        if let Err(error) = refetch.send("desk_layout_get", json!({}), Some("desk_layout_get")) {
+            crate::desktop_host::note(&format!("desk_layout_get not sent: {error}"));
+        }
+    };
+    let ask_again = ask.clone();
+    LinkConfig {
+        subscriptions: vec!["desk-host-changed", "desk-layout-changed"],
+        on_connected: Box::new(ask),
+        on_inbound: Box::new(move |inbound| match inbound {
+            Inbound::Event { event, payload, .. } if event == "desk-layout-changed" => deliver(Layout::from_event(&payload)),
+            Inbound::Gap { event } if event == "desk-layout-changed" => ask_again(),
+            Inbound::Reply { ok: true, body, .. } => deliver(Layout::from_reply(&body)),
+            _ => {}
+        }),
+    }
 }
 
 const SAMPLES: usize = 512;
@@ -112,8 +244,29 @@ pub fn run() -> Result<(), String> {
     let inspector = Inspector::new()?;
     let (width, height) = crate::desktop_host::primary_size();
     let state_inspector = inspector.clone();
-    let spec = AppSpec::new("UniDTK desktop", (width as f32, height as f32), || unreachable!("init is supplied"), view);
-    let app = App::new(spec).init(move || Host { inspector: state_inspector, clicks: 0 })
+    let ws_slot: Arc<Mutex<Option<WsClientHandle>>> = Arc::new(Mutex::new(None));
+    let scale = crate::desktop_host::system_scale() as f32;
+    let canvas = (width as f32 / scale, height as f32 / scale);
+    let mut spec = AppSpec::new("UniDTK desktop", (canvas.0, canvas.1), || unreachable!("init is supplied"), view);
+    spec.fonts = FONTS;
+    spec.poll = Some(poll);
+    spec.on_key = Some(on_key);
+    let app = App::new(spec).init(move || {
+            let mut host = Host {
+                inspector: state_inspector,
+                // Without a kernel there is nobody to ask: draw the module defaults.
+                layout: (!supervised).then(Layout::empty),
+                time: ClockTime::now().0,
+                canvas,
+                scale,
+                grain: Pixels::new(),
+                grain_made_for: None,
+                expanded: false,
+                online: true,
+            };
+            host.refresh_grain();
+            host
+        })
         .open_inactive()
         .window_options(WindowOptions {
             transparent: true, borderless: true,
@@ -130,7 +283,6 @@ pub fn run() -> Result<(), String> {
     let quit_handle = handle.clone();
     inspector.start(supervised, move || quit_handle.quit())?;
 
-    let ws_slot: Arc<Mutex<Option<WsClientHandle>>> = Arc::new(Mutex::new(None));
     let active_generation = Arc::new(AtomicU64::new(0));
     let focused_input = Arc::new(AtomicBool::new(false));
     if supervised {
@@ -159,8 +311,17 @@ pub fn run() -> Result<(), String> {
                         attached,
                         ready,
                     };
-                    match crate::ws_client::connect_with_registration(port, token, info) {
+                    let inspector = self.inspector.clone();
+                    let linked = Outbox::new().and_then(|outbox| {
+                        if let Ok(mut slot) = inspector.outbox.lock() {
+                            *slot = Some(outbox.clone());
+                        }
+                        let config = layout_link(self.ui.clone(), outbox.clone());
+                        crate::ws_client::connect_link(port, token, outbox, config)
+                    });
+                    match linked {
                         Ok(client) => {
+                            client.set_registration(info);
                             // Stopping joins the old link's thread, which can wait seconds in a
                             // handshake: never while holding the lock the UI thread takes.
                             let old = self.ws_slot.lock().ok().and_then(|mut slot| slot.replace(client));
@@ -394,9 +555,9 @@ fn sync_tree_snapshot(
     let drawn_seq = {
         let mut snapshot = inspector.snapshot.lock().unwrap();
         // ElementInfo.parent indexes runtime nodes, not this filtered list.
-        // G0 has exactly one interactive surface, identified by its stable key.
+        // The interactive surfaces are the widgets, identified by their stable keys.
         snapshot.widget_rects = infos.iter().filter(|element| {
-            element.key.as_deref() == Some("g0-card") && !element.exiting
+            element.key.as_deref().is_some_and(|key| key.starts_with(WIDGET_KEY)) && !element.exiting
         }).map(|element| element.rect).collect();
         snapshot.elements = elements;
         if from_commit {
