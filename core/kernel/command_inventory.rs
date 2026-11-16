@@ -65,9 +65,23 @@ pub const DESK_POSITION_SET: CommandSpec = CommandSpec::write(
 );
 pub const DESK_APPLY: CommandSpec = CommandSpec::write(
     "desk_apply",
-    "Apply a list of named desk operations (position, hide, show, nest, eject, instances, theme) in one transaction and publish the layout",
+    "Apply a list of named desk operations (position, place, forget, hide, show, nest, eject, instances, theme) in one transaction and publish the layout",
     "{ops: [{op, ...}], baseRev?}",
 );
+// The desk's folders, shortcuts and quitting, served on the interface door for the native
+// host as well as through Tauri for the page (r[ipc.one-contract]).
+pub const GET_FOLDERS: CommandSpec = CommandSpec::read_ui("get_folders", "The desktop folders with their shortcuts", "");
+pub const SAVE_FOLDER: CommandSpec = CommandSpec::write("save_folder", "Create or replace one desktop folder record", "{folder}");
+pub const DELETE_FOLDER: CommandSpec = CommandSpec::write("delete_folder", "Delete one desktop folder record", "{id}");
+pub const MISSING_TARGETS: CommandSpec = CommandSpec::read_ui("missing_targets", "Which shortcut targets no longer exist", "{targets}");
+pub const PICK_SHORTCUT_TARGET: CommandSpec = CommandSpec::write("pick_shortcut_target", "Ask the user for a file or folder in the system dialog and describe it", "{folder}");
+pub const CLIPBOARD_SHORTCUT_TARGETS: CommandSpec = CommandSpec::read_ui("clipboard_shortcut_targets", "The files or the text on the clipboard, for a folder's paste", "");
+pub const DESCRIBE_SHORTCUT_TARGET: CommandSpec = CommandSpec::read_ui("describe_shortcut_target", "A shortcut draft (name, kind) for a path or a link", "{target}");
+pub const SHORTCUT_ICON: CommandSpec = CommandSpec::read_ui("shortcut_icon", "The icon of a shortcut target as BGRA pixels", "{target, size?}");
+pub const START_MENU_LIST: CommandSpec = CommandSpec::read_ui("start_menu_list", "The programs of the Start menu", "");
+pub const LAUNCH_SHORTCUT: CommandSpec = CommandSpec::write("launch_shortcut", "Run a shortcut's target with its arguments", "{target, args?}");
+pub const OPEN_EXPLORER: CommandSpec = CommandSpec::write("open_explorer", "Open the shell's Explorer at a path", "{path?}");
+pub const QUIT_APP: CommandSpec = CommandSpec::write("quit_app", "Quit UniDTK", "");
 pub const DESK_LAYOUT_GET: CommandSpec = CommandSpec::read_only(
     "desk_layout_get",
     "The stored desk layout with the revision that the desk-layout-changed events continue from",
@@ -166,6 +180,18 @@ pub static ALL: &[&CommandSpec] = &[
     &DESK_HOST_SET,
     &DESK_POSITION_SET,
     &DESK_APPLY,
+    &GET_FOLDERS,
+    &SAVE_FOLDER,
+    &DELETE_FOLDER,
+    &MISSING_TARGETS,
+    &PICK_SHORTCUT_TARGET,
+    &CLIPBOARD_SHORTCUT_TARGETS,
+    &DESCRIBE_SHORTCUT_TARGET,
+    &SHORTCUT_ICON,
+    &START_MENU_LIST,
+    &LAUNCH_SHORTCUT,
+    &OPEN_EXPLORER,
+    &QUIT_APP,
     &DESK_LAYOUT_GET,
     &HOST_REGISTER,
     &SET_DESKTOP_INPUT_FOCUS,

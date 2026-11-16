@@ -349,6 +349,11 @@ fn launch_shortcut(target: String, args: Option<String>) -> Result<(), String> {
 /// desktop and would pull the dialog under it.
 #[tauri::command(async)]
 fn pick_shortcut_target(app: tauri::AppHandle, folder: bool) -> Result<Option<start_menu::ShortcutDraft>, String> {
+    pick_shortcut_target_with(&app, folder)
+}
+
+/// `pick_shortcut_target` for both doors.
+pub(crate) fn pick_shortcut_target_with(app: &tauri::AppHandle, folder: bool) -> Result<Option<start_menu::ShortcutDraft>, String> {
     use tauri_plugin_dialog::DialogExt;
     let dialog = app.dialog().file();
     let picked = if folder {
@@ -362,13 +367,18 @@ fn pick_shortcut_target(app: tauri::AppHandle, folder: bool) -> Result<Option<st
 }
 
 #[derive(serde::Serialize)]
-struct ClipboardShortcuts {
+pub(crate) struct ClipboardShortcuts {
     files: Vec<String>,
     text: Option<String>,
 }
 
 #[tauri::command(async)]
 fn clipboard_shortcut_targets() -> Result<ClipboardShortcuts, String> {
+    clipboard_shortcuts()
+}
+
+/// `clipboard_shortcut_targets` for both doors.
+pub(crate) fn clipboard_shortcuts() -> Result<ClipboardShortcuts, String> {
     let files: Vec<String> = explorer::clipboard::paste_files_from_clipboard()?
         .into_iter()
         .map(|p| p.display().to_string())
@@ -379,6 +389,13 @@ fn clipboard_shortcut_targets() -> Result<ClipboardShortcuts, String> {
 
 #[tauri::command(async)]
 fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+    quit_with(&app);
+    Ok(())
+}
+
+/// `quit_app` for both doors.
+pub(crate) fn quit_with(app: &tauri::AppHandle) {
+    let app = app.clone();
     let _ = run_on_main_thread(&app, |app| {
         if let Ok(hwnd) = wallpaper_hwnd(&app) {
             let _ = wallpaper::detach(hwnd, ATTACH_OPTS);
@@ -389,7 +406,6 @@ fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     // app_shutdown() cannot freeze the UI/event loop.
     app_shutdown(&app, true);
     app.exit(0);
-    Ok(())
 }
 
 /// Serves a module's command that arrived through Tauri, or hands the invoke back
@@ -597,15 +613,20 @@ fn delete_folder(
 
 #[tauri::command(async)]
 fn open_explorer(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {
+    open_explorer_at(&app, path);
+    Ok(())
+}
+
+/// `open_explorer` for both doors.
+pub(crate) fn open_explorer_at(app: &tauri::AppHandle, path: Option<String>) {
     let target_path = path.unwrap_or_default();
     log_line(format!("open_explorer: path={target_path}"));
     if !is_native_host() {
-        request_wallpaper_visible(&app);
+        request_wallpaper_visible(app);
     }
     // Through the contract, so the event broker (and therefore the WebSocket door) sees
     // it too — the kernel's emitter keeps the Tauri behaviour unchanged.
     unidtk_api::emit("explorer-open", serde_json::json!(target_path));
-    Ok(())
 }
 
 #[tauri::command(async)]

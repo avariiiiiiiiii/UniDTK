@@ -290,6 +290,18 @@ static ROUTES: &[(&str, Handler)] = &[
     (crate::command_inventory::DESK_POSITION_SET.name, handle_desk_position_set),
     (crate::command_inventory::DESK_LAYOUT_GET.name, handle_desk_layout_get),
     (crate::command_inventory::DESK_APPLY.name, handle_desk_apply),
+    (crate::command_inventory::GET_FOLDERS.name, handle_get_folders),
+    (crate::command_inventory::SAVE_FOLDER.name, handle_save_folder),
+    (crate::command_inventory::DELETE_FOLDER.name, handle_delete_folder),
+    (crate::command_inventory::MISSING_TARGETS.name, handle_missing_targets),
+    (crate::command_inventory::PICK_SHORTCUT_TARGET.name, handle_pick_shortcut_target),
+    (crate::command_inventory::CLIPBOARD_SHORTCUT_TARGETS.name, handle_clipboard_shortcut_targets),
+    (crate::command_inventory::DESCRIBE_SHORTCUT_TARGET.name, handle_describe_shortcut_target),
+    (crate::command_inventory::SHORTCUT_ICON.name, handle_shortcut_icon),
+    (crate::command_inventory::START_MENU_LIST.name, handle_start_menu_list),
+    (crate::command_inventory::LAUNCH_SHORTCUT.name, handle_launch_shortcut),
+    (crate::command_inventory::OPEN_EXPLORER.name, handle_open_explorer),
+    (crate::command_inventory::QUIT_APP.name, handle_quit_app),
     (crate::command_inventory::HOST_REGISTER.name, handle_host_register),
     (
         crate::command_inventory::SET_DESKTOP_INPUT_FOCUS.name,
@@ -490,6 +502,78 @@ fn handle_desk_layout_get(server: &IpcServer, _args: &Args) -> Result<serde_json
 fn handle_desk_position_set(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
     let patch = crate::desk_layout::parse_patch(args)?;
     crate::desk_layout::set_position(&server.db, &patch)
+}
+
+fn string_arg<'a>(args: &'a Args, key: &str) -> Result<&'a str, String> {
+    args.get(key).and_then(|v| v.as_str()).ok_or_else(|| format!("missing {key}"))
+}
+
+fn to_json<T: serde::Serialize>(value: T) -> Result<serde_json::Value, String> {
+    serde_json::to_value(value).map_err(|e| e.to_string())
+}
+
+fn handle_get_folders(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+    to_json(server.db.list_folders()?)
+}
+
+fn handle_save_folder(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let folder: crate::unidtk_db::FolderRecord =
+        serde_json::from_value(args.get("folder").cloned().ok_or("missing folder")?).map_err(|e| format!("folder: {e}"))?;
+    server.db.save_folder(&folder)?;
+    Ok(serde_json::Value::Null)
+}
+
+fn handle_delete_folder(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    to_json(server.db.delete_folder(string_arg(args, "id")?)?)
+}
+
+fn handle_missing_targets(_server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let targets: Vec<String> = serde_json::from_value(args.get("targets").cloned().unwrap_or_default()).map_err(|e| format!("targets: {e}"))?;
+    to_json(crate::start_menu::missing(&targets))
+}
+
+fn handle_pick_shortcut_target(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let folder = args.get("folder").and_then(|v| v.as_bool()).unwrap_or(false);
+    to_json(crate::pick_shortcut_target_with(&server.app, folder)?)
+}
+
+fn handle_clipboard_shortcut_targets(_server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+    to_json(crate::clipboard_shortcuts()?)
+}
+
+fn handle_describe_shortcut_target(_server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    to_json(crate::start_menu::describe(string_arg(args, "target")?.to_string())?)
+}
+
+fn handle_shortcut_icon(_server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let size = args.get("size").and_then(|v| v.as_u64()).map_or(48, |s| s.clamp(16, 256) as u32);
+    to_json(crate::start_menu::icon(string_arg(args, "target")?.to_string(), size)?)
+}
+
+fn handle_start_menu_list(_server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+    to_json(crate::start_menu::start_menu()?)
+}
+
+fn handle_launch_shortcut(_server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let launch_args = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
+    crate::start_menu::launch(string_arg(args, "target")?, launch_args)?;
+    Ok(serde_json::Value::Null)
+}
+
+fn handle_open_explorer(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let path = args.get("path").and_then(|v| v.as_str()).map(str::to_string);
+    crate::open_explorer_at(&server.app, path);
+    Ok(serde_json::Value::Null)
+}
+
+fn handle_quit_app(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+    // The reply leaves before the process does.
+    let app = server.app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        crate::quit_with(&app);
+    });
+    Ok(serde_json::Value::Null)
 }
 
 fn handle_desk_apply(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {

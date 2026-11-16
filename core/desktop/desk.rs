@@ -131,6 +131,8 @@ pub struct Layout {
     /// `config.nested`: `{host: [child]}` as the user arranged it.
     pub nested: BTreeMap<String, Vec<String>>,
     pub theme: Theme,
+    /// The blob as the kernel sent it, for what the menu edits (themes, colours, folders).
+    pub config: Value,
 }
 
 impl Layout {
@@ -167,6 +169,7 @@ impl Layout {
                 .map(|hosts| hosts.iter().map(|(host, children)| (host.clone(), strings(children))).collect())
                 .unwrap_or_default(),
             theme: Theme::normalize(config.get("theme").unwrap_or(&Value::Null)),
+            config: config.clone(),
         }
     }
 
@@ -174,6 +177,11 @@ impl Layout {
     /// revision of a new run (its clock may have stepped back).
     pub fn supersedes(&self, known: &Layout) -> bool {
         self.instance != known.instance || self.rev >= known.rev
+    }
+
+    /// A widget's stored record, if it has one.
+    pub fn record(&self, id: &str) -> Option<Record> {
+        self.records.get(id).cloned()
     }
 
     pub fn is_hidden(&self, id: &str) -> bool {
@@ -188,7 +196,12 @@ impl Layout {
     /// The clock's place on the dock: its record, sized by the record, else the theme's
     /// preset size, else the page's card defaults.
     pub fn clock_place(&self, canvas: (f32, f32)) -> Placement {
-        let fallback = self.theme.size_of(CLOCK).unwrap_or(CARD_FALLBACK);
+        self.clock_place_with(canvas, &self.theme)
+    }
+
+    /// The same with another theme's preset sizes (a draft the menu shows).
+    pub fn clock_place_with(&self, canvas: (f32, f32), theme: &Theme) -> Placement {
+        let fallback = theme.size_of(CLOCK).unwrap_or(CARD_FALLBACK);
         self.clock().place(canvas, fallback)
     }
 }
@@ -276,7 +289,7 @@ fn shadow(x: f32, y: f32, blur: f32, spread: f32, color: Color, inset: bool) -> 
 
 /// The card's own paint: body, gradients, border and shadows, as the material and the
 /// card's state choose (`styles.css`: `.widget-card`, the jelly block, `.widget-card.expanded`).
-fn card_paint(card: El, theme: &Theme, tint: Color, w: f32, h: f32, expanded: bool) -> El {
+pub(crate) fn card_paint(card: El, theme: &Theme, tint: Color, w: f32, h: f32, expanded: bool) -> El {
     let hi = Color::WHITE;
     match (theme.material, expanded) {
         (Material::Jelly, false) => {
@@ -474,10 +487,15 @@ fn internet(online: bool, theme: &Theme, ink: Color, width: f32) -> El {
         .child(text(if online { "В сети" } else { "Нет сети" }).font(style(theme.font_body, 11.2, 500.0)).color(ink.alpha(0.8)))
 }
 
-/// `positionExpanded` for the clock: a 400 x 420 box centred on the tile, pushed inside the
-/// window with a 10 px margin, and never so far that the tile would fall outside it.
+/// `positionExpanded` for the clock: a 400 x 420 box round the tile.
 pub fn dashboard_box(tile: Placement, canvas: (f32, f32)) -> Placement {
-    let (w, h, margin) = (400.0, 420.0, 10.0);
+    surface_box(tile, (400.0, 420.0), canvas)
+}
+
+/// `toggleWidget`'s box: `size` centred on the tile, pushed inside the window with a 10 px
+/// margin, and never so far that the tile would fall outside it.
+pub fn surface_box(tile: Placement, (w, h): (f32, f32), canvas: (f32, f32)) -> Placement {
+    let margin = 10.0;
     let mut cx = tile.x + tile.w / 2.0;
     let mut cy = tile.y + tile.h / 2.0;
     if cx - w / 2.0 < margin {
@@ -508,6 +526,12 @@ pub struct ClockView<'a> {
     /// The running open or close: its duration, as `surface-manager.js` computed it.
     pub transition: f32,
     pub online: bool,
+    /// The menu's widget row is under the pointer (`.menu-highlight`).
+    pub highlight: bool,
+    /// Drawn over the tile in its coordinates: arrange mode's handles and "×".
+    pub overlay: Vec<El>,
+    /// The nesting zone under the dashboard (`mountNested`), 368 px wide.
+    pub nested: Option<El>,
 }
 
 /// The clock's open and close timing (`surface-manager.js`): an open takes
@@ -518,14 +542,22 @@ pub struct ClockView<'a> {
 pub struct MorphClock {
     /// When the last open started and how long it ran.
     opened: Option<(std::time::Instant, f32)>,
+    /// When the running open or close ends.
+    until: Option<std::time::Instant>,
 }
 
 impl MorphClock {
-    pub fn open(&mut self, motion: &Motion, tile: Placement, canvas: (f32, f32)) -> f32 {
-        let target = dashboard_box(tile, canvas);
+    pub fn open(&mut self, motion: &Motion, tile: Placement, target: Placement) -> f32 {
         let duration = motion.surface_duration((target.w, target.h), (tile.w, tile.h));
-        self.opened = Some((std::time::Instant::now(), duration));
+        let now = std::time::Instant::now();
+        self.opened = Some((now, duration));
+        self.until = Some(now + std::time::Duration::from_secs_f32(duration));
         duration
+    }
+
+    /// An open or a close is still running.
+    pub fn running(&self) -> bool {
+        self.until.is_some_and(|until| std::time::Instant::now() < until)
     }
 
     pub fn close(&mut self) -> f32 {
@@ -535,7 +567,9 @@ impl MorphClock {
         }
         let elapsed = (started.elapsed().as_secs_f32() / duration).clamp(0.0, 1.0);
         let remaining = crate::motion::EXPO_OUT.eval(elapsed).clamp(0.0, 1.0);
-        0.65 * duration * remaining.sqrt()
+        let close = 0.65 * duration * remaining.sqrt();
+        self.until = Some(std::time::Instant::now() + std::time::Duration::from_secs_f32(close));
+        close
     }
 }
 
@@ -545,7 +579,7 @@ impl MorphClock {
 /// place in the box. The face is the one part that flies, from the tile's container to the
 /// dashboard's (`r[motion.shared-flight]`). The press handler sets the transaction's curve.
 pub fn clock_card(view: ClockView<'_>) -> El {
-    let ClockView { face: kind, time, tile, canvas, theme, motion, grain, grain_size, expanded, transition, online } = view;
+    let ClockView { face: kind, time, tile, canvas, theme, motion, grain, grain_size, expanded, transition, online, highlight, overlay, nested } = view;
     let tint = theme.tint(CLOCK, "calm", "lilac");
     let ink = theme.ink_on(tint);
     let target = dashboard_box(tile, canvas);
@@ -616,10 +650,24 @@ pub fn clock_card(view: ClockView<'_>) -> El {
         .child(internet(online, theme, ink, right))
         .opacity(if expanded { 1.0 } else { 0.0 })
         .opacity_motion(content_fade);
+    // `.nested-zone` follows `.clock-dash-layout` with its 10 px margin.
+    let zone = nested.map(|zone| {
+        shift(el().w(content_w), content_x, layout_y + row_h + 10.0)
+            .child(zone)
+            .opacity(if expanded { 1.0 } else { 0.0 })
+            .opacity_motion(content_fade)
+    });
     let face_layer = shift(el().size(target.w, target.h), 0.0, 0.0)
         .child(crate::faces::face(kind, time, frame, theme, ink, expanded));
-    let window = card_paint(el().key("widget:clock").label("Clock").absolute(shown.x, shown.y), theme, tint, shown.w, shown.h, expanded)
-        .child(inside.child(dashboard).child(face_layer));
+    let mut window = card_paint(el().key("widget:clock").label("Clock").absolute(shown.x, shown.y), theme, tint, shown.w, shown.h, expanded)
+        .child(inside.child(dashboard).children(zone).child(face_layer));
+    if highlight {
+        // `outline: 2px solid var(--theme-accent); outline-offset: 4px`.
+        window = window.outline(2.0, 4.0, theme.accent);
+    }
+    for part in overlay {
+        window = window.child(part);
+    }
     el().absolute(target.x, target.y).size(target.w, target.h).child(window)
 }
 

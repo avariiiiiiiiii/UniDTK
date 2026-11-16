@@ -70,13 +70,22 @@ pub fn quit() -> Result<Value, String> {
 pub fn gui(args: &[String]) -> Result<String, String> {
     let force = args.iter().any(|a| a == "--force");
     let steps: Vec<_> = args.iter().skip(1).filter(|a| !matches!(a.as_str(), "--host" | "--json" | "--force")).collect();
-    if steps.is_empty() || steps.len() > 50 { return Err("usage: udtk gui --host [--json] [--force] tree|click:<key-or-path> ... (max 50 steps)".into()); }
+    if steps.is_empty() || steps.len() > 50 { return Err("usage: udtk gui --host [--json] [--force] tree|click:<key-or-path>|drag:<key-or-path>:<dx>:<dy> ... (max 50 steps)".into()); }
     let mut receipts = Vec::new();
     for step in steps {
         let result = if step.as_str() == "tree" { request(json!({ "cmd": "tree" }))? }
             else if let Some(target) = step.strip_prefix("click:") {
                 request_with_token(json!({ "cmd": "click", "args": { "target": target, "force": force } }))?
-            } else { return Err(format!("native G0 supports tree and click:<key-or-path>; unsupported step: {step}")); };
+            } else if let Some(rest) = step.strip_prefix("drag:") {
+                // Keys hold colons (`hit:resize:clock:Corner`): the two numbers are the last parts.
+                let mut parts = rest.rsplitn(3, ':');
+                let (dy, dx, target) = (parts.next(), parts.next(), parts.next());
+                let number = |part: Option<&str>| part.and_then(|p| p.parse::<f64>().ok());
+                let (Some(target), Some(dx), Some(dy)) = (target, number(dx), number(dy)) else {
+                    return Err(format!("drag takes drag:<key-or-path>:<dx>:<dy> in points; got {step}"));
+                };
+                request_with_token(json!({ "cmd": "drag", "args": { "target": target, "dx": dx, "dy": dy, "force": force } }))?
+            } else { return Err(format!("the native host supports tree, click:<key-or-path> and drag:<key-or-path>:<dx>:<dy>; unsupported step: {step}")); };
         receipts.push(json!({ "step": step, "ok": true, "result": result }));
     }
     serde_json::to_string_pretty(&json!({ "host": "native", "receipts": receipts })).map_err(|e| e.to_string())

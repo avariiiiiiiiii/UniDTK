@@ -49,8 +49,8 @@ pub fn read_line_within(stream: &mut TcpStream, limit: usize, window: Duration) 
 pub fn authorize(cmd: &str, presented: Option<&str>, expected: &str) -> Result<(), String> {
     match cmd {
         "ping" | "tree" | "frames" | "png" | "hit" => Ok(()),
-        "click" | "quit" | "desk" if presented == Some(expected) => Ok(()),
-        "click" | "quit" | "desk" => Err(format!("{cmd} changes the host and requires its per-run token")),
+        "click" | "drag" | "quit" | "desk" if presented == Some(expected) => Ok(()),
+        "click" | "drag" | "quit" | "desk" => Err(format!("{cmd} changes the host and requires its per-run token")),
         _ => Err(format!("unknown host command: {cmd}")),
     }
 }
@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn write_commands_require_this_runs_token() {
-        for command in ["click", "quit", "desk"] {
+        for command in ["click", "drag", "quit", "desk"] {
             assert!(authorize(command, None, "secret").is_err());
             assert!(authorize(command, Some("old-token"), "secret").is_err());
             assert!(authorize(command, Some("secret"), "secret").is_ok());

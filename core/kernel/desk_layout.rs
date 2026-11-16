@@ -304,16 +304,68 @@ fn apply_op(root: &mut Map<String, Value>, op: &Map<String, Value>) -> Result<()
         "add_instance" => {
             let id = widget_id(op.get("id"), kind)?;
             let widget_type = widget_id(op.get("type"), kind)?;
-            let mut fields = op.get("position").and_then(Value::as_object).cloned().ok_or("add_instance requires a position")?;
-            fields.insert("id".into(), json!(id));
-            let patch = parse_patch(&fields)?;
+            let patch = match op.get("position").and_then(Value::as_object) {
+                Some(position) => {
+                    let mut fields = position.clone();
+                    fields.insert("id".into(), json!(id));
+                    Some(parse_patch(&fields)?)
+                }
+                None => None,
+            };
             let instances = object_entry(root, "instances", json!([]))?.as_array_mut().expect("checked");
             if instances.iter().any(|item| item["instanceId"] == id.as_str()) {
                 return Err(format!("instance '{id}' exists"));
             }
             instances.insert(0, json!({ "instanceId": id, "widgetType": widget_type }));
+            if let Some(patch) = patch {
+                let positions = object_entry(root, "positions", json!({}))?.as_object_mut().expect("checked");
+                positions.insert(id, Value::Object(patch.fields));
+            }
+        }
+        "place" => {
+            // "Исходная раскладка": a plain top-left place, its corner pin dropped; the
+            // settings stored beside the geometry stay.
+            let mut fields = op.clone();
+            fields.remove("op");
+            let patch = parse_patch(&fields)?;
             let positions = object_entry(root, "positions", json!({}))?.as_object_mut().expect("checked");
-            positions.insert(id, Value::Object(patch.fields));
+            let entry = positions.entry(patch.id.clone()).or_insert_with(|| json!({}));
+            let entry = entry.as_object_mut().ok_or_else(|| format!("the stored position of '{}' is not an object", patch.id))?;
+            for key in ["anchor", "ax", "ay"] {
+                entry.remove(key);
+            }
+            entry.extend(patch.fields);
+        }
+        "forget" => {
+            let id = widget_id(op.get("id"), kind)?;
+            if let Some(positions) = root.get_mut("positions").and_then(Value::as_object_mut) {
+                positions.remove(&id);
+            }
+        }
+        "set_position" => {
+            // An undo puts a whole record back, the widget's settings with it.
+            let id = widget_id(op.get("id"), kind)?;
+            let record = op.get("record").filter(|r| r.is_object()).ok_or("set_position requires a record")?;
+            bounded(record, "the position record")?;
+            let positions = object_entry(root, "positions", json!({}))?.as_object_mut().expect("checked");
+            positions.insert(id, record.clone());
+        }
+        "structure" => {
+            // Arrange mode's "Отменить": the lists as the session found them.
+            for (key, shape) in [("hidden", json!([])), ("instances", json!([])), ("nested", json!({}))] {
+                let value = op.get(key).cloned().unwrap_or(shape.clone());
+                if std::mem::discriminant(&value) != std::mem::discriminant(&shape) {
+                    return Err(format!("structure: `{key}` has the wrong shape"));
+                }
+                bounded(&value, key)?;
+                root.insert(key.into(), value);
+            }
+        }
+        "positions" => {
+            // The undo of a layout reset: the whole map as it was. Sent with `baseRev`.
+            let map = op.get("positions").filter(|p| p.is_object()).ok_or("positions requires an object")?;
+            bounded(map, "the positions")?;
+            root.insert("positions".into(), map.clone());
         }
         "remove_instance" => {
             let id = widget_id(op.get("id"), kind)?;
@@ -476,6 +528,31 @@ mod tests {
             "theme": { "id": "sea-glass" },
         });
         let merged = apply_ops(Some(stored), &ops(json!([
+            { "op": "position", "id": "clock", "x": 9, "anchor": "tr" },
+            { "op": "hide", "id": "telegram" },
+            { "op": "show", "id": "glyph-bar" },
+            { "op": "nest", "id": "vpn", "host": "folder_a" },
+            { "op": "remove_instance", "id": "vpn-1" },
+            { "op": "add_instance", "id": "vpn-2", "type": "vpn", "position": { "x": 5, "y": 6 } },
+            { "op": "arrange_side", "side": "left" },
+            { "op": "color_overrides", "id": "sea-glass", "value": { "accent": "#e6cf94" } },
+            { "op": "place", "id": "clock", "x": 20, "y": 30 },
+            { "op": "forget", "id": "vpn-1-menu" },
+            { "op": "add_instance", "id": "folder_b-1", "type": "folder_b" },
+        ]))).unwrap();
+        assert_eq!(merged["positions"]["clock"], json!({ "x": 20, "y": 30, "tint": "lilac" }), "place drops the corner pin");
+        assert_eq!(merged["instances"][0], json!({ "instanceId": "folder_b-1", "widgetType": "folder_b" }));
+        let restored = apply_ops(Some(merged.clone()), &ops(json!([
+            { "op": "set_position", "id": "clock", "record": { "x": 1, "version": "rings" } },
+            { "op": "positions", "positions": { "only": { "x": 0 } } },
+        ]))).unwrap();
+        assert_eq!(restored["positions"], json!({ "only": { "x": 0 } }));
+        let merged = apply_ops(Some(json!({
+            "positions": { "clock": { "x": 1, "tint": "lilac" }, "vpn-1": { "x": 3 }, "vpn-1-menu": {} },
+            "hidden": ["glyph-bar"], "nested": { "clock": ["vpn"] },
+            "instances": [{ "instanceId": "vpn-1", "widgetType": "vpn" }],
+            "migrations": { "vpnNested": true }, "theme": { "id": "sea-glass" },
+        })), &ops(json!([
             { "op": "position", "id": "clock", "x": 9, "anchor": "tr" },
             { "op": "hide", "id": "telegram" },
             { "op": "show", "id": "glyph-bar" },

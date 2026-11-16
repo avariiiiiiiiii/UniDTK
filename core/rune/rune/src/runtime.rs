@@ -609,6 +609,8 @@ pub struct Runtime<S: 'static> {
     hover_delays: hover_delay::HoverDelays,
     /// A press or blur stopped the waits to report an enter; the pointer's next move restarts them.
     hover_paused: bool,
+    /// Primary presses the window has taken, for tooling that posts input and waits for it.
+    presses: u64,
     /// Hover waiting out layout motion under a still pointer.
     hover_hold: hover::HoverHold,
     /// Files dragged over the window from another app (`drop_dispatch`).
@@ -942,6 +944,7 @@ impl<S: 'static> Runtime<S> {
             hover_gone: Vec::new(),
             hover_delays: Default::default(),
             hover_paused: false,
+            presses: 0,
             hover_hold: Default::default(),
             file_drag: Default::default(),
             ime_area: None,

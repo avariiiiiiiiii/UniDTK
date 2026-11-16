@@ -188,6 +188,7 @@ impl<S: 'static> Runtime<S> {
             self.pointer = Some((x, y));
             return;
         }
+        self.presses += 1;
         self.drop_drag_out_request();
         // A host that didn't act on the last press's request mustn't get it with this one.
         self.titlebar.action = None;
@@ -410,6 +411,11 @@ impl<S: 'static> Runtime<S> {
     /// A press on an element is held (the hand drives whatever follows it).
     pub fn pressing(&self) -> bool {
         self.press.is_held()
+    }
+
+    /// Primary presses taken since start: a posted click has arrived once this moves.
+    pub fn presses(&self) -> u64 {
+        self.presses
     }
     pub fn pointer(&self) -> Option<(f32, f32)> {
         self.pointer

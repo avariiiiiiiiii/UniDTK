@@ -39,6 +39,8 @@ pub struct Inspector {
     pub window: Mutex<Option<rune::WindowHandle>>,
     pub stopping: AtomicBool,
     pub failure: Mutex<Option<String>>,
+    /// The menu or arrange mode is open: the kernel forwards the desk's keys to the host.
+    pub wants_keyboard: AtomicBool,
     /// The commands to the kernel (`desk` forwards a position write); set once the link exists.
     pub outbox: Mutex<Option<Arc<crate::ws_client::Outbox>>>,
     data_dir: PathBuf,
@@ -63,7 +65,7 @@ impl Inspector {
         Ok(Arc::new(Self {
             snapshot: Mutex::new(Snapshot::default()), hwnd: AtomicIsize::new(0),
             input_count: AtomicU64::new(0), tree_seq: AtomicU64::new(0), window: Mutex::new(None),
-            stopping: AtomicBool::new(false), failure: Mutex::new(None), outbox: Mutex::new(None),
+            stopping: AtomicBool::new(false), failure: Mutex::new(None), outbox: Mutex::new(None), wants_keyboard: AtomicBool::new(false),
             data_dir,
             started: Instant::now(), token: crate::desktop_host::random_token()?,
             supervised: AtomicBool::new(false), bound_port: AtomicU16::new(0),
@@ -103,7 +105,7 @@ impl Inspector {
         let deadline = Instant::now() + ack_timeout;
         while self.input_count.load(Ordering::Acquire) == before_input {
             if Instant::now() >= deadline || self.stopping.load(Ordering::Acquire) {
-                return Err("input was posted but Rune did not acknowledge a card press".into());
+                return Err("input was posted but Rune did not take the press".into());
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -340,6 +342,7 @@ impl Inspector {
                 Ok(crate::desktop_host::takes_point(hwnd, (x * scale).round() as i32, (y * scale).round() as i32))
             }
             "click" => self.click(hwnd, args),
+            "drag" => self.drag(hwnd, args),
             _ => unreachable!("authorize rejected unknown commands"),
         }
     }
@@ -358,6 +361,38 @@ impl Inspector {
 
     fn click(&self, hwnd: isize, args: &Value) -> Result<Value, String> {
         let _input = self.input.try_lock().map_err(|_| "another input operation is in progress")?;
+        let (point, (x, y), forced) = self.input_point(hwnd, args)?;
+        let before = self.input_count.load(Ordering::Acquire);
+        let before_tree = self.tree_seq.load(Ordering::Acquire);
+        crate::desktop_host::click(hwnd, x, y)?;
+        let input_count = self.wait_for_click_ack(
+            before,
+            before_tree,
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+        )?;
+        Ok(json!({ "clicked": point, "forced": forced, "transport": "win32-posted",
+            "before": before, "input_count": input_count, "handled": true }))
+    }
+
+    /// A press on the target (or at `x`,`y`), moved by `dx`,`dy` points, then released.
+    fn drag(&self, hwnd: isize, args: &Value) -> Result<Value, String> {
+        let _input = self.input.try_lock().map_err(|_| "another input operation is in progress")?;
+        let (point, from, forced) = self.input_point(hwnd, args)?;
+        let delta = [args["dx"].as_f64().ok_or("drag needs dx")?, args["dy"].as_f64().ok_or("drag needs dy")?];
+        let scale = crate::desktop_host::window_scale(hwnd);
+        let to = (from.0 + (delta[0] * scale).round() as i32, from.1 + (delta[1] * scale).round() as i32);
+        let before = self.input_count.load(Ordering::Acquire);
+        let before_tree = self.tree_seq.load(Ordering::Acquire);
+        crate::desktop_host::drag(hwnd, from, to, 12)?;
+        let input_count = self.wait_for_click_ack(before, before_tree, Duration::from_secs(1), Duration::from_millis(50))?;
+        Ok(json!({ "dragged": point, "by": delta, "forced": forced, "transport": "win32-posted",
+            "before": before, "input_count": input_count, "handled": true }))
+    }
+
+    /// The point a posted gesture starts at, in points and in client pixels, refused when the
+    /// host does not take it or (without `force`) something covers it.
+    fn input_point(&self, hwnd: isize, args: &Value) -> Result<([f64; 2], (i32, i32), bool), String> {
         let point = {
             let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?;
             if snapshot.committed == 0 { return Err("host has not committed its initial element tree".into()); }
@@ -375,17 +410,7 @@ impl Inspector {
         if hit["in_region"] != true { return Err("point is outside the host's interactive region".into()); }
         let forced = args["force"].as_bool().unwrap_or(false);
         if !forced && hit["on_screen_is_host"] != true { return Err("target is covered; --force explicitly permits posted input to the covered host".into()); }
-        let before = self.input_count.load(Ordering::Acquire);
-        let before_tree = self.tree_seq.load(Ordering::Acquire);
-        crate::desktop_host::click(hwnd, x, y)?;
-        let input_count = self.wait_for_click_ack(
-            before,
-            before_tree,
-            Duration::from_secs(1),
-            Duration::from_millis(50),
-        )?;
-        Ok(json!({ "clicked": point, "forced": forced, "transport": "win32-posted",
-            "before": before, "input_count": input_count, "handled": true }))
+        Ok((point, (x, y), forced))
     }
 
     fn frames(&self) -> Result<Value, String> {

@@ -14,7 +14,10 @@
 //! Without arguments the host runs: the same window under the desktop, kept, with its
 //! inspector door (`inspector.rs`), which `udtk host ...` talks to.
 
+mod arrange;
+mod controls;
 mod desk;
+mod desk_cards;
 #[path = "../kernel/module_table.rs"]
 mod module_table;
 mod desktop_host;
@@ -22,9 +25,19 @@ mod faces;
 mod motion;
 mod host;
 mod inspector;
+mod menu;
+mod menu_desk;
+mod menu_folders;
+mod menu_look;
+mod menu_vpn;
 mod protocol;
+mod shell;
+mod shortcut_glyphs;
 mod supervisor;
 mod theme;
+mod theme_record;
+mod toast;
+mod vpn_panel;
 mod ws_client;
 #[cfg(test)]
 mod tests;

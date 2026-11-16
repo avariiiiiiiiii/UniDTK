@@ -125,11 +125,15 @@ impl Outbox {
     /// Sends a command and calls `handler` once with what came of it (on the link's thread):
     /// the reply, a timeout after [`REPLY_TIMEOUT`], or lost when the link dropped after the
     /// command left. A command that never left is sent again on the next session.
+    /// The handler hears every outcome, a refusal here included.
     pub fn request(&self, cmd: &str, args: Value, handler: ReplyHandler) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.pending.lock().map_err(|e| e.to_string())?.insert(id, Pending { deadline: Instant::now() + REPLY_TIMEOUT, sent: false, handler });
+        // A poisoned lock still holds consistent maps (every critical section is one insert
+        // or remove), and dropping the handler would leave its requester waiting for ever.
+        self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, Pending { deadline: Instant::now() + REPLY_TIMEOUT, sent: false, handler });
         let queued = {
-            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.queue.len() >= OUTBOX_CAPACITY {
                 false
             } else {

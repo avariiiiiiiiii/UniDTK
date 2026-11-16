@@ -312,6 +312,14 @@ impl Theme {
         }
     }
 
+    /// `tintSlot`: the slot name a target wears.
+    pub fn tint_slot(&self, target: &str, role: &str, default: &str) -> String {
+        self.tint_map
+            .get(target)
+            .or_else(|| self.tint_map.get(&format!("role:{role}")))
+            .map_or_else(|| default.to_string(), String::clone)
+    }
+
     /// `tintSlot`: the palette slot of a tint target, then of its role, then the module's
     /// default.
     pub fn tint(&self, target: &str, role: &str, default: &str) -> Color {

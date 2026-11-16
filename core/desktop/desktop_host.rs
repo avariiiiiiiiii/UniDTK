@@ -322,6 +322,27 @@ pub fn discover_with_attempt(attempt: usize) -> Result<isize, String> {
     desktop_host_for_attempt(attempt).map(|host| host.0 as isize)
 }
 
+/// `<input type="color">` in WebView2 opens the system colour dialog; so does the host. It runs
+/// its own message loop, so the caller keeps it off the UI thread. `None` when cancelled.
+pub fn choose_color(initial: [u8; 3]) -> Option<[u8; 3]> {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::UI::Controls::Dialogs::{ChooseColorW, CHOOSECOLORW, CC_FULLOPEN, CC_RGBINIT};
+    let mut custom = [COLORREF(0x00FF_FFFF); 16];
+    let rgb = |c: [u8; 3]| COLORREF(u32::from(c[0]) | (u32::from(c[1]) << 8) | (u32::from(c[2]) << 16));
+    let mut dialog = CHOOSECOLORW {
+        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+        rgbResult: rgb(initial),
+        lpCustColors: custom.as_mut_ptr(),
+        Flags: CC_FULLOPEN | CC_RGBINIT,
+        ..Default::default()
+    };
+    if !unsafe { ChooseColorW(&mut dialog) }.as_bool() {
+        return None;
+    }
+    let value = dialog.rgbResult.0;
+    Some([(value & 0xFF) as u8, ((value >> 8) & 0xFF) as u8, ((value >> 16) & 0xFF) as u8])
+}
+
 /// `navigator.onLine`: whether Windows has a connection that can reach the network.
 pub fn is_online() -> bool {
     let mut flags = windows::Win32::Networking::WinInet::INTERNET_CONNECTION(0);
@@ -556,6 +577,31 @@ pub fn click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
         PostMessageW(hwnd, WM_LBUTTONDOWN, WPARAM(1), at).map_err(|e| e.to_string())?; // MK_LBUTTON
         PostMessageW(hwnd, WM_LBUTTONUP, WPARAM(0), at).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// A left-button drag from client pixel `from` to `to`: a press, `steps` moves with the
+/// button held, each a frame apart so the drag sees every phase, then the release.
+pub fn drag(hwnd: isize, from: (i32, i32), to: (i32, i32), steps: u32) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
+    let hwnd = HWND(hwnd as _);
+    if hwnd.0.is_null() {
+        return Err("the host window is not attached yet".into());
+    }
+    let at = |(x, y): (i32, i32)| LPARAM(((y as u16 as isize) << 16) | (x as u16 as isize));
+    unsafe {
+        PostMessageW(hwnd, WM_MOUSEMOVE, WPARAM(0), at(from)).map_err(|e| e.to_string())?;
+        PostMessageW(hwnd, WM_LBUTTONDOWN, WPARAM(1), at(from)).map_err(|e| e.to_string())?; // MK_LBUTTON
+    }
+    let steps = steps.max(1);
+    for step in 1..=steps {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        let t = step as f32 / steps as f32;
+        let point = (from.0 + ((to.0 - from.0) as f32 * t).round() as i32, from.1 + ((to.1 - from.1) as f32 * t).round() as i32);
+        unsafe { PostMessageW(hwnd, WM_MOUSEMOVE, WPARAM(1), at(point)) }.map_err(|e| e.to_string())?;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(16));
+    unsafe { PostMessageW(hwnd, WM_LBUTTONUP, WPARAM(0), at(to)) }.map_err(|e| e.to_string())?;
     Ok(())
 }
 

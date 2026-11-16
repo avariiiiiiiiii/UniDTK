@@ -4,10 +4,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use rune::el::el;
-use rune::{App, AppSpec, FrameOutcome, Pixels, Tx, WindowOptions};
+use rune::{App, AppSpec, FrameOutcome, ImageCache, WindowOptions};
 use serde_json::json;
-use crate::desk::{self, ClockTime, Layout};
+use crate::desk::Layout;
+use crate::shell::{on_key, poll, view, Host};
 use crate::inspector::Inspector;
 use crate::supervisor::{ControlCommand, ControlSink, StartHandshake};
 use crate::ws_client::{HostRegistrationInfo, Inbound, LinkConfig, Outbox, WsClientHandle};
@@ -28,139 +28,6 @@ const FONTS: &[&[u8]] = &[
 /// a click must reach (`hit:` — the menu, its sheets, toasts, the arrange bar). Anything else
 /// lets clicks through to the desktop.
 const HIT_KEYS: [&str; 2] = ["widget:", "hit:"];
-
-struct Host {
-    inspector: Arc<Inspector>,
-    /// `None` until the kernel has described the desk: a supervised host draws nothing
-    /// rather than defaults that would jump to the stored positions a moment later.
-    layout: Option<Layout>,
-    time: ClockTime,
-    canvas: (f32, f32),
-    /// Physical pixels per point; the grain image is made in device pixels.
-    scale: f32,
-    grain: Pixels,
-    /// What `grain` was made for: width and height in pixels, and the strength's bits.
-    grain_made_for: Option<(u32, u32, u32)>,
-    /// The clock is open as its dashboard.
-    expanded: bool,
-    /// Timing of the clock's open and close, and the duration of the one running now.
-    morph: desk::MorphClock,
-    transition: f32,
-    motion: crate::motion::Motion,
-    /// `navigator.onLine` as the dashboard read it when it opened.
-    online: bool,
-}
-
-impl Host {
-    fn accept_layout(&mut self, layout: Layout) {
-        // A reply and an event can arrive in either order; the newer revision wins, and any
-        // revision of a new kernel run.
-        if self.layout.as_ref().map_or(true, |known| layout.supersedes(known)) {
-            self.motion = layout.theme.motion();
-            self.layout = Some(layout);
-            self.refresh_grain();
-        }
-    }
-
-    /// The size the grain image covers: the larger of the tile and the dashboard, so the
-    /// card clips it and never stretches it while it grows.
-    fn grain_size(&self) -> (f32, f32) {
-        let Some(layout) = &self.layout else { return (0.0, 0.0) };
-        let tile = layout.clock_place(self.canvas);
-        let open = desk::dashboard_box(tile, self.canvas);
-        (tile.w.max(open.w), tile.h.max(open.h))
-    }
-
-    /// The grain is made again only when its size or the theme's grain strength changes.
-    fn refresh_grain(&mut self) {
-        let Some(layout) = &self.layout else { return };
-        let strength = layout.theme.glass_grain;
-        let (w, h) = self.grain_size();
-        let size = ((w * self.scale).round().max(1.0) as u32, (h * self.scale).round().max(1.0) as u32);
-        let made_for = (size.0, size.1, strength.to_bits());
-        if self.grain_made_for != Some(made_for) {
-            self.grain.set(size.0, size.1, desk::grain_rgba(size.0, size.1, self.scale, strength));
-            self.grain_made_for = Some(made_for);
-        }
-    }
-}
-
-fn view(state: &Host, _: &mut rune::runtime::Cx<Host>) -> rune::el::El {
-    let root = el().w_full().h_full();
-    let Some(layout) = &state.layout else { return root };
-    // A widget switched off the desk (`config.hidden`) is not drawn; its record stays.
-    if layout.is_hidden(desk::CLOCK) {
-        return root;
-    }
-    let card = desk::clock_card(desk::ClockView {
-        face: desk::face_of(&layout.clock()),
-        time: state.time,
-        tile: layout.clock_place(state.canvas),
-        canvas: state.canvas,
-        theme: &layout.theme,
-        motion: &state.motion,
-        grain: &state.grain,
-        grain_size: state.grain_size(),
-        expanded: state.expanded,
-        transition: state.transition,
-        online: state.online,
-    });
-    // A press opens the dashboard and a press on the dashboard closes it, as the page's
-    // `toggleWidget` does for the header-less clock card.
-    root.child(card.on_press_tx(|state: &mut Host, tx: &mut Tx| {
-        state.inspector.input_count.fetch_add(1, Ordering::AcqRel);
-        if state.expanded {
-            state.close_dashboard(tx);
-        } else {
-            state.open_dashboard(tx);
-        }
-    }))
-}
-
-impl Host {
-    /// The open runs on `expoOut` for `calculateDuration` of the growth.
-    fn open_dashboard(&mut self, tx: &mut Tx) {
-        let Some(layout) = &self.layout else { return };
-        let tile = layout.clock_place(self.canvas);
-        self.online = crate::desktop_host::is_online();
-        self.transition = self.morph.open(&self.motion, tile, self.canvas);
-        tx.motion_curve(self.motion.tween(self.transition, crate::motion::EXPO_OUT));
-        self.expanded = true;
-    }
-
-    /// The close runs on `surfaceExit`, shorter when it interrupts the open.
-    fn close_dashboard(&mut self, tx: &mut Tx) {
-        if !self.expanded {
-            return;
-        }
-        self.transition = self.morph.close();
-        tx.motion_curve(self.motion.tween(self.transition, crate::motion::SURFACE_EXIT));
-        self.expanded = false;
-    }
-}
-
-/// Escape folds the open dashboard (`collapseAllShellWidgets`); the kernel forwards the desk's
-/// keys to the host.
-fn on_key(state: &mut Host, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
-    if event.key == rune::Key::Escape && state.expanded {
-        state.close_dashboard(tx);
-        return true;
-    }
-    false
-}
-
-/// Runs at the start of every frame; one wake at the next tick is all the clock asks for.
-fn poll(state: &mut Host, _: f64, tx: &mut Tx) -> bool {
-    let Some(layout) = &state.layout else { return false };
-    let face = desk::face_of(&layout.clock());
-    let (now, nanos) = ClockTime::now();
-    let changed = now.differs(state.time, face);
-    if changed {
-        state.time = now;
-    }
-    tx.wake_at(tx.clock() + now.seconds_to_next_tick(face, nanos));
-    changed
-}
 
 /// What the kernel link brings to the UI thread: the layout, from the state event, from its
 /// catch-up frame after a (re)connect, and from the answer to a `desk_layout_get`.
@@ -281,28 +148,12 @@ pub fn run() -> Result<(), String> {
     spec.fonts = FONTS;
     spec.poll = Some(poll);
     spec.on_key = Some(on_key);
-    let app = App::new(spec).init(move || {
-            let mut host = Host {
-                inspector: state_inspector,
-                // Without a kernel there is nobody to ask: draw the module defaults.
-                layout: (!supervised).then(Layout::empty),
-                time: ClockTime::now().0,
-                canvas,
-                scale,
-                grain: Pixels::new(),
-                grain_made_for: None,
-                expanded: false,
-                morph: desk::MorphClock::default(),
-                transition: 0.0,
-                motion: crate::motion::Motion::new(crate::motion::Profile::Balanced, 1.0),
-                online: true,
-            };
-            if let Some(layout) = &host.layout {
-                host.motion = layout.theme.motion();
-            }
-            host.refresh_grain();
-            host
-        })
+    // The menu's SVG icons rasterize on the image cache's workers, which wake the desk.
+    spec.setup = Some(|state: &mut Host, waker| state.images = Some(ImageCache::new(waker)));
+    let ui_slot: Arc<std::sync::OnceLock<rune::AppHandle<Host>>> = Arc::new(std::sync::OnceLock::new());
+    let state_ui = ui_slot.clone();
+    // Without a kernel there is nobody to ask: draw the module defaults.
+    let app = App::new(spec).init(move || Host::new(state_inspector, (!supervised).then(Layout::empty), canvas, scale, state_ui))
         .open_inactive()
         .window_options(WindowOptions {
             transparent: true, borderless: true,
@@ -316,6 +167,7 @@ pub fn run() -> Result<(), String> {
             ..Default::default()
         });
     let handle = app.handle();
+    let _ = ui_slot.set(handle.clone());
     let quit_handle = handle.clone();
     inspector.start(supervised, move || quit_handle.quit())?;
 
@@ -426,13 +278,13 @@ pub fn run() -> Result<(), String> {
                 }
             }
 
-            /// A press on the bare desk closes the open dashboard, as the page's empty-desk
-            /// click does (`setupDesktopOutsideClickHandler`).
+            /// A press on the bare desk closes the top surface, as the page's empty-desk click
+            /// does (`setupDesktopOutsideClickHandler`).
             fn on_pointer_outside(&mut self, generation: u64) {
                 if generation != self.active_generation.load(Ordering::Acquire) {
                     return;
                 }
-                self.ui.update(|state, tx| state.close_dashboard(tx));
+                self.ui.update(|state: &mut Host, tx| state.pointer_outside(tx));
             }
 
             fn on_focus_lost(&mut self, generation: u64) {
@@ -524,6 +376,7 @@ pub fn run() -> Result<(), String> {
         }
     })
     .on_tree_committed(move |rt| {
+        on_committed.input_count.store(rt.presses(), Ordering::Release);
         let drawn_seq = sync_tree_snapshot(
             rt,
             &on_committed,
@@ -534,6 +387,7 @@ pub fn run() -> Result<(), String> {
         last_commit_drawn_c.set(Some(drawn_seq));
     })
     .on_frame_drawn(move |rt| {
+        on_drawn.input_count.store(rt.presses(), Ordering::Release);
         let drawn_seq = on_drawn.snapshot.lock().map(|s| s.drawn).unwrap_or(0);
         if last_commit_drawn_d.take() == Some(drawn_seq) {
             return;
@@ -591,7 +445,8 @@ fn sync_tree_snapshot(
         "label": element.label, "text": element.text, "rect": element.rect,
         "opacity": element.opacity,
     })).collect());
-    let has_focused_text = infos.iter().any(|element| element.focused && element.focusable && !element.exiting);
+    let has_focused_text = infos.iter().any(|element| element.focused && element.focusable && !element.exiting)
+        || inspector.wants_keyboard.load(Ordering::Acquire);
     if focused_input.swap(has_focused_text, Ordering::AcqRel) != has_focused_text {
         if let Ok(slot) = ws_slot.lock() {
             if let Some(client) = slot.as_ref() {
