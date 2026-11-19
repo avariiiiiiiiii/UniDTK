@@ -38,6 +38,13 @@ pub enum ControlCommand {
     PointerOutside {
         generation: u64,
     },
+    /// Wheel travel over the host's region, in the window's client pixels (`delta` 120 a notch).
+    Wheel {
+        generation: u64,
+        x: i32,
+        y: i32,
+        delta: i32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +63,7 @@ pub trait ControlSink {
     fn on_inject_key(&mut self, _cmd: ControlCommand) {}
     fn on_focus_lost(&mut self, _generation: u64) {}
     fn on_pointer_outside(&mut self, _generation: u64) {}
+    fn on_wheel(&mut self, _generation: u64, _x: i32, _y: i32, _delta: i32) {}
 }
 
 pub fn read_control_stream<R: BufRead, S: ControlSink>(
@@ -100,6 +108,7 @@ pub fn read_control_stream<R: BufRead, S: ControlSink>(
                     Ok(cmd @ ControlCommand::InjectKey { .. }) => sink.on_inject_key(cmd),
                     Ok(ControlCommand::FocusLost { generation }) => sink.on_focus_lost(generation),
                     Ok(ControlCommand::PointerOutside { generation }) => sink.on_pointer_outside(generation),
+                    Ok(ControlCommand::Wheel { generation, x, y, delta }) => sink.on_wheel(generation, x, y, delta),
                     Ok(ControlCommand::Stop) => {
                         sink.on_stop("stop");
                         return Ok(());

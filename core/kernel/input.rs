@@ -332,6 +332,7 @@ pub fn is_key_target(target: HWND) -> bool {
 /// windows: there Windows already synthesizes a wheel that the hook forwards.
 fn send_mouse_wheel(point: POINT, wheel_delta: i32, own_only: bool) {
     if crate::is_native_host() {
+        send_host_wheel(point, wheel_delta);
         return;
     }
     let mut targets = Vec::new();
@@ -377,6 +378,26 @@ fn send_mouse_wheel(point: POINT, wheel_delta: i32, own_only: bool) {
             }),
         );
     }
+}
+
+/// The native host never receives a real wheel (it is a child of the desktop), so a wheel over
+/// its region goes to it as a control message, in the window's client pixels; over anything else
+/// it is not the desk's.
+fn send_host_wheel(point: POINT, wheel_delta: i32) {
+    let Some(generation) = crate::host_supervisor::active_generation() else { return };
+    let mut client = point;
+    unsafe {
+        let hwnd = WindowsAndMessaging::WindowFromPoint(point);
+        if !is_host_window_at(hwnd, point) || !ScreenToClient(hwnd, &mut client).as_bool() {
+            return;
+        }
+    }
+    let _ = crate::hotkeys::send_host_control(crate::host_supervisor::ControlMessage::Wheel {
+        generation,
+        x: client.x,
+        y: client.y,
+        delta: wheel_delta,
+    });
 }
 
 fn child_window_at_point(root: HWND, screen_point: POINT) -> HWND {

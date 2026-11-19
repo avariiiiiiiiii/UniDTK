@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
+| **145** | 2026-11-19 | `TBD` | G1: the wheel reaches the native desk (`wheel` control message, `Widget::wheel`), the Glyph Bar's volume steps | `core/kernel/input.rs`, `core/desktop/shell.rs`, `core/desktop/widget.rs`, `modules/glyph-bar/native/` |
 | **144** | 2026-11-19 | `340a81e` | G1: the Glyph Bar on the native desk (`modules/glyph-bar/native`), `flatChrome: none`, sticky kernel events | `modules/glyph-bar/native/`, `core/desktop/card.rs`, `core/desktop/shell.rs` |
 | **143** | 2026-11-16..19 | `a73fde1` | G2: the widget contract (`modules/<id>/native/`), one morph, the clock's freeze on a close from fully open (`surface::keep_frames`), the first-press and flat-material fixes | `core/desktop/surface.rs`, `core/desktop/shell.rs`, `core/desktop/menu.rs`, `modules/clock/native/`, `docs/reference/shell.md` |
 | **142** | 2026-11-15 | `3227b9b` | G1: desk model from the kernel's layout, the whole theme (`normalizeTheme`, flat and jelly), the Clock with all thirteen faces and its dashboard, `udtk host desk`, toolchain pinned to 1.99.1 | `core/desktop/desk.rs`, `core/desktop/faces.rs`, `core/desktop/theme.rs`, `core/desktop/host.rs` |
@@ -5667,3 +5668,24 @@ After the clock's close freeze was fixed (session 143), the next item of the app
 - `cargo test --release --workspace -j 1`: 470 passed, 0 failed (7 new in the Glyph Bar crate; a mutation of the wheel's unmute floor failed its test); `udtk doc --check`: `book: ok`; `udtk build -j 4` three times, about 7 minutes each.
 - Live, native host, flat material, `udtk shot --host` laid over a dark background (the readback is alpha on white, where the idle LEDs vanish): the 56 x 587 strip and the 10 x 127 instance draw ten square LEDs; with the system muted (`level 50, muted true`) the bottom LED is lit red with its glow and the others are off.
 - **Not seen live:** the jelly material (Sea Glass), a click and a drag on a LED (they would change the user's volume), the hover scale of the LEDs (1.1 flat, 1.18 jelly bead, Rune has no hover scale) and the press scale (0.94), the wheel (the kernel does not forward the wheel to the host; the page's two rules, +-10 a native event and 120-unit notches on the desktop, are in `logic::nudge` unused), a failed write is not rolled back (as the page); the page's leak of `suppressClick` after a drag released outside the strip is not copied (it swallows the next click).
+
+## 145. Session 2026-11-19 - G1: the wheel on the native desk
+
+### 145.1 Context and symptoms
+The user confirmed the Glyph Bar works on their screen and asked to continue the plan. The open item of session 144 was the wheel: `logic::nudge` was written and unused, because nothing delivered a wheel to the native host.
+
+### 145.2 Root cause
+The native window is a child of the desktop and never receives a real wheel (`input.rs`: Chromium ignores a posted `WM_MOUSEWHEEL`, and a window under `Progman` gets none). The kernel's `WH_MOUSE_LL` hook sees every wheel, but `send_mouse_wheel` returned at once when the host is native (`is_native_host()`), so the page's `wallpaper-wheel` path had no native counterpart.
+
+### 145.3 Architecture decision
+- The hook sends a wheel over the host's region as the control message `wheel {generation, x, y, delta}` in the window's client pixels, on the link that already carries `PointerOutside` (`r[shell.widget-contract]`, `shell.md`). The host divides by the system scale and calls `Host::wheel`.
+- `Host::wheel` finds the card whose tile is under the point, adds the travel to that card's carry and hands whole notches (120 units, as the page's `wheelNotches`) to the new `Widget::wheel`. With arrange mode, the menu or a surface open it routes nothing, as the page scrolls what is under the pointer there and nothing here scrolls.
+- The Glyph Bar answers `nudge(notches * 10)`.
+
+### 145.4 Changed files
+[`core/kernel/host_supervisor.rs`](../core/kernel/host_supervisor.rs), [`core/kernel/input.rs`](../core/kernel/input.rs), [`core/desktop/supervisor.rs`](../core/desktop/supervisor.rs), [`core/desktop/host.rs`](../core/desktop/host.rs), [`core/desktop/shell.rs`](../core/desktop/shell.rs), [`core/desktop/widget.rs`](../core/desktop/widget.rs), [`core/desktop/tests.rs`](../core/desktop/tests.rs), [`modules/glyph-bar/native/lib.rs`](../modules/glyph-bar/native/lib.rs), [`docs/reference/shell.md`](reference/shell.md), [`docs/modules/glyph-bar.md`](modules/glyph-bar.md), [`docs/dev/plan-rune-host.md`](dev/plan-rune-host.md).
+
+### 145.5 Verification and metrics
+- Tests: `unidtk-shell` and `unidtk-native-glyph-bar` 80/80 (new: `a_wheel_line_from_the_kernel_parses`, `small_wheel_travel_adds_up_to_a_notch_and_keeps_the_rest`), the kernel's `a_wheel_is_one_line_the_host_can_read` 1/1; the full `cargo test --release --workspace -j 1` was not completed: the system stopped it for low memory, so the 470 of session 144 is not re-confirmed. `udtk doc --check`: `book: ok`. `udtk build -j 4`: one run, about 7 minutes.
+- Live, native host, Desktop 1 (synthetic `mouse_event` wheel over the bar at (1224, 351) pt): muted at 44 % -> up gives 10 % unmuted; up 20 %; down 10 %; a wheel at (100, 100), off the bar, changes nothing. These are the page's rules in `logic::nudge`. The volume was then put back to 44 %, muted, through the endpoint API (the write door is not open to `udtk invoke`).
+- Not covered: the wheel over a card with a surface open (nothing routes); the player's volume and the Explorer's scrolling (their ports); a touchpad's small deltas are summed by `take_notches` (tested), not tried on a pad.

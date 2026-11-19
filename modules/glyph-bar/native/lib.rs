@@ -164,6 +164,14 @@ impl Widget for GlyphBar {
         }
     }
 
+    /// `nudgeSystemVolume(notches * 10)`: a notch is 10 %.
+    fn wheel(&mut self, notches: i32, act: &mut Act<'_>) -> bool {
+        if let Some((volume, ask)) = logic::nudge(notches * 10, self.volume) {
+            self.ask(volume, ask, act);
+        }
+        true
+    }
+
     fn content(&self, v: &View<'_>) -> Option<El> {
         let theme = v.theme;
         let side = logic::side_for_width(v.tile.w);

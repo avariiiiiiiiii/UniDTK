@@ -116,6 +116,12 @@ pub trait Widget: Any {
         false
     }
 
+    /// The wheel turned `notches` over its tile (a notch is 120 units; positive is away from the
+    /// user, as the page's `deltaY < 0`), while no surface or menu is open. `true` when it took it.
+    fn wheel(&mut self, _notches: i32, _act: &mut Act<'_>) -> bool {
+        false
+    }
+
     /// A press on the bare desk: `true` when it closed something of its own.
     fn outside(&mut self, _act: &mut Act<'_>) -> bool {
         false

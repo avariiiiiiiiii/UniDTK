@@ -79,6 +79,15 @@ pub enum ControlMessage {
     PointerOutside {
         generation: u64,
     },
+    /// Wheel travel over the host's region, in the host window's client pixels. The window never
+    /// receives a real wheel (it is a child of the desktop), so the kernel's `WH_MOUSE_LL` hook
+    /// forwards it, as it forwards one to the page's `wallpaper-wheel`.
+    Wheel {
+        generation: u64,
+        x: i32,
+        y: i32,
+        delta: i32,
+    },
 }
 
 pub fn encode_control(msg: &ControlMessage) -> Result<String, String> {
@@ -826,6 +835,13 @@ mod tests {
             serde_json::from_str::<ControlMessage>(&tb).unwrap(),
             ControlMessage::TaskbarCreated
         );
+    }
+
+    /// The host parses this exact line (`core/desktop/tests.rs`, `a_wheel_line_from_the_kernel_parses`).
+    #[test]
+    fn a_wheel_is_one_line_the_host_can_read() {
+        let line = encode_control(&ControlMessage::Wheel { generation: 2, x: -40, y: 612, delta: -120 }).unwrap();
+        assert_eq!(line, r#"{"cmd":"wheel","generation":2,"x":-40,"y":612,"delta":-120}"#);
     }
 
     #[test]

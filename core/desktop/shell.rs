@@ -30,6 +30,15 @@ use crate::widget::{Act, Init, Op, Reply, SurfaceSize, View, Widget, WidgetType}
 /// `.app-shell { padding: 28px }`: the widgets' canvas (`#widgets`) lies 28 points inside the
 /// window on every side. Records are in the canvas's coordinates and anchor to its corners.
 pub(crate) const DESK_INSET: f32 = 28.0;
+/// Wheel units in one notch (`WHEEL_DELTA`), as `wheelNotches` counts them.
+const WHEEL_NOTCH: f32 = 120.0;
+
+/// `wheelNotches`: the whole notches in `carry + delta`, and what is left over for the next turn.
+fn take_notches(carry: f32, delta: f32) -> (i32, f32) {
+    let travel = carry + delta;
+    let notches = (travel / WHEEL_NOTCH).trunc();
+    (notches as i32, travel - notches * WHEEL_NOTCH)
+}
 
 /// One widget on the desk: its type, the widget, and a generation that tells it from a widget
 /// made later under the same id (an answer for the old one is dropped).
@@ -63,6 +72,8 @@ pub struct Host {
     /// comes once, at subscribe, usually before the layout has made any widget; a widget made
     /// later is given it from here.
     sticky: HashMap<String, Value>,
+    /// The wheel travel a widget has not yet turned into a whole notch.
+    wheel_carry: HashMap<String, f32>,
     next_gen: u64,
     /// What the widgets were last made from: the layout's run and revision, the switched-off.
     synced: Option<(String, u64, Vec<String>)>,
@@ -128,6 +139,7 @@ impl Host {
             types,
             widgets: BTreeMap::new(),
             sticky: HashMap::new(),
+            wheel_carry: HashMap::new(),
             next_gen: 1,
             synced: None,
             open: None,
@@ -544,6 +556,26 @@ impl Host {
             menu::close_sheet(self, tx);
         } else {
             self.close_card(tx);
+        }
+    }
+
+    /// Wheel travel over the desk at window point (`x`, `y`) (`wallpaper-wheel`): the card whose
+    /// tile is under it gets whole notches, and the rest of a turn waits for the next (a
+    /// touchpad sends many small ones). Nothing takes it while arranging, with the menu or a
+    /// surface open: there the page scrolls what is under the pointer, and nothing here scrolls.
+    pub(crate) fn wheel(&mut self, x: f32, y: f32, delta: f32, tx: &mut Tx) {
+        if self.arrange.is_some() || self.menu.open || self.open.is_some() {
+            return;
+        }
+        let Some(desk) = self.desk() else { return };
+        let under = desk.cards.iter().zip(self.card_tiles(&desk)).find(|(_, t)| x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h).map(|(card, _)| card.id.clone());
+        let Some(id) = under else { return };
+        let (notches, carry) = take_notches(self.wheel_carry.get(&id).copied().unwrap_or(0.0), delta);
+        self.wheel_carry.insert(id.clone(), carry);
+        if notches != 0 {
+            self.with_dyn(&id, tx, |widget, act| {
+                widget.wheel(notches, act);
+            });
         }
     }
 
@@ -1533,5 +1565,18 @@ mod tests {
     fn a_face_is_a_position_field_and_anything_else_a_setting() {
         assert!(super::position_fields(&serde_json::json!({ "op": "x", "id": "c", "version": "rings" })));
         assert!(!super::position_fields(&serde_json::json!({ "op": "x", "id": "t", "expanded": true })));
+    }
+
+    #[test]
+    fn small_wheel_travel_adds_up_to_a_notch_and_keeps_the_rest() {
+        assert_eq!(super::take_notches(0.0, 120.0), (1, 0.0));
+        assert_eq!(super::take_notches(0.0, -240.0), (-2, 0.0));
+        // A touchpad: 30 + 30 + 30 is not yet a notch, the fourth makes one.
+        let (n, carry) = super::take_notches(0.0, 30.0);
+        assert_eq!((n, carry), (0, 30.0));
+        let (n, carry) = super::take_notches(carry, 90.0);
+        assert_eq!((n, carry), (1, 0.0));
+        // Turning back cancels what is carried instead of stepping.
+        assert_eq!(super::take_notches(100.0, -30.0), (0, 70.0));
     }
 }
