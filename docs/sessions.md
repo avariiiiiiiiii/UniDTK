@@ -20,7 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
-| **145** | 2026-11-19 | `TBD` | G1: the wheel reaches the native desk (`wheel` control message, `Widget::wheel`), the Glyph Bar's volume steps | `core/kernel/input.rs`, `core/desktop/shell.rs`, `core/desktop/widget.rs`, `modules/glyph-bar/native/` |
+| **145** | 2026-11-19 | `0fe3091` | G1: the wheel reaches the native desk (`wheel` control message, `Widget::wheel`), the Glyph Bar's volume steps | `core/kernel/input.rs`, `core/desktop/shell.rs`, `core/desktop/widget.rs`, `modules/glyph-bar/native/` |
 | **144** | 2026-11-19 | `340a81e` | G1: the Glyph Bar on the native desk (`modules/glyph-bar/native`), `flatChrome: none`, sticky kernel events | `modules/glyph-bar/native/`, `core/desktop/card.rs`, `core/desktop/shell.rs` |
 | **143** | 2026-11-16..19 | `a73fde1` | G2: the widget contract (`modules/<id>/native/`), one morph, the clock's freeze on a close from fully open (`surface::keep_frames`), the first-press and flat-material fixes | `core/desktop/surface.rs`, `core/desktop/shell.rs`, `core/desktop/menu.rs`, `modules/clock/native/`, `docs/reference/shell.md` |
 | **142** | 2026-11-15 | `3227b9b` | G1: desk model from the kernel's layout, the whole theme (`normalizeTheme`, flat and jelly), the Clock with all thirteen faces and its dashboard, `udtk host desk`, toolchain pinned to 1.99.1 | `core/desktop/desk.rs`, `core/desktop/faces.rs`, `core/desktop/theme.rs`, `core/desktop/host.rs` |
