@@ -20,5 +20,7 @@
     }
   ],
   "container": true,
+  "chrome": "bare",
+  "instanceSize": { "w": 210, "h": 180 },
   "defaultPlacement": { "x": 510, "y": -10, "w": 210, "h": 190, "version": "rings" }
 }

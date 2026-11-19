@@ -30,6 +30,7 @@
 - [The desk, the menu, and themes](reference/desk.md)
 - [Motion](reference/motion.md)
 - [Surfaces](reference/surfaces.md)
+- [The native shell and the widget contract](reference/shell.md)
 
 # The udtk Book
 

@@ -7315,6 +7315,9 @@ dependencies = [
  "unidtk-mod-mp3-player",
  "unidtk-mod-telegram",
  "unidtk-mod-vpn",
+ "unidtk-native-clock",
+ "unidtk-native-vpn",
+ "unidtk-shell",
  "windows 0.58.0",
 ]
 
@@ -7410,6 +7413,42 @@ dependencies = [
  "tauri",
  "unidtk-api",
  "ureq 2.12.1",
+]
+
+[[package]]
+name = "unidtk-native-clock"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rune",
+ "serde_json",
+ "unidtk-shell",
+]
+
+[[package]]
+name = "unidtk-native-vpn"
+version = "0.1.0"
+dependencies = [
+ "rune",
+ "serde_json",
+ "unidtk-shell",
+]
+
+[[package]]
+name = "unidtk-shell"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "image",
+ "png 0.18.1",
+ "raw-window-handle",
+ "rune",
+ "serde",
+ "serde_json",
+ "tungstenite 0.24.0",
+ "unidtk-api",
+ "windows 0.58.0",
 ]
 
 [[package]]

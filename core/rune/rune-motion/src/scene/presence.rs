@@ -65,7 +65,7 @@ impl Scene {
         // An entrance that changes nothing on screen (an identity insertion) has nothing to play.
         let animate = mount == Mount::Animated && !rides_parent && !ins.shows_nothing();
         let delay = if delay.is_finite() { delay.max(0.0) } else { 0.0 };
-        let entrance = Anim { delay, ..Anim::from(spec.transition.springs.enter) };
+        let entrance = Anim { delay, ..spec.transition.enter_anim() };
         let mut generation = 0;
         let mut presence = Presence::LANDED;
         let acts = phase::step(&mut presence, &mut generation, PhaseEvent::Mount { ins, animate, entrance });
@@ -141,7 +141,7 @@ impl Scene {
         let p = self.presence_now(i);
         let (rem, exit) = {
             let n = &self.nodes[i];
-            (n.transition.removal.kit_rules(true), Anim::from(n.transition.springs.exit))
+            (n.transition.removal.kit_rules(true), n.transition.exit_anim())
         };
         let acts = self.nodes[i].phase_step(PhaseEvent::Exit { p, rem, exit });
         self.apply(i, acts);
@@ -190,7 +190,7 @@ impl Scene {
         let p = self.presence_now(i);
         let (ins, entrance) = {
             let n = &self.nodes[i];
-            (n.transition.insertion.kit_rules(false), Anim::from(n.transition.springs.enter))
+            (n.transition.insertion.kit_rules(false), n.transition.enter_anim())
         };
         let acts = self.nodes[i].phase_step(PhaseEvent::Revive { p, ins, entrance });
         self.apply(i, acts);

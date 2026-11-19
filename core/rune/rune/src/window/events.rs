@@ -173,6 +173,13 @@ impl<S: 'static> Host<S> {
                 }
                 let _ = reply.send(res);
             }
+            WakeEvent::GpuMemory(_, reply) => {
+                let _ = reply.send(self.gpu.as_ref().map(|(gpu, renderer)| super::handle::GpuMemory {
+                    counters: gpu.device.get_internal_counters(),
+                    layers: renderer.layer_stats(),
+                    report: gpu.device.generate_allocator_report(),
+                }));
+            }
             WakeEvent::Reopen | WakeEvent::Turn | WakeEvent::Quit(_) => {}
         }
     }
@@ -236,6 +243,13 @@ impl<S: 'static> Host<S> {
             if self.rt.has_committed() {
                 self.rt.settle_all();
             }
+            self.rt.frame(0.0);
+        } else {
+            // A covered window steps its frames without drawing, and a view that reads the clock
+            // (a morph's progress) is not stale to the runtime: the last frame built can be
+            // older than what the state shows now. The capture builds the view again, so it is
+            // the window as it would draw this instant.
+            self.rt.invalidate();
             self.rt.frame(0.0);
         }
         self.frame_reports.check_committed(&self.rt);

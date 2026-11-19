@@ -768,7 +768,7 @@ impl TextSystem {
             if !settings.is_empty() {
                 b.push_default(parley::FontVariations::List(std::borrow::Cow::Owned(settings)));
             }
-            b.push_default(LineHeight::Absolute(style.line_px()));
+            b.push_default(if style.is_normal_lh() { LineHeight::MetricsRelative(1.0) } else { LineHeight::Absolute(style.line_px()) });
             if wrap_anywhere {
                 b.push_default(StyleProperty::OverflowWrap(parley::OverflowWrap::Anywhere));
             }
@@ -795,7 +795,7 @@ impl TextSystem {
                     b.push(StyleProperty::FontSize(sz), r.clone());
                     // CSS's unitless line-height: a span of its own size (inline code, a smaller run) keeps the
                     // paragraph's leading ratio, so its box fits inside the line instead of growing it
-                    b.push(LineHeight::FontSizeRelative(style.line_px() / style.size), r.clone());
+                    b.push(if style.is_normal_lh() { LineHeight::MetricsRelative(1.0) } else { LineHeight::FontSizeRelative(style.line_px() / style.size) }, r.clone());
                 }
                 let resized = s.size.is_some() && style.optical_size == OpticalSize::Auto;
                 if resized || span_axes[i] != base_axes {

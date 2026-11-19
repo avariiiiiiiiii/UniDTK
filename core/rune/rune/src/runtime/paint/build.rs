@@ -41,6 +41,7 @@ impl<S: 'static> Runtime<S> {
         self.inh_scratch.resize(n_nodes, Inh::default());
         self.drawn.clear();
         self.drawn.resize(n_nodes, [0.0; 4]);
+        self.drawn_commit = self.commits;
         self.drawn_scale.clear();
         self.drawn_scale.resize(n_nodes, 1.0);
         self.seen.clear();
@@ -264,6 +265,11 @@ impl<S: 'static> Runtime<S> {
                     scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false, turn: 0, snap: pixel_snap::Inherit { layer: 0, parent: None, ..pinh.snap }, ..pinh };
                 let fix = self.launches.offset_fix(&self.scene, node_id, [pinh.dx, pinh.dy], self.commit_gen);
                 (pinh.dx, pinh.dy) = (pinh.dx + fix[0], pinh.dy + fix[1]);
+            }
+            // `El::hover_lift`: the element and its subtree move with the hover track.
+            if let Some([lx, ly]) = n.vis.hover_lift {
+                let hv = self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0);
+                (pinh.dx, pinh.dy) = (pinh.dx + lx * hv, pinh.dy + ly * hv);
             }
             let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
             let mut own = p.opacity;
@@ -873,12 +879,36 @@ impl<S: 'static> Runtime<S> {
                 let base = match n.material {
                     _ if native_material.is_some() => [0.0; 4],
                     Some(_) => premul(self.color(n.id, P_FILL, crate::system_material::fallback_fill(n.vis.fill, self.env.system_dark)), 1.0, srgb),
-                    None => premul(self.color(n.id, P_FILL, n.vis.fill), 1.0, srgb),
+                    None => {
+                        let rest = self.color(n.id, P_FILL, n.vis.fill);
+                        // `El::hover_fill`: the fill itself mixes toward its hover colour.
+                        let shown = match n.vis.hover_fill {
+                            Some(to) if !focus_flat => {
+                                let hv = self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0);
+                                let mix = |a: f32, b: f32| a + (b - a) * hv;
+                                crate::color::Color { r: mix(rest.r, to.r), g: mix(rest.g, to.g), b: mix(rest.b, to.b), a: mix(rest.a, to.a) }
+                            }
+                            _ => rest,
+                        };
+                        premul(shown, 1.0, srgb)
+                    }
                 };
                 let layered = n.vis.gradient.is_some() || n.vis.radial.is_some() || n.vis.surface.is_some();
                 let fill = if layered { base } else { over(overlay, base) }.map(|c| c * o);
                 let bw = pixel_snap::line_width(n.vis.border_width() * s) * sc;
-                let border = if bw > 0.0 { premul(self.color(n.id, P_BORDER, n.vis.border()), o, srgb) } else { [0.0; 4] };
+                let border = if bw > 0.0 {
+                    let rest = self.color(n.id, P_BORDER, n.vis.border());
+                    // `El::hover_border`: the border mixes toward its hover colour.
+                    let shown = match n.vis.hover_border {
+                        Some(to) if !focus_flat => {
+                            let hv = self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0);
+                            let mix = |a: f32, b: f32| a + (b - a) * hv;
+                            crate::color::Color { r: mix(rest.r, to.r), g: mix(rest.g, to.g), b: mix(rest.b, to.b), a: mix(rest.a, to.a) }
+                        }
+                        _ => rest,
+                    };
+                    premul(shown, o, srgb)
+                } else { [0.0; 4] };
                 // A gradient border draws as KIND_GRADIENT with a width: `border` top, `uv` bottom.
                 // After a switch back to `border`, it stays a gradient until both stops meet.
                 let store = self.scene.store();

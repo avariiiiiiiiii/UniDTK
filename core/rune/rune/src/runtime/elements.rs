@@ -23,6 +23,10 @@ pub struct ElementInfo {
     /// from several texts, such as rune-kit's `RollingText`, gives its label.
     pub text: Option<String>,
     pub rect: [f32; 4],
+    /// How far its outer box shadows reach past `rect` on the left, top, right and bottom, in
+    /// points: three Gaussian deviations (1.5 x the CSS blur) plus spread and offset. A window
+    /// that clips to a region keeps this much round an element so its shadow is not cut.
+    pub shadow_extent: [f32; 4],
     pub target: [f32; 4],
     pub opacity: f32,
     /// Effective uniform scale, including ancestors and the presence transition.
@@ -73,6 +77,14 @@ pub struct ElementInfo {
     /// where scrolling put it this frame, in points: down for a stuck header, up for a stuck
     /// footer, right for a stuck left element, 0 when it isn't stuck. `rect` already includes it.
     pub stuck: f32,
+}
+
+/// `ElementInfo::shadow_extent` of these shadows.
+fn shadow_extent(shadows: &[crate::el::Shadow]) -> [f32; 4] {
+    shadows.iter().filter(|s| !s.inset).fold([0.0f32; 4], |acc, s| {
+        let reach = 1.5 * s.blur.max(0.0) + s.spread;
+        [acc[0].max(reach - s.x), acc[1].max(reach - s.y), acc[2].max(reach + s.x), acc[3].max(reach + s.y)]
+    })
 }
 
 /// An element [`Runtime::element_at`] found.
@@ -221,7 +233,7 @@ impl<S: 'static> Runtime<S> {
                 let exiting = self.subtree_exiting(i);
                 let flight = self.flights.iter().find(|f| f.lands(&n.path, n.key.as_deref()));
                 let mut moving = flight.is_some() || animating(n.id) || self.grows.get(&n.id).is_some_and(|g| g.moving());
-                let drawn = self.drawn.get(i).copied().unwrap_or([p.rect.x, p.rect.y, p.rect.w, p.rect.h]);
+                let drawn = self.drawn_now(i).unwrap_or([p.rect.x, p.rect.y, p.rect.w, p.rect.h]);
                 // A flight carries the destination's laid-out text, which can be narrower than
                 // its box. Report the box carried along with it, so the element lands on its own
                 // frame instead of jumping out to it when the flight ends.
@@ -316,6 +328,7 @@ impl<S: 'static> Runtime<S> {
                         None => (!secure).then(|| n.label.clone()).flatten().filter(|_| n.role == "text"),
                     },
                     rect,
+                    shadow_extent: shadow_extent(&n.vis.shadows),
                     target: [n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]],
                     opacity: flight.map_or_else(|| self.inh_scratch.get(i).map_or(p.opacity, |h| h.opacity), |f| f.target_alpha),
                     scale: if flight.is_some() { 1.0 } else { self.inh_scratch.get(i).map_or(p.transform.scale.x, |h| h.scale) },
@@ -362,7 +375,7 @@ impl<S: 'static> Runtime<S> {
                 loop_phase: None,
                 focusable: false, focused: false, focus_visible: false, inert: true, exiting: false,
                 key: Some(path.clone()), path, role: "text", label: None, text: None,
-                rect: [r.x, r.y, r.w, r.h], target: [t.x, t.y, t.w, t.h],
+                rect: [r.x, r.y, r.w, r.h], shadow_extent: [0.0; 4], target: [t.x, t.y, t.w, t.h],
                 opacity: f.source_alpha, scale: 1.0, blur: 0.0, radius: 0.0, fill: Color::TRANSPARENT, text_color: None,
                 hover: 0.0, press: 0.0, moving: true, parent: None,
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
@@ -395,6 +408,32 @@ impl<S: 'static> Runtime<S> {
         let Some(i) = i else { return self.find_link(key).or_else(|| self.find_highlight(key)) };
         let r = self.drawn.get(i).copied()?;
         Some((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5))
+    }
+
+    /// The drawn rect `[x, y, w, h]` and the shadow reach ([`ElementInfo::shadow_extent`]) of
+    /// every element whose key starts with one of `prefixes` and that is not leaving, as of the
+    /// last frame, or as the last commit placed it when no frame was drawn since, joined with
+    /// the box its layout puts it in: what a window region is made of, for the cost of the matching elements
+    /// alone, where [`Self::elements`] describes every node.
+    pub fn keyed_regions(&self, prefixes: &[&str]) -> Vec<([f32; 4], [f32; 4], bool)> {
+        self.nodes.iter().enumerate().filter_map(|(i, n)| {
+            let key = n.key.as_deref()?;
+            let prefix = prefixes.iter().position(|p| key.starts_with(p))?;
+            if self.subtree_exiting(i) { return None; }
+            let shown = self.drawn_now(i).or_else(|| self.scene.presented(n.id).map(|p| [p.rect.x, p.rect.y, p.rect.w, p.rect.h]))?;
+            // Where it is and where its layout puts it: a covered window commits without
+            // stepping its springs, so an element that moved still stands at its old place there.
+            let [tx0, ty0, tx1, ty1] = n.target;
+            let (x0, y0) = (shown[0].min(tx0), shown[1].min(ty0));
+            let (x1, y1) = ((shown[0] + shown[2]).max(tx1), (shown[1] + shown[3]).max(ty1));
+            Some(([x0, y0, x1 - x0, y1 - y0], shadow_extent(&n.vis.shadows), prefix == 0))
+        }).collect()
+    }
+
+    /// Node `i`'s rect as the last frame drew it, if that frame was built after the last
+    /// commit: after a commit with no frame since, `drawn` belongs to the nodes before it.
+    fn drawn_now(&self, i: usize) -> Option<[f32; 4]> {
+        (self.drawn_commit == self.commits).then(|| self.drawn.get(i).copied()).flatten()
     }
 
     /// Drawn rect `[x, y, w, h]` in points and effective opacity (ancestors included) of the

@@ -1,0 +1,60 @@
+[package]
+name = "unidtk-shell"
+version = "0.1.0"
+edition = "2021"
+description = "The native desk: the kernel's interface drawn by Rune, and the widget contract the modules' native halves implement"
+# `main.rs` beside `lib.rs` is the `unidtk-desktop` binary of the application package
+# (toolchain/Cargo.toml), which registers the modules' widgets; this package builds no binary.
+autobins = false
+autotests = false
+
+# A module's native half (`modules/<id>/native`) depends on this crate and on its own
+# backend crate only (r[modules.contract-only]); the shell never depends on a module.
+
+[lib]
+name = "unidtk_shell"
+path = "lib.rs"
+
+[dependencies]
+unidtk-api = { path = "../api" }
+# `frame-profile`: `RUNE_FRAME_LOG=FILE` writes each drawn frame by stage; nothing without it.
+rune = { path = "../rune/rune", features = ["frame-profile"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+raw-window-handle = "0.6"
+png = "0.18"
+base64 = "0.22"
+# The wallpaper a flat card blurs (wallpaper.rs); the same version Rune decodes with.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Graphics_Gdi",
+  "Win32_Networking_WinInet",
+  "Win32_Networking_WinSock",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
+  "Win32_Storage_Xps",
+  "Win32_System_Com",
+  "Win32_System_DataExchange",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Pipes",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_Controls",
+  "Win32_UI_Controls_Dialogs",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+]

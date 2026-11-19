@@ -36,6 +36,7 @@ use serde_json::Value;
 
 pub mod commands;
 pub mod manifest;
+pub mod modules;
 pub mod paths;
 
 // For `module_commands!`, so a module needs no `serde_json` of its own to use it.

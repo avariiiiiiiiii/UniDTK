@@ -3,6 +3,7 @@
 //! An [`Effect`] is what a node looks like when fully *absent*; presence progress `p` blends it
 //! toward identity (`p = 1`). Transitions pair an insertion and a removal effect.
 
+use crate::curve::Anim;
 use crate::spring::SpringPair;
 use crate::tokens;
 use crate::value::Vec2;
@@ -169,6 +170,9 @@ pub struct Transition {
     pub pop_layout: bool,
     /// Enter and exit springs. Exits run 10–25 % shorter.
     pub springs: SpringPair,
+    /// Enter and exit curves that replace the springs ([`Transition::curves`]).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub curves: Option<(Anim, Anim)>,
 }
 
 impl Default for Transition {
@@ -179,7 +183,7 @@ impl Default for Transition {
 
 impl Transition {
     fn symmetric(e: Effect) -> Transition {
-        Transition { insertion: e, removal: e, pop_layout: true, springs: tokens::pair::SETTLE }
+        Transition { insertion: e, removal: e, pop_layout: true, springs: tokens::pair::SETTLE, curves: None }
     }
 
     /// No visual change (presence still holds removal until its fade settles).
@@ -260,7 +264,22 @@ impl Transition {
     }
     pub fn springs(mut self, springs: SpringPair) -> Transition {
         self.springs = springs;
+        self.curves = None;
         self
+    }
+    /// Enter on `enter` and leave on `exit` instead of the springs, as a CSS transition plays
+    /// a duration on an easing (`opacity 220ms ease`); a delay on a curve holds the change.
+    pub fn curves(mut self, enter: Anim, exit: Anim) -> Transition {
+        self.curves = Some((enter, exit));
+        self
+    }
+    /// How an entrance plays: the curve, else the enter spring.
+    pub fn enter_anim(&self) -> Anim {
+        self.curves.map_or_else(|| Anim::from(self.springs.enter), |(enter, _)| enter)
+    }
+    /// How an exit plays: the curve, else the exit spring.
+    pub fn exit_anim(&self) -> Anim {
+        self.curves.map_or_else(|| Anim::from(self.springs.exit), |(_, exit)| exit)
     }
     /// Lets this transition's scale go below 0.9, down to [`SMALL_SCALE_FLOOR`] (0.5), for a
     /// small glyph such as an icon in a button, which barely seems to move at 0.9:

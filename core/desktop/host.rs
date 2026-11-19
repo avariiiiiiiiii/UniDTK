@@ -27,16 +27,28 @@ const FONTS: &[&[u8]] = &[
 /// exactly them: widgets (`widget:clock`), and everything else the host puts on the desk that
 /// a click must reach (`hit:` — the menu, its sheets, toasts, the arrange bar). Anything else
 /// lets clicks through to the desktop.
-const HIT_KEYS: [&str; 2] = ["widget:", "hit:"];
+/// Elements the window region is made of: what takes the pointer (`widget:`, a card's whole
+/// box, and `hit:`), each with at least `RING` round it for a focus ring or an outline, and a
+/// card's painted body (`card:`), which adds only what its own shadow reaches. While a card
+/// morphs, its body has no shadow and stays inside its box, so the region holds still.
+const HIT_KEYS: [&str; 3] = ["card:", "widget:", "hit:"];
+const RING: f32 = 8.0;
 
 /// What the kernel link brings to the UI thread: the layout, from the state event, from its
-/// catch-up frame after a (re)connect, and from the answer to a `desk_layout_get`.
-fn layout_link(ui: rune::AppHandle<Host>, outbox: Arc<Outbox>) -> LinkConfig {
+/// catch-up frame after a (re)connect, and from the answer to a `desk_layout_get`; and every
+/// event a registered widget type asked for, to the widgets of that type.
+fn layout_link(ui: rune::AppHandle<Host>, outbox: Arc<Outbox>, widgets: &'static [&'static crate::widget::WidgetType]) -> LinkConfig {
     let ui = Mutex::new(ui);
     let refetch = outbox.clone();
-    let deliver = move |layout: Option<Layout>| {
-        if let (Some(layout), Ok(ui)) = (layout, ui.lock()) {
-            ui.update(move |state, _| state.accept_layout(layout));
+    let deliver = move |message: Delivery| {
+        let Ok(ui) = ui.lock() else { return };
+        match message {
+            Delivery::Layout(layout) => ui.update(move |state, tx| {
+                if state.accept_layout(layout) {
+                    tx.instant();
+                }
+            }),
+            Delivery::Event { event, payload, snapshot } => ui.update(move |state, tx| state.deliver_event(&event, &payload, snapshot, tx)),
         }
     };
     let ask = move || {
@@ -45,16 +57,37 @@ fn layout_link(ui: rune::AppHandle<Host>, outbox: Arc<Outbox>) -> LinkConfig {
         }
     };
     let ask_again = ask.clone();
+    let mut subscriptions = vec!["desk-layout-changed"];
+    for event in widgets.iter().flat_map(|ty| ty.events.iter()) {
+        if !subscriptions.contains(event) {
+            subscriptions.push(event);
+        }
+    }
     LinkConfig {
-        subscriptions: vec!["desk-host-changed", "desk-layout-changed"],
+        subscriptions,
         on_connected: Box::new(ask),
         on_inbound: Box::new(move |inbound| match inbound {
-            Inbound::Event { event, payload, .. } if event == "desk-layout-changed" => deliver(Layout::from_event(&payload)),
+            Inbound::Event { event, payload, .. } if event == "desk-layout-changed" => {
+                if let Some(layout) = Layout::from_event(&payload) {
+                    deliver(Delivery::Layout(layout));
+                }
+            }
+            Inbound::Event { event, payload, snapshot, .. } => deliver(Delivery::Event { event, payload, snapshot }),
             Inbound::Gap { event } if event == "desk-layout-changed" => ask_again(),
-            Inbound::Reply { ok: true, body, .. } => deliver(Layout::from_event(&body)),
+            // Only the layout's own answer carries a `config`; another command's is not a desk.
+            Inbound::Reply { ok: true, body, .. } => {
+                if let Some(layout) = Layout::from_event(&body) {
+                    deliver(Delivery::Layout(layout));
+                }
+            }
             _ => {}
         }),
     }
+}
+
+enum Delivery {
+    Layout(Layout),
+    Event { event: String, payload: serde_json::Value, snapshot: bool },
 }
 
 const SAMPLES: usize = 512;
@@ -134,7 +167,7 @@ fn spawn_attach_worker(
     }
 }
 
-pub fn run() -> Result<(), String> {
+pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(), String> {
     crate::desktop_host::ensure_dpi_awareness();
     let _instance = crate::desktop_host::acquire_single_instance()?;
     let supervised = std::env::args().any(|arg| arg == "--supervised");
@@ -153,7 +186,7 @@ pub fn run() -> Result<(), String> {
     let ui_slot: Arc<std::sync::OnceLock<rune::AppHandle<Host>>> = Arc::new(std::sync::OnceLock::new());
     let state_ui = ui_slot.clone();
     // Without a kernel there is nobody to ask: draw the module defaults.
-    let app = App::new(spec).init(move || Host::new(state_inspector, (!supervised).then(Layout::empty), canvas, scale, state_ui))
+    let app = App::new(spec).init(move || Host::new(state_inspector, (!supervised).then(Layout::empty), canvas, scale, state_ui, widgets))
         .open_inactive()
         .window_options(WindowOptions {
             transparent: true, borderless: true,
@@ -168,6 +201,9 @@ pub fn run() -> Result<(), String> {
         });
     let handle = app.handle();
     let _ = ui_slot.set(handle.clone());
+    if let Ok(mut app_slot) = inspector.app.lock() {
+        *app_slot = Some(handle.clone());
+    }
     let quit_handle = handle.clone();
     inspector.start(supervised, move || quit_handle.quit())?;
 
@@ -175,6 +211,7 @@ pub fn run() -> Result<(), String> {
     let focused_input = Arc::new(AtomicBool::new(false));
     if supervised {
         struct SupervisedSink {
+            widgets: &'static [&'static crate::widget::WidgetType],
             inspector: Arc<Inspector>,
             ui: rune::AppHandle<Host>,
             ws_slot: Arc<Mutex<Option<WsClientHandle>>>,
@@ -204,7 +241,7 @@ pub fn run() -> Result<(), String> {
                         if let Ok(mut slot) = inspector.outbox.lock() {
                             *slot = Some(outbox.clone());
                         }
-                        let config = layout_link(self.ui.clone(), outbox.clone());
+                        let config = layout_link(self.ui.clone(), outbox.clone(), self.widgets);
                         crate::ws_client::connect_link(port, token, outbox, config)
                     });
                     match linked {
@@ -311,6 +348,7 @@ pub fn run() -> Result<(), String> {
             .name("host-stdin".into())
             .spawn(move || {
                 let mut sink = SupervisedSink {
+                    widgets,
                     inspector: sup_inspector,
                     ui: sup_ui,
                     ws_slot: sup_ws,
@@ -373,6 +411,15 @@ pub fn run() -> Result<(), String> {
             sample(&mut snapshot.update_ms, frame.update_ms());
             sample(&mut snapshot.cpu_frame_ms, frame.update_ms().zip(frame.encode_ms()).map(|(update, encode)| update + encode));
             snapshot.last_frame = Some(Instant::now());
+            if frame.outcome() == FrameOutcome::Drawn {
+                // A hitch inside an animation shows as a long gap between two drawn frames.
+                let at = frame.at();
+                let gap = snapshot.last_drawn_at.map(|last| at.saturating_duration_since(last).as_secs_f64() * 1000.0);
+                if let Some(gap) = gap.filter(|gap| *gap < 1000.0) {
+                    sample(&mut snapshot.frame_gaps_ms, Some(gap));
+                }
+                snapshot.last_drawn_at = Some(at);
+            }
         }
     })
     .on_tree_committed(move |rt| {
@@ -406,15 +453,16 @@ pub fn run() -> Result<(), String> {
 }
 
 /// A window region passes clicks across process boundaries; HTTRANSPARENT alone
-/// only walks windows on the same thread. The margin preserves painted shadows.
-fn hit_region(rects: &[[f32; 4]], scale: f64) -> Vec<[i32; 4]> {
-    const SHADOW: f64 = 16.0;
-    rects.iter().map(|rect| {
+/// only walks windows on the same thread. The region also clips what the window shows, so
+/// each rect keeps the reach given with it (its shadow's, `ElementInfo::shadow_extent`).
+fn hit_region(rects: &[([f32; 4], [f32; 4])], scale: f64) -> Vec<[i32; 4]> {
+    rects.iter().map(|(rect, extent)| {
         let [x, y, w, h] = rect.map(f64::from);
-        let left = ((x - SHADOW) * scale).floor() as i32;
-        let top = ((y - SHADOW) * scale).floor() as i32;
-        let right = ((x + w + SHADOW) * scale).ceil() as i32;
-        let bottom = ((y + h + SHADOW) * scale).ceil() as i32;
+        let [l, t, r, b] = extent.map(f64::from);
+        let left = ((x - l) * scale).floor() as i32;
+        let top = ((y - t) * scale).floor() as i32;
+        let right = ((x + w + r) * scale).ceil() as i32;
+        let bottom = ((y + h + b) * scale).ceil() as i32;
         [left, top, right - left, bottom - top]
     }).collect()
 }
@@ -437,16 +485,14 @@ fn sync_tree_snapshot(
     focused_input: &AtomicBool,
     from_commit: bool,
 ) -> u64 {
-    let infos = rt.elements();
-    // The inspector's tree is rebuilt when the tree commits, not on every drawn frame of an
-    // animation, where only the hit rects move.
-    let elements: Option<Vec<serde_json::Value>> = from_commit.then(|| infos.iter().map(|element| json!({
-        "path": element.path, "key": element.key, "role": element.role,
-        "label": element.label, "text": element.text, "rect": element.rect,
-        "opacity": element.opacity,
-    })).collect());
-    let has_focused_text = infos.iter().any(|element| element.focused && element.focusable && !element.exiting)
-        || inspector.wants_keyboard.load(Ordering::Acquire);
+    // The inspector's description of every element is made only while a tool reads it
+    // (`Inspector::tree_in_use`): on every commit of an animation it cost as much as the frame.
+    // What the window region and the keys need is read on its own, cheaply.
+    let elements = (from_commit && inspector.tree_in_use()).then(|| crate::inspector::describe(rt));
+    if from_commit && elements.is_none() {
+        inspector.tree_stale.store(true, Ordering::Release);
+    }
+    let has_focused_text = rt.focus_takes_keys() || inspector.wants_keyboard.load(Ordering::Acquire);
     if focused_input.swap(has_focused_text, Ordering::AcqRel) != has_focused_text {
         if let Ok(slot) = ws_slot.lock() {
             if let Some(client) = slot.as_ref() {
@@ -457,11 +503,13 @@ fn sync_tree_snapshot(
     let drawn_seq = {
         let mut snapshot = inspector.snapshot.lock().unwrap();
         // ElementInfo.parent indexes runtime nodes, not this filtered list.
-        snapshot.widget_rects = infos.iter().filter(|element| {
-            element.key.as_deref().is_some_and(|key| HIT_KEYS.iter().any(|prefix| key.starts_with(prefix))) && !element.exiting
-        }).map(|element| element.rect).collect();
+        // `card:` is first in `HIT_KEYS`: a card's body adds only its shadow's reach.
+        snapshot.widget_rects = rt.keyed_regions(&HIT_KEYS).into_iter().map(|(rect, extent, body)| {
+            (rect, if body { extent } else { extent.map(|v| v.max(RING)) })
+        }).collect();
         if let Some(elements) = elements {
             snapshot.elements = elements;
+            inspector.tree_stale.store(false, Ordering::Release);
         }
         if from_commit {
             snapshot.committed += 1;
@@ -488,7 +536,9 @@ fn publish_region(inspector: &Inspector) -> Result<(), String> {
     if rects.is_empty() && previous.is_empty() { return Ok(()); }
     let region = hit_region(&rects, crate::desktop_host::window_scale(hwnd));
     if previous == region { return Ok(()); }
+    let started = Instant::now();
     crate::desktop_host::set_hit_region(hwnd, &region)?;
+    let set_ms = started.elapsed().as_secs_f64() * 1000.0;
     if previous.is_empty() && !region.is_empty() {
         // winit still thinks this HWND is top-level. Its style setter would
         // restore WS_POPUP and erase our WS_CHILD after SetParent.
@@ -498,6 +548,15 @@ fn publish_region(inspector: &Inspector) -> Result<(), String> {
     inspector.snapshot.lock().map_err(|e| e.to_string())?.region = region;
     if let Some(w) = window {
         w.recheck_occlusion();
+    }
+    // What a region change costs the UI thread (the set and the occlusion check after it), to
+    // tell it apart from the gaps between frames (`frame_gap_ms`).
+    if let Ok(mut snapshot) = inspector.snapshot.lock() {
+        snapshot.region_sets += 1;
+        if snapshot.region_ms.len() == SAMPLES { snapshot.region_ms.pop_front(); }
+        snapshot.region_ms.push_back(started.elapsed().as_secs_f64() * 1000.0);
+        if snapshot.region_set_ms.len() == SAMPLES { snapshot.region_set_ms.pop_front(); }
+        snapshot.region_set_ms.push_back(set_ms);
     }
     Ok(())
 }
@@ -643,8 +702,13 @@ fn physical_to_command_char(physical: rune::PhysicalKeyCode) -> Option<char> {
 mod tests {
     #[test]
     fn input_edges_include_shadow_and_round_outward_at_fractional_dpi() {
-        assert_eq!(super::hit_region(&[[24.0, 24.0, 320.0, 80.0]], 1.5), vec![[12, 12, 528, 168]]);
-        assert_eq!(super::hit_region(&[[16.1, 16.1, 1.0, 1.0]], 1.25), vec![[0, 0, 42, 42]]);
+        // The 8 pt ring a focus ring or an outline needs.
+        assert_eq!(super::hit_region(&[([24.0, 24.0, 320.0, 80.0], [8.0; 4])], 1.5), vec![[24, 24, 504, 144]]);
+        assert_eq!(super::hit_region(&[([8.1, 8.1, 1.0, 1.0], [8.0; 4])], 1.25), vec![[0, 0, 22, 22]]);
+        // A shadow that drops 90 pt below and reaches 20 to the right keeps all of it.
+        assert_eq!(super::hit_region(&[([24.0, 24.0, 320.0, 80.0], [10.0, 8.0, 20.0, 90.0])], 1.5), vec![[21, 24, 525, 267]]);
+        // A card's body without a shadow adds nothing past itself.
+        assert_eq!(super::hit_region(&[([24.0, 24.0, 320.0, 80.0], [0.0; 4])], 1.0), vec![[24, 24, 320, 80]]);
         assert!(super::hit_region(&[], 1.5).is_empty());
     }
 

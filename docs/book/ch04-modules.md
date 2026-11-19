@@ -20,7 +20,7 @@ modules/glyph-bar/
     icon.svg          the icon shown in the menu
 ```
 
-The two halves change together, so they share one folder, as the rule [modules.vertical-slice](../reference/modules.md#r-modules.vertical-slice) requires. A module without a backend has only `ui/`, as `clock` does. The backend is a separate crate whose `Cargo.toml` depends on `unidtk-api` and not on the kernel, the rule [modules.contract-only](../reference/modules.md#r-modules.contract-only). The contract crate is `core/api`.
+The two halves change together, so they share one folder, as the rule [modules.vertical-slice](../reference/modules.md#r-modules.vertical-slice) requires. A module without a backend has no `rust/`, as `clock` does. A module the native desk draws has a third half, `native/`, the crate `unidtk-native-<id>` that implements the shell's widget contract ([shell.widget-contract](../reference/shell.md#r-shell.widget-contract)); today `clock` and `vpn` have one. The backend is a separate crate whose `Cargo.toml` depends on `unidtk-api` and not on the kernel, the rule [modules.contract-only](../reference/modules.md#r-modules.contract-only). The contract crate is `core/api`.
 
 ## 4.2 The Module trait
 
@@ -284,12 +284,12 @@ fn main() {
 
 | Lint | What it checks | Failure |
 | :--- | :--- | :--- |
-| `lint_modules_integrity` | every `modules/<id>/rust/Cargo.toml` has its id in `core/kernel/registry.rs` and a line `unidtk-mod-<id>` in `toolchain/Cargo.toml` | `BUILD INTEGRITY ERROR` |
+| `lint_modules_integrity` | every `modules/<id>/rust/Cargo.toml` has its id in `core/kernel/registry.rs` and a line `unidtk-mod-<id> =` in `toolchain/Cargo.toml`; every `modules/<id>/native/Cargo.toml` has a line `unidtk-native-<id> =` there, its `WIDGET` registered in `core/desktop/main.rs`, and no dependency on another module or the kernel | `BUILD INTEGRITY ERROR` |
 | `lint_ui_imports` | no page file imports `@tauri-apps/...` directly, except the bridge `unidtk-bridge.js` | `UI IMPORT ERROR` |
 | `lint_simulate_metadata` | a `simulate` entry names a real file and a function in that file | `SIMULATE METADATA ERROR` |
 | `lint_module_contracts` | `metadata.json` is valid JSON; an `embeddable` names a file that contains its render function; a container is not embeddable | a panic naming the file |
 
-The checks are text checks. `lint_modules_integrity` searches for the quoted id in the registry file, and it searches for the crate name in `Cargo.toml`. A text check cannot prove that the kernel registers the module, which is why section 4.4 warns about the lists.
+The checks are text checks. `lint_modules_integrity` searches for the quoted id in the registry file, and for a dependency line that names the crate exactly in `Cargo.toml`. A text check cannot prove that the kernel registers the module, which is why section 4.4 warns about the lists.
 
 Note: no lint checks that a module avoids the kernel. The kernel package has only binary targets (see `toolchain/Cargo.toml`), so a module cannot link it as a library, and nothing else enforces the rule. The `udtk` book, in [how a module joins the bridge](../udtk/ch15-how-a-module-joins-the-bridge.md), states the same gap.
 ## 4.9 Summary

@@ -345,6 +345,20 @@ impl Theme {
         self.sizes.get(widget).copied()
     }
 
+    /// CSS's `line-height: normal` of a theme font stack, as a share of the size: the first
+    /// font's own metrics (Ndot's and Geist's typographic ones, which they ask for; Segoe UI's
+    /// and Consolas's ascent and descent). What a laid-out height computes with; the text itself
+    /// is laid out with `TextStyle::lh_normal`.
+    pub fn normal_line(stack: &str) -> f32 {
+        match stack {
+            "'Ndot', monospace" => 1.2,
+            "'Geist', sans-serif" => 1.3,
+            "'Consolas', 'Courier New', monospace" | "ui-monospace, monospace" => 1.1709,
+            "'Cascadia Code', 'Consolas', monospace" => 1.1719,
+            _ => 1.3301,
+        }
+    }
+
     /// The Rune family list for a theme font stack.
     pub fn family(stack: &str) -> Family {
         let list = FONT_STACKS.iter().find(|(css, _)| *css == stack).map_or("Segoe UI", |(_, rune)| rune);

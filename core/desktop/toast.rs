@@ -9,7 +9,7 @@ use rune::el::{col, row, text, El};
 use rune::{Color, Tx};
 
 use crate::controls::Look;
-use crate::motion::{Token, EXPO_OUT};
+use crate::motion::{Token, EXPO_OUT, SURFACE_EXIT};
 
 /// `UNDO_MS`, and the floor of an error toast.
 const LIFETIME: Duration = Duration::from_millis(5000);
@@ -64,9 +64,12 @@ impl<S: 'static> Toasts<S> {
     }
 }
 
-/// `.toast-host` at the bottom centre, 84 px up, and the toast in it.
-pub fn view<S: 'static>(look: &Look, toasts: &Toasts<S>, canvas: (f32, f32), on_action: impl Fn(&mut S, &mut Tx) + 'static) -> Option<El> {
-    let toast = toasts.current.as_ref()?;
+/// `.toast-host` at the bottom centre, 84 px up, and the toast in it. The host is always
+/// there, so a toast that ends leaves on its transition (8 px down and out, `toast.js`'s
+/// dismiss) instead of vanishing with it.
+pub fn view<S: 'static>(look: &Look, toasts: &Toasts<S>, canvas: (f32, f32), on_action: impl Fn(&mut S, &mut Tx) + 'static) -> El {
+    let host = col().key("toast-host").absolute(0.0, 0.0).w(canvas.0).h(canvas.1 - 84.0).items_center().justify_end();
+    let Some(toast) = toasts.current.as_ref() else { return host };
     let rise = look.motion.tween(look.motion.duration(Token::Transient), EXPO_OUT);
     let width = (canvas.0 - 32.0).min(520.0);
     let mut body = row()
@@ -76,11 +79,13 @@ pub fn view<S: 'static>(look: &Look, toasts: &Toasts<S>, canvas: (f32, f32), on_
         .pl(16.0).pr(8.0).py(8.0)
         .radius(14.0)
         .fill(look.surface.alpha(0.97))
-        .border(1.0, if toast.error { look.status_error } else { look.elev.alpha(0.14) })
+        .border(1.0, if toast.error { look.status_error } else { look.elev.alpha(0.14) }).border_layout()
         .shadow(12.0, 36.0, Color::BLACK.alpha(0.35))
         .items_center()
-        .transition(rune::Transition::offset(0.0, 8.0).combined(rune::Transition::opacity()))
+        // In on `expoOut`, out on `surfaceExit`, both over the transient token (`toast.js`).
+        .transition(look.motion.presence(rune::Transition::offset(0.0, 8.0).combined(rune::Transition::opacity()), Token::Transient, EXPO_OUT, Some(SURFACE_EXIT)))
         .offset_motion(rise)
+        .on_press(|_: &mut S| {})
         .child(col().py(6.0).child(text(toast.message.clone()).font(look.font(13.0, 400.0)).color(look.fg).wrap()));
     if let Some((label, _)) = &toast.action {
         body = body.child(
@@ -90,11 +95,7 @@ pub fn view<S: 'static>(look: &Look, toasts: &Toasts<S>, canvas: (f32, f32), on_
                 .on_press_tx(on_action),
         );
     }
-    Some(
-        col().absolute(0.0, 0.0).w(canvas.0).h(canvas.1 - 84.0)
-            .items_center().justify_end()
-            .child(body),
-    )
+    host.child(body)
 }
 
 #[cfg(test)]

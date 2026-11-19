@@ -1,71 +1,63 @@
-//! The desk's header cards and what opens out of them: folders and the VPN card
-//! (`buildWidgetCard`, `toggleWidget`, `renderFolderBody` and `mountNested` in the page), and
-//! which widgets sit inside which host (`nesting.js`). A card is the tile on the desk (icon,
-//! name, description, chevron) and, opened, a surface of 400 px that grows round it as the
-//! clock's dashboard does (`r[motion.clip-morph]`): the box stays, the visible window moves,
-//! the header rides at the window's top and the body keeps its place in the box.
-//!
-//! Folder records are the kernel's (`get_folders`, `save_folder`); the desk's side (hidden,
-//! instances, nesting) goes through `desk_apply` (`r[desk.folders]`, `desk.nesting`).
+//! What the desk shows (`getWidgets`, `desiredWidgets` and `nesting.js` in the page): a card
+//! for every widget a module's native half draws and for every folder, which widgets sit
+//! inside which host, and where each card lands. Folders are the shell's own cards: their
+//! records are the kernel's (`get_folders`, `save_folder`), their body is drawn here
+//! (`renderFolderBody`), and the desk's side (hidden, instances, nesting) goes through
+//! `desk_apply` (`r[desk.folders]`, `r[desk.nesting]`).
 
 use std::collections::{BTreeMap, HashSet};
 
 use rune::el::{col, el, row, text, text_input, Align, El};
-use rune::{Color, Pixels, TextStyle, Tx};
+use rune::{Color, TextStyle, Tx};
 use serde_json::{json, Value};
 
-use crate::desk::{self, Layout, Placement};
+use crate::card::BODY_W;
+use crate::desk::{Layout, Placement};
 use crate::menu::{self, MenuHost};
 use crate::shell::Host;
-use crate::theme::{mix_oklch, Material, Theme};
+use crate::theme::{Material, Theme};
 
-/// `.widget-card` without a stored size: 340 wide, the 64 px header high.
-pub const CARD: (f32, f32) = (340.0, 64.0);
-/// `toggleWidget`: a card opens 400 wide and at most 500 high.
-pub const OPEN_WIDTH: f32 = 400.0;
-pub const OPEN_MAX: f32 = 500.0;
-/// The body inside the opened card: 16 px each side, under the 64 px header and its 2 px.
-const BODY_X: f32 = 16.0;
-const BODY_Y: f32 = 66.0;
-pub const BODY_W: f32 = OPEN_WIDTH - 32.0;
 /// `DRAG_START_PX`: a press that moves this far is a drag, not a click.
 const DRAG_START: f32 = 6.0;
 
 const FOLDER_FALLBACK_ICON: &str = r#"<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>"#;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Folder,
-    Vpn,
-}
-
-/// A card the host draws, as `getWidgets` and `desiredWidgets` describe it.
+/// A card the desk draws, as `getWidgets` and `desiredWidgets` describe it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Card {
     /// The desk id: the folder or module id, or an instance's id.
     pub id: String,
     pub widget_type: String,
-    pub kind: Kind,
     pub name: String,
     pub desc: String,
     pub icon: String,
     /// A folder's shortcuts as the kernel stores them.
     pub items: Vec<Value>,
     pub instance: bool,
+    /// One of the shell's folders; otherwise a module's widget.
+    pub folder: bool,
+    /// `"chrome": "bare"`: no header, the widget draws the whole card (`.no-header`).
+    pub bare: bool,
+    /// `"radius": "strip"`: a full pill under jelly.
+    pub strip: bool,
+    /// The module's first tint: its id, role and default palette key.
+    pub tint: (String, String, String),
 }
 
 impl Card {
     /// `--own-tint`: a module's first tint target, else the folders' shared one.
     pub fn tint(&self, theme: &Theme) -> Color {
-        match self.kind {
-            Kind::Folder => theme.tint("folder", "folder", "mint"),
-            Kind::Vpn => theme.tint("vpn", "calm", "blue"),
+        if self.folder {
+            theme.tint("folder", "folder", "mint")
+        } else {
+            theme.tint(&self.tint.0, &self.tint.1, &self.tint.2)
         }
     }
 
-    /// The handles a special card has on every side; the others are resized in width only.
+    /// A module's card is resized on every side and opens from anywhere on it (`specialType`);
+    /// a folder is resized in width only and opens from its header.
     pub fn special(&self) -> bool {
-        self.kind == Kind::Vpn
+        !self.folder
     }
 }
 
@@ -92,14 +84,12 @@ pub struct Entry {
 /// What the desk shows now.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Desk {
-    /// The header cards on the desk, in the page's order.
+    /// The cards on the desk, in the page's order.
     pub cards: Vec<Card>,
     /// `effectiveNested`: the hosts and the widgets that sit inside them now.
     pub nested: BTreeMap<String, Vec<String>>,
     /// Every widget on screen by desk id, for `canNest` and the nesting zone.
     pub widgets: BTreeMap<String, Entry>,
-    /// The clock is on the desk, not hidden and not off.
-    pub clock: bool,
 }
 
 impl Desk {
@@ -125,11 +115,12 @@ impl Desk {
 }
 
 /// `getWidgets` + `desiredWidgets` + `effectiveNested`: modules and folders, minus the hidden
-/// and the switched-off, plus the placed instances; the nested ones leave the desk.
-pub fn desk(layout: &Layout, folders: &[Value], disabled: &HashSet<String>) -> Desk {
+/// and the switched-off, plus the placed instances; the nested ones leave the desk. Only the
+/// modules `drawn` names become cards: the ones with a native half.
+pub fn desk(layout: &Layout, folders: &[Value], disabled: &HashSet<String>, drawn: &dyn Fn(&str) -> bool) -> Desk {
     let mut base = Vec::new();
-    let mut cards_of: BTreeMap<String, (Kind, String, String)> = BTreeMap::new();
-    for module in crate::module_table::desk_modules() {
+    let mut cards_of: BTreeMap<String, Card> = BTreeMap::new();
+    for module in crate::catalog::desk_modules() {
         let meta = &module.meta;
         if meta["backend"] == true && disabled.contains(&module.id) {
             continue;
@@ -140,20 +131,44 @@ pub fn desk(layout: &Layout, folders: &[Value], disabled: &HashSet<String>) -> D
             widget_type: module.id.clone(),
             name: name.clone(),
             container: meta["container"] == true,
-            embeddable: meta["embeddable"].is_object(),
+            embeddable: meta["embeddable"].is_object() || meta["embeddable"] == true,
         });
-        if meta["specialType"] == "vpn" {
-            cards_of.insert(module.id.clone(), (Kind::Vpn, meta["description"].as_str().unwrap_or_default().to_string(), module.icon.clone()));
+        if drawn(&module.id) {
+            let tint = &meta["tints"][0];
+            let field = |key: &str, default: &str| tint[key].as_str().unwrap_or(default).to_string();
+            cards_of.insert(module.id.clone(), Card {
+                id: module.id.clone(),
+                widget_type: module.id.clone(),
+                name,
+                desc: meta["description"].as_str().unwrap_or_default().to_string(),
+                icon: module.icon.clone(),
+                items: Vec::new(),
+                instance: false,
+                folder: false,
+                bare: meta["chrome"] == "bare",
+                strip: meta["radius"] == "strip",
+                tint: (field("id", &module.id), field("role", "calm"), field("default", "lilac")),
+            });
         }
     }
-    let mut items_of: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for folder in folders {
         let Some(id) = folder["id"].as_str() else { continue };
         let items = folder["items"].as_array().cloned().unwrap_or_default();
         base.push(Widget { id: id.into(), widget_type: id.into(), name: folder["name"].as_str().unwrap_or_default().into(), container: true, embeddable: false });
         let icon = folder["icon_svg"].as_str().filter(|s| !s.is_empty()).unwrap_or(FOLDER_FALLBACK_ICON).to_string();
-        cards_of.insert(id.into(), (Kind::Folder, menu::shortcut_count(items.len()), icon));
-        items_of.insert(id.into(), items);
+        cards_of.insert(id.into(), Card {
+            id: id.into(),
+            widget_type: id.into(),
+            name: folder["name"].as_str().unwrap_or_default().into(),
+            desc: menu::shortcut_count(items.len()),
+            icon,
+            items,
+            instance: false,
+            folder: true,
+            bare: false,
+            strip: false,
+            tint: ("folder".into(), "folder".into(), "mint".into()),
+        });
     }
 
     let mut render: Vec<Widget> = base.iter().filter(|w| !layout.is_hidden(&w.id)).cloned().collect();
@@ -185,46 +200,40 @@ pub fn desk(layout: &Layout, folders: &[Value], disabled: &HashSet<String>) -> D
         }
     }
     for widget in render.iter().filter(|w| !taken.contains(&w.id)) {
-        if widget.id == desk::CLOCK {
-            desk.clock = true;
-        }
-        if let Some((kind, desc, icon)) = cards_of.get(&widget.widget_type) {
-            desk.cards.push(Card {
-                id: widget.id.clone(),
-                widget_type: widget.widget_type.clone(),
-                kind: *kind,
-                name: widget.name.clone(),
-                desc: desc.clone(),
-                icon: icon.clone(),
-                items: items_of.get(&widget.widget_type).cloned().unwrap_or_default(),
-                instance: widget.id != widget.widget_type,
-            });
+        if let Some(of) = cards_of.get(&widget.widget_type) {
+            desk.cards.push(Card { id: widget.id.clone(), instance: widget.id != widget.widget_type, ..of.clone() });
         }
     }
     desk
 }
 
 /// Where each card lands: its record, sized by the record, else the theme's preset for its
-/// type (folders share `sizes.folder`), else the page's 340 x 64. A card without a record
-/// stacks down the left edge 88 px apart, as `buildWidgetCard` places it.
-pub fn place(layout: &Layout, theme: &Theme, cards: &[Card], canvas: (f32, f32)) -> Vec<Placement> {
+/// type (folders share `sizes.folder`), else the page's 340 x 64. A module without a record
+/// takes its default placement (`metadata.json`); anything else stacks down the left edge
+/// 88 px apart, as `buildWidgetCard` places it.
+/// `area` is the widgets' canvas in the window; the places returned are in the window.
+pub fn place(layout: &Layout, theme: &Theme, cards: &[Card], area: Placement) -> Vec<Placement> {
+    let canvas = (area.w, area.h);
     let mut offset = 28.0;
     cards.iter().map(|card| {
-        let preset = theme.size_of(&card.widget_type).or_else(|| (card.kind == Kind::Folder).then(|| theme.size_of("folder")).flatten());
-        match layout.record(&card.id) {
-            Some(record) => record.place(canvas, preset.unwrap_or(CARD)),
+        let preset = theme.size_of(&card.widget_type).or_else(|| card.folder.then(|| theme.size_of("folder")).flatten());
+        let fallback = preset.unwrap_or(crate::card::CARD);
+        let record = layout.record(&card.id).or_else(|| if card.instance { None } else { crate::desk::default_record(&card.widget_type) });
+        let at = match record {
+            Some(record) => record.place(canvas, fallback),
             None => {
-                let (w, h) = preset.unwrap_or(CARD);
+                let (w, h) = fallback;
                 let at = Placement { x: 28.0, y: offset, w, h };
                 offset += 88.0;
                 at
             }
-        }
+        };
+        Placement { x: at.x + area.x, y: at.y + area.y, ..at }
     }).collect()
 }
 
 fn style(theme: &Theme, size: f32, weight: f32) -> TextStyle {
-    TextStyle::new(size, weight).family(Theme::family(theme.font_body))
+    TextStyle::new(size, weight).family(Theme::family(theme.font_body)).lh_normal()
 }
 
 /// `.shortcut-name`: 0.58 rem on 1.2 lines, at most two lines 68 px wide.
@@ -241,122 +250,6 @@ fn name_lines(theme: &Theme, name: &str) -> f32 {
 /// The SVG an element draws, tinted, or an empty box until the image cache has it.
 fn svg(state: &Host, markup: &str, size: f32, colour: Color) -> El {
     crate::shell::svg_icon(state, markup, size, colour)
-}
-
-/// `.widget-header`: 13 x 16 padding, the 38 px icon, name and description, the chevron that
-/// turns a quarter when the card is open. Under 150 px the card shows its icon alone.
-fn header(state: &Host, theme: &Theme, card: &Card, ink: Color, width: f32, expanded: bool) -> El {
-    let motion = theme.motion();
-    let compact = width <= 150.0 && !expanded;
-    let icon = col().size(38.0, 38.0).radius(11.0).items_center().justify_center()
-        .fill(theme.bg_elevated.alpha(0.06)).border(1.0, theme.bg_elevated.alpha(0.06))
-        .child(svg(state, &card.icon, 20.0, ink.alpha(0.7)));
-    let mut head = row().w(width).h(64.0).gap(12.0).items_center().hover(theme.bg_elevated.alpha(0.03)).child(icon);
-    if compact {
-        return head.justify_center();
-    }
-    let chevron = [([9.0, 18.0], [15.0, 12.0]), ([15.0, 12.0], [9.0, 6.0])];
-    let turn = motion.tween(motion.duration(crate::motion::Token::Layout), crate::motion::STANDARD);
-    head = head.px(16.0)
-        .child(
-            col().grow(1.0).min_w(0.0)
-                .child(text(card.name.clone()).font(style(theme, 13.76, 500.0)).color(ink).single_line().truncate())
-                .child(text(card.desc.clone()).font(style(theme, 10.56, 400.0)).color(ink.alpha(0.38)).single_line().truncate().mt(1.0)),
-        )
-        .child(
-            el().size(16.0, 16.0)
-                .shape(crate::controls::glyph(&chevron, ink.alpha(if expanded { 0.5 } else { 0.22 }), 2.5))
-                .rotate(if expanded { std::f32::consts::FRAC_PI_2 } else { 0.0 })
-                .rotate_motion(turn),
-        );
-    head
-}
-
-/// One card on the desk, closed or open.
-pub struct CardView<'a> {
-    pub card: &'a Card,
-    pub tile: Placement,
-    /// The box it opens into.
-    pub target: Placement,
-    pub theme: &'a Theme,
-    pub expanded: bool,
-    pub transition: f32,
-    pub grain: &'a Pixels,
-    pub grain_size: (f32, f32),
-    /// The outline it wears: the menu's highlight or a nesting mark.
-    pub outline: Option<Color>,
-    /// Arrange mode's handles and "×", in the tile's coordinates.
-    pub overlay: Vec<El>,
-    /// What the opened card shows under its header, `BODY_W` wide.
-    pub body: Option<El>,
-    /// Arrange mode: the card is dragged, not opened.
-    pub arranging: bool,
-}
-
-pub fn card_view(state: &Host, view: CardView<'_>) -> El {
-    let CardView { card, tile, target, theme, expanded, transition, grain, grain_size, outline, overlay, body, arranging } = view;
-    let motion = theme.motion();
-    let tint = card.tint(theme);
-    let ink = theme.ink_on(tint);
-    let shown = if expanded {
-        Placement { x: 0.0, y: 0.0, w: target.w, h: target.h }
-    } else {
-        Placement { x: tile.x - target.x, y: tile.y - target.y, w: tile.w, h: tile.h }
-    };
-    let radius = match (theme.material, expanded) {
-        (Material::Jelly, true) => theme.radius_surface,
-        _ => theme.radius_card,
-    };
-    let (content_fade, wash_fade) = if expanded {
-        (motion.tween(transition, crate::motion::CONTENT), motion.tween(0.3 * transition, crate::motion::EXPO_OUT))
-    } else {
-        let mut wash = motion.tween(0.5 * transition, crate::motion::SURFACE_EXIT);
-        wash.delay = 0.5 * transition;
-        (motion.tween(0.45 * transition, crate::motion::SMOOTH), wash)
-    };
-    let shift = |element: El, x: f32, y: f32| element.absolute(x - shown.x, y - shown.y);
-    let mut inside = el().absolute(0.0, 0.0).size(shown.w, shown.h).clip_rounded(radius);
-    if theme.material == Material::Jelly {
-        let hi = Color::WHITE;
-        let sheen = el().absolute(0.0, 0.0).size(shown.w, shown.h)
-            .radial_gradient([0.18, 0.08], [1.2 * shown.w, 0.95 * shown.h], [(0.0, hi.alpha(theme.glass_sheen * 0.7)), (0.58, hi.alpha(0.0))]);
-        let wash = el().absolute(0.0, 0.0).size(shown.w, shown.h)
-            .fill(mix_oklch(tint, theme.surface_tint, hi))
-            .radial_gradient([0.15, 0.0], [1.2 * shown.w, 0.7 * shown.h], [(0.0, hi.alpha(theme.glass_sheen * 0.55)), (0.6, hi.alpha(0.0))])
-            .child(el().absolute(0.0, 0.0).w(shown.w).h(1.5).fill(hi.alpha(theme.glass_rim * 0.9)))
-            .opacity(if expanded { 1.0 } else { 0.0 })
-            .opacity_motion(wash_fade);
-        inside = inside.child(sheen).child(wash).child(shift(el().size(grain_size.0, grain_size.1).pixels(grain), 0.0, 0.0));
-    }
-    if let Some(body) = body {
-        inside = inside.child(
-            shift(el().w(BODY_W).h((target.h - BODY_Y - 16.0).max(0.0)), BODY_X, BODY_Y)
-                .scroll(rune::ScrollSpec { stick_bottom: false })
-                .child(body)
-                .opacity(if expanded { 1.0 } else { 0.0 })
-                .opacity_motion(content_fade),
-        );
-    }
-    // The header rides at the top of the window, so the icon travels with it into the surface.
-    // A folder opens and closes from its header, a special card from anywhere on it.
-    let toggle = |id: String| move |state: &mut Host, tx: &mut Tx| state.toggle_card(&id, tx);
-    let mut head = el().absolute(0.0, 0.0).child(header(state, theme, card, ink, shown.w, expanded));
-    if !arranging && !card.special() {
-        head = head.on_press_tx(toggle(card.id.clone()));
-    }
-    inside = inside.child(head);
-    let mut window = desk::card_paint(el().key(format!("widget:{}", card.id)).label(card.name.clone()).absolute(shown.x, shown.y), theme, tint, shown.w, shown.h, expanded)
-        .child(inside);
-    if !arranging && card.special() {
-        window = window.on_press_tx(toggle(card.id.clone()));
-    }
-    if let Some(colour) = outline {
-        window = window.outline(2.0, 4.0, colour);
-    }
-    for part in overlay {
-        window = window.child(part);
-    }
-    el().absolute(target.x, target.y).size(target.w, target.h).child(window)
 }
 
 /// Where a shortcut sits in the grid: four columns 3 px apart.
@@ -552,19 +445,22 @@ pub fn folder_body(state: &Host, theme: &Theme, card: &Card, ink: Color, origin:
             .child(svg(state, glyph, 22.0, if folder_look { gold } else { ink.alpha(0.6) }));
         let renaming = state.rename.as_ref().filter(|r| r.folder == folder_id && r.item == item_id);
         let label = match renaming {
-            Some(rename) => el().w(68.0).px(4.0).py(2.0).radius(6.0).border(1.0, theme.accent).fill(theme.scrim.alpha(0.4))
+            Some(rename) => el().w(68.0).px(4.0).py(2.0).radius(6.0).border(1.0, theme.accent).border_layout().fill(theme.scrim.alpha(0.4))
                 .child(text_input(&rename.edit, style(theme, 9.92, 400.0)).single_line().key(format!("hit:rename:{item_id}"))
                     .on_edit(|state: &mut Host| &mut state.rename.as_mut().expect("renaming").edit)
                     .on_submit(|state: &mut Host, _tx: &mut Tx| finish_rename(state, true))),
             None => el().w(68.0).child(
-                text(name.clone()).font(name_style(theme)).align(Align::Center).max_lines(2)
+                text(name.clone()).font(name_style(theme)).w(68.0).align(Align::Center).max_lines(2)
                     .color(if missing { theme.status_warn } else if jelly_open { ink.alpha(0.85) } else { ink.alpha(0.45) }),
             ),
         };
         let dragging = state.shortcut_drag.filter(|d| d.index == index && d.moved && state.open.as_deref() == Some(card.id.as_str()));
+        // `.shortcut-item:hover` lifts a point and shows its border over 120 ms; `:active` shrinks.
+        let ease = theme.motion().tween(theme.motion().duration(crate::motion::Token::Hover), crate::motion::EASE);
         let mut tile = col().key(format!("hit:shortcut:{}:{index}", card.id)).label(if missing { format!("{name} — недоступен") } else { name.clone() })
-            .w(cw).pt(10.0).pb(8.0).px(4.0).gap(6.0).radius(13.0).border(1.0, Color::TRANSPARENT).items_center()
-            .hover(theme.bg_elevated.alpha(0.06))
+            .w(cw).pt(10.0).pb(8.0).px(4.0).gap(6.0).radius(13.0).border(1.0, Color::TRANSPARENT).border_layout().items_center()
+            .hover(theme.bg_elevated.alpha(0.06)).hover_border(theme.bg_elevated.alpha(0.08)).hover_lift(0.0, -1.0).hover_motion(ease, ease)
+            .press_scale(0.93)
             .child(icon).child(label);
         if let Some(drag) = dragging {
             tile = tile.offset(drag.dx, drag.dy).opacity(0.85).raise();
@@ -631,14 +527,16 @@ pub fn folder_body(state: &Host, theme: &Theme, card: &Card, ink: Color, origin:
     let add_anchor = (origin.0 + (add_index % 4) as f32 * (cw + 3.0), origin.1 + row_top(add_index / 4) + rows[add_index / 4] + 4.0);
     let add_folder = folder_id.clone();
     tiles.push(
-        col().key(format!("hit:shortcut-add:{}", card.id)).label("Добавить ярлык").w(cw).pt(10.0).pb(8.0).px(4.0).gap(6.0).radius(13.0).items_center()
-            .hover(theme.bg_elevated.alpha(0.06))
+        col().key(format!("hit:shortcut-add:{}", card.id)).label("Добавить ярлык").w(cw).pt(10.0).pb(8.0).px(4.0).gap(6.0).radius(13.0).border(1.0, Color::TRANSPARENT).border_layout().items_center()
+            .hover(theme.bg_elevated.alpha(0.06)).hover_border(theme.bg_elevated.alpha(0.08)).hover_lift(0.0, -1.0)
+            .hover_motion(theme.motion().tween(theme.motion().duration(crate::motion::Token::Hover), crate::motion::EASE), theme.motion().tween(theme.motion().duration(crate::motion::Token::Hover), crate::motion::EASE))
+            .press_scale(0.93)
             .child(
                 col().size(38.0, 38.0).radius(11.0).items_center().justify_center()
                     .fill(theme.bg_elevated.alpha(0.05)).border(1.0, theme.bg_elevated.alpha(0.06)).border_dash(3.0, 3.0)
                     .child(el().size(20.0, 20.0).shape(crate::controls::glyph(&plus, ink.alpha(0.6), 2.0))),
             )
-            .child(el().w(68.0).child(text(if card.items.is_empty() { "Добавить ярлык" } else { "Добавить" }).font(name_style(theme)).align(Align::Center).max_lines(2).color(ink.alpha(if jelly_open { 0.85 } else { 0.45 }))))
+            .child(el().w(68.0).child(text(if card.items.is_empty() { "Добавить ярлык" } else { "Добавить" }).font(name_style(theme)).w(68.0).align(Align::Center).max_lines(2).color(ink.alpha(if jelly_open { 0.85 } else { 0.45 }))))
             .on_press_tx(move |state: &mut Host, _tx: &mut Tx| {
                 finish_rename(state, true);
                 state.folder_menu = Some(FolderMenu {
@@ -672,8 +570,8 @@ pub fn folder_menu(state: &Host, theme: &Theme, canvas: (f32, f32)) -> Option<El
     let height = 8.0 + open.actions.len() as f32 * 32.0 + 2.0;
     let x = open.at.0.min(canvas.0 - width - 4.0).max(4.0);
     let y = open.at.1.min(canvas.1 - height - 4.0).max(4.0);
-    let mut list = col().key("hit:folder-menu").label("Меню ярлыка").absolute(x, y).w(width).padding(4.0).radius(theme.radius_card)
-        .fill(theme.surface.alpha(0.98)).border(1.0, theme.bg_elevated.alpha(0.14)).shadow(12.0, 36.0, Color::BLACK.alpha(0.35));
+    let mut list = col().key("hit:folder-menu").label("Меню ярлыка").on_press(|_: &mut Host| {}).absolute(x, y).w(width).padding(4.0).radius(theme.radius_card)
+        .fill(theme.surface.alpha(0.98)).border(1.0, theme.bg_elevated.alpha(0.14)).border_layout().shadow(12.0, 36.0, Color::BLACK.alpha(0.35));
     for (index, action) in open.actions.iter().enumerate() {
         let danger = matches!(action, FolderAction::Remove(_));
         let (folder, action_run) = (open.folder.clone(), action.clone());
@@ -688,7 +586,7 @@ pub fn folder_menu(state: &Host, theme: &Theme, canvas: (f32, f32)) -> Option<El
 }
 
 /// `mountNested`: the widgets inside a host, each with its name and "Вынуть на стол", drawn in
-/// their compact form. `None` when the host holds nothing.
+/// their compact form (`Widget::compact`). `None` when the host holds nothing.
 pub fn nested_zone(state: &Host, desk: &Desk, theme: &Theme, ink: Color, host: &str) -> Option<(El, f32)> {
     let children = desk.nested.get(host).filter(|c| !c.is_empty())?;
     let mut zone = col().w(BODY_W).gap(8.0);
@@ -710,11 +608,9 @@ pub fn nested_zone(state: &Host, desk: &Desk, theme: &Theme, ink: Color, host: &
         let mut item = col().w_full().pt(6.0).px(8.0).pb(8.0).radius((theme.radius_card - 4.0).max(0.0)).fill(theme.bg_elevated.alpha(0.04)).child(head)
             .on_press(|_: &mut Host| {});
         let mut item_h = 6.0 + 20.0 + 8.0;
-        // VPN is the one module with a compact form.
-        if entry.is_some_and(|w| w.widget_type == "vpn") {
-            let (panel, panel_h) = crate::vpn_panel::panel(state, theme, ink, &format!("nested:{host}:{child}"), BODY_W - 16.0, true);
-            item = item.child(panel);
-            item_h += panel_h;
+        if let Some((compact, compact_h)) = state.compact_of(child, host, ink, BODY_W - 16.0) {
+            item = item.child(compact);
+            item_h += compact_h;
         }
         zone = zone.child(item);
         height += item_h + 8.0;
@@ -730,19 +626,27 @@ mod tests {
         Layout::from_event(&json!({ "rev": 1, "instance": "k", "config": config })).unwrap()
     }
 
+    fn drawn(id: &str) -> bool {
+        matches!(id, "clock" | "vpn")
+    }
+
+    fn desk(layout: &Layout, folders: &[Value], disabled: &HashSet<String>) -> Desk {
+        super::desk(layout, folders, disabled, &drawn)
+    }
+
     #[test]
     fn folders_and_vpn_are_cards_and_nesting_takes_vpn_off_the_desk() {
         let folders = [json!({ "id": "folder_a", "name": "Работа", "icon_svg": "", "items": [{ "id": "i1", "name": "x", "target": "C:\\x" }] })];
         let nested = layout(json!({ "positions": {}, "nested": { "clock": ["vpn"] } }));
         let desk_now = desk(&nested, &folders, &HashSet::new());
-        assert!(desk_now.clock);
-        assert_eq!(desk_now.cards.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["folder_a"]);
-        assert_eq!(desk_now.cards[0].desc, "1 ярлык");
+        assert_eq!(desk_now.cards.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["clock", "folder_a"]);
+        assert!(desk_now.cards[0].bare, "the clock's metadata says chrome: bare");
+        assert_eq!(desk_now.cards[1].desc, "1 ярлык");
         assert_eq!(desk_now.nested["clock"], vec!["vpn".to_string()]);
 
         let ejected = layout(json!({ "positions": {}, "nested": {} }));
         let cards = desk(&ejected, &folders, &HashSet::new()).cards;
-        assert!(cards.iter().any(|c| c.id == "vpn" && c.kind == Kind::Vpn));
+        assert!(cards.iter().any(|c| c.id == "vpn" && !c.folder && !c.bare));
 
         // A switched-off VPN is neither a card nor nested.
         let off: HashSet<String> = ["vpn".to_string()].into();
@@ -773,11 +677,14 @@ mod tests {
         let folders = [json!({ "id": "a", "name": "A", "items": [] }), json!({ "id": "b", "name": "B", "items": [] })];
         let l = layout(json!({ "positions": { "b": { "x": 500, "y": 40, "w": 200 } }, "nested": { "clock": ["vpn"] } }));
         let theme = Theme::nothing_classic();
-        let (w, h) = theme.size_of("folder").unwrap_or(CARD);
+        let (w, h) = theme.size_of("folder").unwrap_or(crate::card::CARD);
         let d = desk(&l, &folders, &HashSet::new());
-        let at = place(&l, &theme, &d.cards, (1280.0, 720.0));
-        assert_eq!((at[0].x, at[0].y, at[0].w, at[0].h), (28.0, 28.0, w, h));
-        assert_eq!((at[1].x, at[1].y, at[1].w), (500.0, 40.0, 200.0), "the record's own width");
+        let folders_only: Vec<Card> = d.cards.into_iter().filter(|c| c.folder).collect();
+        // The canvas lies 28 points inside the window (`.app-shell { padding: 28px }`).
+        let area = Placement { x: 28.0, y: 28.0, w: 1224.0, h: 664.0 };
+        let at = place(&l, &theme, &folders_only, area);
+        assert_eq!((at[0].x, at[0].y, at[0].w, at[0].h), (56.0, 56.0, w, h));
+        assert_eq!((at[1].x, at[1].y, at[1].w), (528.0, 68.0, 200.0), "the record's own width");
     }
 
     #[test]

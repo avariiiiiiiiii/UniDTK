@@ -64,7 +64,8 @@ pub struct TextStyle {
     pub size: f32,
     pub weight: f32,
     pub family: Family,
-    /// Line height in points; 0 means 1.25 × size.
+    /// Line height in points; 0 means 1.25 × size; negative is CSS's `normal`, the font's own
+    /// ascent, descent and line gap (`TextStyle::lh_normal`).
     pub line_height: f32,
     /// Letter spacing in points, added to the font's own size-specific tracking (see `features`).
     pub tracking: f32,
@@ -105,6 +106,16 @@ impl TextStyle {
     pub const fn lh(self, line_height: f32) -> TextStyle {
         TextStyle { line_height, ..self }
     }
+    /// CSS's `line-height: normal`: each line as tall as the font says (its ascent, descent and
+    /// line gap; the typographic ones when the font asks for them), as a browser lays out text
+    /// that sets no line height. Segoe UI is 1.33 of its size, Consolas 1.17.
+    pub const fn lh_normal(self) -> TextStyle {
+        TextStyle { line_height: -1.0, ..self }
+    }
+    /// Whether the line height is the font's own (`lh_normal`).
+    pub const fn is_normal_lh(&self) -> bool {
+        self.line_height < 0.0
+    }
     pub const fn tracking(self, tracking: f32) -> TextStyle {
         TextStyle { tracking, ..self }
     }
@@ -127,9 +138,16 @@ impl TextStyle {
     pub const fn optical_sizing(self, optical_size: OpticalSize) -> TextStyle {
         TextStyle { optical_size, ..self }
     }
-    /// Resolved line height in points.
+    /// Resolved line height in points; for `lh_normal` the floor a line keeps when the font's
+    /// own is not at hand (an empty line, a caret), 1.2 of the size as CSS suggests for `normal`.
     pub fn line_px(&self) -> f32 {
-        if self.line_height > 0.0 { self.line_height } else { self.size * 1.25 }
+        if self.line_height > 0.0 {
+            self.line_height
+        } else if self.line_height < 0.0 {
+            self.size * 1.2
+        } else {
+            self.size * 1.25
+        }
     }
 }
 

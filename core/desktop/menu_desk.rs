@@ -5,8 +5,8 @@
 
 use std::collections::HashSet;
 
-use rune::el::{col, el, row, text, text_input, El};
-use rune::{Color, TextEdit, Tx};
+use rune::el::{col, el, row, text, El};
+use rune::{Color, Tx};
 use serde_json::{json, Value};
 
 use crate::controls::{self, ButtonKind, Look};
@@ -41,7 +41,7 @@ struct Module {
 }
 
 fn modules() -> Vec<Module> {
-    crate::module_table::desk_modules()
+    crate::catalog::desk_modules()
         .map(|m| Module {
             id: m.id.clone(),
             name: m.meta["name"].as_str().unwrap_or(&m.id).to_string(),
@@ -156,8 +156,9 @@ fn list_row(look: &Look, key: String, icon: El, name: &str, sub: &str, sub_warn:
 }
 
 pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
+    // `.menu-actions { margin: 8px 0 }`: its bottom margin collapses into the heading's 18 px.
     let mut pane = col().w_full().child(
-        row().gap(8.0).py(8.0).flex_wrap()
+        row().gap(8.0).pt(8.0).flex_wrap()
             .child(controls::button(look, "hit:arrange".into(), "Расставить", ButtonKind::Primary, |state: &mut S, tx: &mut Tx| {
                 menu::close(state, tx);
                 state.enter_arrange(tx);
@@ -185,9 +186,12 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
                 let icon = icon_el(state, &module.icon, 20.0, look.fg.alpha(0.85));
                 let id = module.id.clone();
                 let hover_id = module.id.clone();
-                let open = controls::button(look, format!("hit:widget-open:{id}"), "Настроить…", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
-                    state.menu().sheet = Some(Sheet::Widget(id.clone()));
-                });
+                let open_key = format!("hit:widget-open:{id}");
+                let rect_key = open_key.clone();
+                let open = controls::button(look, open_key.clone(), "Настроить…", ButtonKind::Normal, move |state: &mut S, tx: &mut Tx| {
+                    menu::open_sheet(state, Sheet::Widget(id.clone()), &open_key, tx);
+                })
+                .on_layout_tx(move |state: &mut S, rect: [f32; 4], tx: &mut Tx| menu::remember_rect(state, &rect_key, rect, tx));
                 list = list.child(
                     list_row(look, format!("hit:widget-row:{}", module.id), icon, &module.name, &sub, false, vec![open])
                         .on_hover_change(move |state: &mut S, hovered: bool, _tx: &mut Tx| {
@@ -209,8 +213,8 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
 fn reset_positions<S: MenuHost>(state: &mut S, tx: &mut Tx) {
     let Some(layout) = state.layout() else { return };
     let before = layout.config.get("positions").cloned().unwrap_or(json!({}));
-    let defaults = crate::module_table::default_layout()["positions"].clone();
-    let canvas = state.canvas();
+    let defaults = crate::catalog::default_layout()["positions"].clone();
+    let canvas = state.desk_size();
     let (max_x, max_y) = ((canvas.0 - 120.0).max(0.0) as f64, (canvas.1 - 64.0).max(0.0) as f64);
     let mut ops = Vec::new();
     for (id, pos) in before.as_object().into_iter().flatten() {
@@ -236,10 +240,9 @@ fn reset_positions<S: MenuHost>(state: &mut S, tx: &mut Tx) {
         }
         ops.push(op);
     }
-    if ops.is_empty() {
-        return;
+    if !ops.is_empty() {
+        state.apply(ops, tx);
     }
-    state.apply(ops, tx);
     menu::undo_toast(state, "Раскладка сброшена".into(), Box::new(move |state: &mut S, tx: &mut Tx| {
         state.apply(vec![json!({ "op": "positions", "positions": before })], tx);
     }));
@@ -275,7 +278,7 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, sheet: &Sheet, 
 
 fn widget_sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width: f32, height: f32) -> El {
     let Some(module) = modules().into_iter().find(|m| m.id == id) else {
-        return menu::sheet_frame::<S>(look, theme, id, width, height, col());
+        return menu::sheet_frame::<S>(state, look, theme, id, width, height, col());
     };
     let hidden = state.layout().map(|l| l.hidden.clone()).unwrap_or_default();
     let disabled = state.menu_ref().disabled_modules.ready().cloned().unwrap_or_default();
@@ -315,12 +318,12 @@ fn widget_sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, wi
     }
     if module.settings_view.as_deref() == Some("vpn") {
         actions = actions.child(controls::button(look, "hit:module-settings".into(), &format!("Настроить {}…", module.name), ButtonKind::Normal, |state: &mut S, tx: &mut Tx| {
-            state.menu().sheet = None;
+            menu::close_sheet(state, tx);
             menu::show_view(state, View::Vpn, tx);
         }));
     }
     body = body.child(actions);
-    menu::sheet_frame::<S>(look, theme, &module.name, width, height, body)
+    menu::sheet_frame::<S>(state, look, theme, &module.name, width, height, body)
 }
 
 #[cfg(test)]

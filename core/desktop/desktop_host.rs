@@ -564,7 +564,9 @@ pub fn window_png(hwnd: isize) -> Result<(u32, u32, Vec<u8>), String> {
 }
 
 /// A left click at client pixel `(x, y)`, posted to the window, so it travels winit's and
-/// Rune's own input path.
+/// Rune's own input path. The pointer arrives a frame before the button, as a hand's does:
+/// Rune takes the target of a press from the hover the last frame resolved, so a press posted
+/// with its move in the same instant at a new place would find nothing there.
 pub fn click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
     let hwnd = HWND(hwnd as _);
@@ -574,6 +576,9 @@ pub fn click(hwnd: isize, x: i32, y: i32) -> Result<(), String> {
     let at = LPARAM(((y as u16 as isize) << 16) | (x as u16 as isize));
     unsafe {
         PostMessageW(hwnd, WM_MOUSEMOVE, WPARAM(0), at).map_err(|e| e.to_string())?;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(48));
+    unsafe {
         PostMessageW(hwnd, WM_LBUTTONDOWN, WPARAM(1), at).map_err(|e| e.to_string())?; // MK_LBUTTON
         PostMessageW(hwnd, WM_LBUTTONUP, WPARAM(0), at).map_err(|e| e.to_string())?;
     }
@@ -591,6 +596,9 @@ pub fn drag(hwnd: isize, from: (i32, i32), to: (i32, i32), steps: u32) -> Result
     let at = |(x, y): (i32, i32)| LPARAM(((y as u16 as isize) << 16) | (x as u16 as isize));
     unsafe {
         PostMessageW(hwnd, WM_MOUSEMOVE, WPARAM(0), at(from)).map_err(|e| e.to_string())?;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(48));
+    unsafe {
         PostMessageW(hwnd, WM_LBUTTONDOWN, WPARAM(1), at(from)).map_err(|e| e.to_string())?; // MK_LBUTTON
     }
     let steps = steps.max(1);

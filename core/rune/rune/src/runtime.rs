@@ -515,6 +515,9 @@ pub struct Runtime<S: 'static> {
     aspect_snap: Vec<NodeId>,
     /// Drawn rect per node (points, root space), for tools and hit tests.
     drawn: Vec<[f32; 4]>,
+    /// The commit `drawn` was built after. A commit with no frame since (a covered window
+    /// commits without drawing) leaves `drawn` indexed by the nodes before it.
+    drawn_commit: u64,
     /// The scale each node's text drew at (its own and its ancestors'), for text hit tests.
     drawn_scale: Vec<f32>,
     /// Per node: it drew inside its clip and the window in the last build.
@@ -890,6 +893,7 @@ impl<S: 'static> Runtime<S> {
             key_releases: Default::default(),
             aspect_snap: Vec::new(),
             drawn: Vec::new(),
+            drawn_commit: 0,
             drawn_scale: Vec::new(),
             seen: Vec::new(),
             scrolls: HashMap::default(),

@@ -629,3 +629,44 @@ fn rune_tree_committed_fires_after_covered_boot_and_dedups_unchanged_commits() {
     assert!(rune::win32_telemetry::check_commit_transition(&rt, &mut last_committed, &mut on_commit));
     assert_eq!(seen.borrow().as_slice(), ["Presses: 0", "Presses: 1"]);
 }
+
+// Rune's own tests are not built (core/rune/UPSTREAM.md item 3), so the `maxlength` it learned
+// for the menu's fields is pinned here.
+#[test]
+fn a_text_edit_keeps_only_what_fits_and_code_is_not_cut() {
+    let mut edit = rune::TextEdit::new("ab").max_chars(4);
+    edit.insert("cdef");
+    assert_eq!(edit.text, "abcd");
+    edit.insert("x");
+    assert_eq!(edit.text, "abcd", "a full field takes nothing more");
+    // Characters, not bytes: Cyrillic is two bytes each in UTF-8.
+    let mut cyrillic = rune::TextEdit::new("").max_chars(3);
+    cyrillic.insert("папка");
+    assert_eq!(cyrillic.text, "пап");
+    // Text set in code is not cut, as `maxlength` does not cut a value set by script.
+    assert_eq!(rune::TextEdit::new("long name").max_chars(3).text, "long name");
+}
+
+// A covered desk commits a layout without drawing, and its springs do not step: a card the layout
+// moved still stands, presented, at its old place. The window region is made from where cards
+// are and where their layout puts them, so the first press after a start lands on the card
+// (`r[shell.window-region]`).
+#[test]
+fn the_window_region_follows_a_card_the_layout_moved_while_the_desk_was_covered() {
+    let mut rt = rune::Runtime::new(
+        20.0f32,
+        |x: &f32, _: &mut rune::Cx<f32>| {
+            rune::el().size(800.0, 400.0).child(rune::el().key("widget:a").absolute(*x, 20.0).size(50.0, 50.0))
+        },
+        (800.0, 400.0),
+        rune::Env::default(),
+    );
+    rune::win32_telemetry::covered_step(&mut rt);
+    assert!(rt.has_committed());
+    rt.update(|x, _| *x = 300.0);
+    rt.frame(0.0);
+    let regions = rt.keyed_regions(&["card:", "widget:"]);
+    assert_eq!(regions.len(), 1, "{regions:?}");
+    let [x, _, w, _] = regions[0].0;
+    assert!(x <= 300.0 && x + w >= 350.0, "the region must cover the card where the layout put it: {regions:?}");
+}

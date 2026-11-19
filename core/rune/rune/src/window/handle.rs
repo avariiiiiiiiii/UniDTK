@@ -27,6 +27,14 @@ impl Default for Route {
     fn default() -> Self { Route::Unbound { queued: Vec::new() } }
 }
 
+/// What [`WindowHandle::gpu_memory`] returns.
+#[derive(Clone, Debug)]
+pub struct GpuMemory {
+    pub counters: wgpu::InternalCounters,
+    pub layers: crate::render::LayerStats,
+    pub report: Option<wgpu::AllocatorReport>,
+}
+
 /// A forwarded keyboard event delivered through [`WindowHandle::inject_key`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct InjectedKey {
@@ -235,6 +243,20 @@ impl WindowHandle {
             .recv_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| format!("offscreen capture timed out or cancelled: {e}"))??;
         pending.finish()
+    }
+
+    /// What this window's GPU device holds: `wgpu`'s counters of textures and buffers (every
+    /// resource, committed or suballocated), the renderer's layer targets, and the allocator's
+    /// report by label where the backend suballocates (DX12 on Iris Xe does not, so it is
+    /// empty there). `None` while the window's host is not running. Swap-chain buffers are the
+    /// driver's and are in none of them.
+    pub fn gpu_memory(&self) -> Option<GpuMemory> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        match &*self.native.route.lock().unwrap() {
+            Route::Bound { proxy, slot } => proxy.send_event(WakeEvent::GpuMemory(*slot, tx)).ok()?,
+            Route::Unbound { .. } => return None,
+        }
+        rx.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten()
     }
 }
 

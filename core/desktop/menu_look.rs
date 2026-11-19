@@ -90,8 +90,10 @@ fn from_ui(field: &str, ui: f32) -> f32 {
     if field == "radiusStrip" && ui >= 64.0 { 999.0 } else { ui }
 }
 
-/// `CHOICES`, then the modules' `lookOptions`: field, label, options as (stored value, label).
-fn choices() -> Vec<(String, String, Vec<(Value, String)>)> {
+/// `CHOICES`, then the `lookOptions` of the modules the desk draws (`draws`): a module with no
+/// native half yet shows none of its options, which would change nothing on screen. Field,
+/// label, options as (stored value, label).
+fn choices(draws: impl Fn(&str) -> bool) -> Vec<(String, String, Vec<(Value, String)>)> {
     let mut out: Vec<(String, String, Vec<(Value, String)>)> = vec![
         ("motionProfile".into(), "Характер анимаций".into(), vec![
             (json!("responsive"), "Отзывчивый".into()), (json!("balanced"), "Сбалансированный".into()), (json!("fluid"), "Плавный".into()),
@@ -102,7 +104,7 @@ fn choices() -> Vec<(String, String, Vec<(Value, String)>)> {
         ]),
         ("material".into(), "Материал карточек".into(), vec![(json!("flat"), "Плоское стекло".into()), (json!("jelly"), "Морское стекло".into())]),
     ];
-    for module in crate::module_table::desk_modules() {
+    for module in crate::catalog::desk_modules().filter(|module| draws(&module.id)) {
         for option in module.meta.get("lookOptions").and_then(Value::as_array).into_iter().flatten() {
             let (Some(field), Some(label), Some(options)) = (option["field"].as_str(), option["label"].as_str(), option["options"].as_array()) else { continue };
             let options = options.iter().filter_map(|pair| Some((pair.get(0)?.clone(), pair.get(1)?.as_str()?.to_string()))).collect();
@@ -161,7 +163,7 @@ fn select_preset<S: MenuHost>(state: &mut S, id: &str, tx: &mut Tx) {
 fn shuffle<S: MenuHost>(state: &mut S, tx: &mut Tx) {
     let current = state.theme_record();
     state.menu().previous_colors = Some(json!({ "palette": current["palette"], "tintMap": current["tintMap"] }));
-    let targets = record::tint_targets(crate::module_table::desk_modules().map(|m| &m.meta));
+    let targets = record::tint_targets(crate::catalog::desk_modules().map(|m| &m.meta));
     let rolled = record::roll_colors(record::new_color_seed(), &targets);
     apply_colors(state, &rolled, tx);
 }
@@ -193,7 +195,7 @@ fn save_custom<S: MenuHost>(state: &mut S, tx: &mut Tx) {
     let preset = record::normalize(&preset);
     let mut list: Vec<Value> = presets(state).into_iter().filter(|p| p["isBuiltin"] != true).collect();
     list.push(preset.clone());
-    state.menu().preset_name = rune::TextEdit::new("");
+    state.menu().preset_name = rune::TextEdit::new("").max_chars(32);
     state.preview_theme(preset.clone());
     state.apply(vec![json!({ "op": "custom_presets", "presets": list }), json!({ "op": "theme", "theme": preset })], tx);
     state.toasts().show(format!("Тема «{name}» сохранена"), false, None);
@@ -214,13 +216,13 @@ fn delete_custom<S: MenuHost>(state: &mut S, id: &str, tx: &mut Tx) {
     let name = preset["name"].as_str().unwrap_or_default().to_string();
     menu::undo_toast(state, format!("Тема «{name}» удалена"), Box::new(move |state: &mut S, tx: &mut Tx| {
         // `saveCustomPreset(preset.name, preset)`: the theme comes back under a new id and is applied.
-        state.menu().preset_name = rune::TextEdit::new(name.clone());
+        state.menu().preset_name = rune::TextEdit::new(name.clone()).max_chars(32);
         let mut back = preset.clone();
         back["id"] = json!(format!("custom-{}", now_ms()));
         let back = record::normalize(&back);
         let mut list: Vec<Value> = presets(state).into_iter().filter(|p| p["isBuiltin"] != true).collect();
         list.push(back.clone());
-        state.menu().preset_name = rune::TextEdit::new("");
+        state.menu().preset_name = rune::TextEdit::new("").max_chars(32);
         state.preview_theme(back.clone());
         state.apply(vec![json!({ "op": "custom_presets", "presets": list }), json!({ "op": "theme", "theme": back })], tx);
     }));
@@ -258,7 +260,7 @@ fn rgb_color(value: &Value) -> Color {
 
 /// `.menu-theme`: a card in its own preset's colours, three swatches (the accent first) and the
 /// name; jelly cards carry their sheen and rim.
-fn theme_card<S: MenuHost>(look: &Look, preset: &Value, active: &Value) -> El {
+fn theme_card<S: MenuHost>(look: &Look, preset: &Value, active: &Value, width: f32) -> El {
     let surface = rgb_color(&preset["surfaceRgb"]);
     let fg = rgb_color(&preset["fgRgb"]);
     let accent = hex_color(&preset["accent"]);
@@ -270,12 +272,12 @@ fn theme_card<S: MenuHost>(look: &Look, preset: &Value, active: &Value) -> El {
         .child(el().size(28.0, 28.0).radius(9.0).fill(fg.alpha(0.18)));
     let mut card = col().key(format!("hit:preset:{id}")).grow(1.0).min_h(108.0).padding(12.0).gap(10.0).radius(16.0)
         .fill(surface)
-        .border(2.0, if checked { look.accent } else { Color::TRANSPARENT })
+        .border(2.0, if checked { look.accent } else { Color::TRANSPARENT }).border_layout()
         .child(swatch)
         .child(el().grow(1.0))
         .child(text(preset["name"].as_str().unwrap_or_default().to_string()).font(look.font(13.0, 600.0)).color(fg).single_line());
     card = if preset["material"] == "jelly" {
-        card.radial_gradient([0.18, 0.08], [1.2 * 180.0, 0.95 * 108.0], [(0.0, Color::WHITE.alpha(0.55)), (0.58, Color::WHITE.alpha(0.0))])
+        card.radial_gradient([0.18, 0.08], [1.2 * width, 0.95 * 108.0], [(0.0, Color::WHITE.alpha(0.55)), (0.58, Color::WHITE.alpha(0.0))])
             .box_shadow(rune::Shadow { y: 1.5, color: Color::WHITE.alpha(0.8), inset: true, ..Default::default() })
             .box_shadow(rune::Shadow { y: 6.0, blur: 14.0, color: rune::color::hex("#2830462e").unwrap_or(Color::BLACK), ..Default::default() })
     } else {
@@ -320,11 +322,13 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
     // Theme cards, two to a row.
     pane = pane.child(controls::heading(look, "Тема"));
     let all = presets(state);
+    // Two columns 10 apart in the panel's body: its 1 px border and 16 px padding each side.
+    let card_w = ((state.canvas().0 - 24.0).min(420.0) - 2.0 - 32.0 - 10.0) / 2.0;
     let mut grid = col().gap(10.0);
     for pair in all.chunks(2) {
         let mut line = row().gap(10.0);
         for preset in pair {
-            line = line.child(theme_card::<S>(look, preset, &active));
+            line = line.child(theme_card::<S>(look, preset, &active, card_w));
         }
         if pair.len() == 1 {
             line = line.child(el().grow(1.0));
@@ -347,9 +351,12 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
         for hex in seen {
             let checked = active["accent"].as_str().is_some_and(|a| a.eq_ignore_ascii_case(&hex));
             let colour = rune::color::hex(&hex).unwrap_or(Color::WHITE);
-            let mut swatch = el().key(format!("hit:accent:{hex}")).size(28.0, 28.0).radius(14.0).fill(colour).border(2.0, look.elev.alpha(0.2));
+            let mut swatch = el().key(format!("hit:accent:{hex}")).label(format!("Акцент {hex}")).size(28.0, 28.0).radius(14.0).fill(colour).border(2.0, look.elev.alpha(0.2));
             if checked {
-                swatch = swatch.outline(2.0, 2.0, look.accent);
+                // `box-shadow: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--accent)`.
+                swatch = swatch
+                    .box_shadow(rune::Shadow { x: 0.0, y: 0.0, blur: 0.0, spread: 2.0, color: look.surface, inset: false })
+                    .box_shadow(rune::Shadow { x: 0.0, y: 0.0, blur: 0.0, spread: 4.0, color: look.accent, inset: false });
             }
             accents = accents.child(swatch.on_press_tx(move |state: &mut S, tx: &mut Tx| set_field(state, "accent", json!(hex), tx)));
         }
@@ -370,14 +377,15 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
         }));
     if fine_open {
         let mut body = col().w_full();
-        for (field, label, options) in choices() {
+        for (field, label, options) in choices(|id| state.draws(id)) {
             let current = active.get(&field).cloned().unwrap_or(Value::Null);
             let checked = options.iter().find(|(value, _)| value.to_string() == current.to_string()).map(|(value, _)| value.to_string()).unwrap_or_default();
             let keyed: Vec<(String, String)> = options.iter().map(|(value, label)| (value.to_string(), label.clone())).collect();
             let refs: Vec<(&str, &str)> = keyed.iter().map(|(v, l)| (v.as_str(), l.as_str())).collect();
             let field_for = field.clone();
             body = body.child(
-                col().py(10.0).gap(6.0)
+                // `.menu-field { margin: 10px 0 }`: neighbours share one 10 px gap.
+                col().pt(10.0).gap(6.0)
                     .child(controls::field_label(look, &label, ""))
                     .child(controls::pills(look, &format!("hit:choice:{field}"), &refs, &checked, move |state: &mut S, value: &str, tx: &mut Tx| {
                         let value: Value = serde_json::from_str(value).unwrap_or(Value::Null);
@@ -390,7 +398,8 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
             let ui = to_ui(spec.field, stored);
             let field = spec.field;
             body = body.child(
-                col().py(10.0).gap(6.0)
+                // `.menu-field { margin: 10px 0 }`: neighbours share one 10 px gap.
+                col().pt(10.0).gap(6.0)
                     .child(controls::field_label(look, spec.label, &format_value(field, ui)))
                     .child(controls::slider(
                         look,
@@ -413,8 +422,10 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
                     )),
             );
         }
+        // The last field's bottom margin.
+        body = body.child(el().h(10.0));
         if jelly {
-            body = body.child(controls::field_label(look, "Палитра оттенков", ""));
+            body = body.child(controls::field_heading(look, "Палитра оттенков"));
             let mut wells = col().gap(6.0);
             for pair in SLOT_LABELS.chunks(2) {
                 let mut line = row().gap(6.0);
@@ -428,8 +439,10 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
                 }
                 wells = wells.child(line);
             }
-            body = body.child(wells).child(controls::field_label(look, "Каким цветом окрашено", ""));
-            let targets = record::tint_targets(crate::module_table::desk_modules().map(|m| &m.meta));
+            body = body.child(wells).child(controls::field_heading(look, "Каким цветом окрашено"));
+            // The panels, the folders and the modules the desk draws; a module with no native half
+            // yet has nothing a tint would show on.
+            let targets = record::tint_targets(crate::catalog::desk_modules().filter(|m| state.draws(&m.id)).map(|m| &m.meta));
             let labels = tint_labels();
             let theme_now = crate::theme::Theme::normalize(&active);
             let mut tints = col().gap(4.0);
@@ -458,7 +471,7 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
             }
             body = body.child(tints);
         }
-        body = body.child(controls::field_label(look, "Текст, фоны и статусы", ""));
+        body = body.child(controls::field_heading(look, "Текст, фоны и статусы"));
         let fields: Vec<_> = COLOR_FIELDS.iter().filter(|(.., m)| for_material(*m)).collect();
         let mut wells = col().gap(6.0);
         for pair in fields.chunks(2) {
@@ -476,10 +489,11 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
             }
             wells = wells.child(line);
         }
-        body = body.child(wells).child(controls::field_label(look, "Свои темы", ""));
+        body = body.child(wells).child(controls::field_heading(look, "Свои темы"));
         let name_field = text_input(&state.menu_ref().preset_name, look.font(13.0, 400.0))
             .single_line()
             .key("hit:preset-name")
+            .label("Название темы")
             .placeholder("Название темы", look.fg.alpha(0.55))
             .on_edit(|state: &mut S| &mut state.menu().preset_name)
             .on_submit(|state: &mut S, tx: &mut Tx| save_custom(state, tx));
@@ -487,7 +501,7 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
             row().gap(8.0).pt(4.0).pb(8.0)
                 .child(
                     el().grow(1.0).min_h(32.0).px(10.0).py(6.0).radius(9.0)
-                        .border(1.0, look.elev.alpha(0.16)).fill(look.well.alpha(0.25))
+                        .border(1.0, look.elev.alpha(0.16)).border_layout().fill(look.well.alpha(0.25))
                         .child(name_field),
                 )
                 .child(controls::button(look, "hit:preset-save".into(), "Сохранить текущую", ButtonKind::Normal, |state: &mut S, tx: &mut Tx| save_custom(state, tx))),
@@ -498,7 +512,7 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
             body = body.child(
                 row().w_full().min_h(44.0).px(8.0).py(6.0).gap(10.0).radius(12.0).items_center().hover(look.elev.alpha(0.07))
                     .child(el().grow(1.0).child(text(preset["name"].as_str().unwrap_or_default().to_string()).font(look.font(13.0, 400.0)).color(look.fg).single_line()))
-                    .child(controls::icon_button(look, format!("hit:preset-delete:{id}"), controls::glyph(&cross, look.fg.alpha(0.75), 2.0), move |state: &mut S, tx: &mut Tx| delete_custom(state, &id, tx))),
+                    .child(controls::icon_button(look, format!("hit:preset-delete:{id}"), "Удалить тему", &cross, 14.0, move |state: &mut S, tx: &mut Tx| delete_custom(state, &id, tx))),
             );
         }
         body = body.child(row().py(8.0).child(controls::button(look, "hit:reset-sizes".into(), "Размеры виджетов как в теме", ButtonKind::Normal, |state: &mut S, tx: &mut Tx| reset_sizes(state, tx))));
@@ -510,7 +524,7 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
 /// The tint targets' labels: the core's two, then each module's `tints` labels.
 fn tint_labels() -> Vec<(String, String)> {
     let mut labels = vec![("panel".to_string(), "Панели".to_string()), ("folder".to_string(), "Папки".to_string())];
-    for module in crate::module_table::desk_modules() {
+    for module in crate::catalog::desk_modules() {
         for tint in module.meta.get("tints").and_then(Value::as_array).into_iter().flatten() {
             if let (Some(id), Some(label)) = (tint["id"].as_str(), tint["label"].as_str()) {
                 labels.push((id.to_string(), label.to_string()));
@@ -536,9 +550,11 @@ mod tests {
     }
 
     #[test]
-    fn the_choices_include_the_modules_look_options() {
-        let fields: Vec<String> = choices().into_iter().map(|(field, ..)| field).collect();
+    fn the_choices_include_the_look_options_of_the_modules_drawn() {
+        let fields: Vec<String> = choices(|_| true).into_iter().map(|(field, ..)| field).collect();
         assert_eq!(&fields[..3], ["motionProfile", "fontBody", "material"]);
         assert!(fields.iter().any(|f| f == "mgLayout") && fields.iter().any(|f| f == "avatarColor"));
+        let drawn: Vec<String> = choices(|id| id == "clock").into_iter().map(|(field, ..)| field).collect();
+        assert!(!drawn.iter().any(|f| f == "mgLayout" || f == "avatarColor"), "{drawn:?}");
     }
 }

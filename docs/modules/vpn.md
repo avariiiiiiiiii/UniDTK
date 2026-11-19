@@ -18,6 +18,7 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 | :--- | :--- |
 | [modules/vpn/rust/vpn.rs](../../modules/vpn/rust/vpn.rs) | The module: subscription, configuration, connect, disconnect, status, shutdown (2,240 lines). |
 | [modules/vpn/helper/main.rs](../../modules/vpn/helper/main.rs) | `vpn-helper.exe`: starts and stops `sing-box.exe` with the rights of its scheduled task (207 lines). |
+| [modules/vpn/native/lib.rs](../../modules/vpn/native/lib.rs) | The native half: the VPN panel on the Rune desk, in its own card and compact in a host's nesting zone ([shell.widget-contract](../reference/shell.md#r-shell.widget-contract)). |
 | [scheduler-tasks/UniDTKSingboxTask.xml](../../scheduler-tasks/UniDTKSingboxTask.xml) | Task `UniDTKSingbox`, which runs `vpn-helper.exe start`. |
 | [scheduler-tasks/UniDTKVpnStopTask.xml](../../scheduler-tasks/UniDTKVpnStopTask.xml) | Task `UniDTKVpnStop`, which runs `vpn-helper.exe stop`. |
 | [core/api/src/paths.rs](../../core/api/src/paths.rs) | Where binaries and state files live. |

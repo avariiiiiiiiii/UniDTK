@@ -12,6 +12,11 @@ pub const EXPO_OUT: Easing = Easing::cubic(0.30, 0.95, 0.35, 1.00);
 pub const SURFACE_EXIT: Easing = Easing::cubic(0.38, 0.05, 0.45, 1.00);
 pub const SMOOTH: Easing = Easing::cubic(0.25, 0.1, 0.25, 1.0);
 pub const CONTENT: Easing = Easing::cubic(0.25, 1.0, 0.5, 1.0);
+/// CSS's keyword `ease`, which `styles.css` names in plain transitions (the same curve as
+/// `smooth`).
+pub const EASE: Easing = SMOOTH;
+/// `--ease-spring`: the overshoot of the header's chevron.
+pub const SPRING: Easing = Easing::cubic(0.34, 1.56, 0.64, 1.0);
 
 /// `DURATIONS` of `motion.js`, in milliseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +119,15 @@ impl Motion {
 
     pub fn tween(&self, seconds: f32, easing: Easing) -> Anim {
         if seconds <= 0.0 { Anim::INSTANT } else { Anim::new(Curve::tween(seconds, easing)) }
+    }
+
+    /// `transition` entering over `token` on `enter` and leaving over it on `exit`, as a CSS
+    /// transition or keyframe animation plays (`opacity var(--dur-transient) ease`); `None`
+    /// for `exit` is a node that goes at once (`[hidden]`). Rune's own presence springs are not
+    /// the page's timing.
+    pub fn presence(&self, transition: rune::Transition, token: Token, enter: Easing, exit: Option<Easing>) -> rune::Transition {
+        let seconds = self.duration(token);
+        transition.curves(self.tween(seconds, enter), exit.map_or(Anim::INSTANT, |exit| self.tween(seconds, exit)))
     }
 }
 

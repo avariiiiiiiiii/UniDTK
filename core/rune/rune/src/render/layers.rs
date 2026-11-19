@@ -180,6 +180,9 @@ pub(super) struct Target {
 pub struct LayerStats {
     pub targets: usize,
     pub bytes: u64,
+    /// Targets kept for the next layer of their size (`Layers::spare`), not in `bytes`.
+    pub spare: usize,
+    pub spare_bytes: u64,
     pub extra_passes: usize,
     pub allocations: u64,
 }
@@ -223,6 +226,14 @@ impl Renderer {
         }
     }
 
+    /// Lets go of the spare targets (`Layers::spare`) once the window rests: they serve the
+    /// next layer of their size while something moves, and at rest they would hold up to
+    /// `SPARE_BYTES` of video memory, which on a GPU that shares system memory is the
+    /// process's own.
+    pub(crate) fn release_spare_layers(&mut self) {
+        self.layers.spare.clear();
+    }
+
     pub fn layer_stats(&self) -> LayerStats {
         let mut stats = LayerStats { allocations: self.layers.allocations, ..Default::default() };
         for (l, t) in self.layers.plan.iter().zip(&self.layers.targets) {
@@ -236,6 +247,10 @@ impl Renderer {
         for t in &self.layers.retained {
             stats.targets += 1;
             stats.bytes += Self::target_bytes(t);
+        }
+        for t in &self.layers.spare {
+            stats.spare += 1;
+            stats.spare_bytes += Self::target_bytes(t);
         }
         stats
     }

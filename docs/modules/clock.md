@@ -20,7 +20,9 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 | [modules/clock/ui/gooey.js](../../modules/clock/ui/gooey.js) | The gooey face: glyph paths, four digit slots, date line (70 lines). |
 | [modules/clock/ui/clock.css](../../modules/clock/ui/clock.css) | Styles for the classic faces, the switcher, and the dashboard (293 lines). |
 | [modules/clock/ui/gooey.css](../../modules/clock/ui/gooey.css) | Styles for the gooey face, scoped to its container (52 lines). |
-| [modules/clock/ui/metadata.json](../../modules/clock/ui/metadata.json) | Name, `specialType`, tint slot, and `container` flag. |
+| [modules/clock/ui/metadata.json](../../modules/clock/ui/metadata.json) | Name, `specialType`, tint slot, `container` flag, and `"chrome": "bare"` for the native desk. |
+| [modules/clock/native/lib.rs](../../modules/clock/native/lib.rs) | The native half: the widget on the Rune desk, its dashboard layout, the flight of its face, the face switcher of arrange mode ([shell.widget-contract](../reference/shell.md#r-shell.widget-contract)). |
+| [modules/clock/native/faces.rs](../../modules/clock/native/faces.rs) and [dashboard.rs](../../modules/clock/native/dashboard.rs) | The thirteen faces as `clock.css` and `gooey.css` style them, and the month and the connection badge. |
 | [modules/clock/tests/runtime.js](../../modules/clock/tests/runtime.js) and [runtime.ps1](../../modules/clock/tests/runtime.ps1) | Live checks of the expand and collapse animation in the installed app. |
 | [modules/clock/tests/ui.js](../../modules/clock/tests/ui.js) and [ui.ps1](../../modules/clock/tests/ui.ps1) | The same checks, run against a fixture built from the core's `unidtk-core.js`. |
 

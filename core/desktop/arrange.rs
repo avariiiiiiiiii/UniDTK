@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 
 use rune::el::{col, el, row, text, El};
-use rune::{Color, Tx};
 use serde_json::{json, Value};
 
 use crate::desk::Placement;
@@ -45,6 +44,8 @@ pub struct Arrange {
     pub add_popover: bool,
     /// A card is being dragged: the island steps aside.
     pub dragging: bool,
+    /// The card being dragged (`.widget-card.dragging`).
+    pub dragged: Option<String>,
     /// The geometry a drag started from.
     pub grab: Option<Placement>,
 }
@@ -58,10 +59,11 @@ impl Arrange {
             created_folders: Vec::new(),
             side_right,
             folder_form: false,
-            folder_name: rune::TextEdit::new(""),
+            folder_name: rune::TextEdit::new("").max_chars(40),
             folder_icon: "folder",
             add_popover: false,
             dragging: false,
+            dragged: None,
             grab: None,
         }
     }
@@ -158,8 +160,15 @@ pub fn alt_down() -> bool {
 
 /// `.resize-handle`: 4 px strips 2 px inside the card's sides (10 px short of the corners),
 /// and a 12 px corner; the corner and the top and bottom strips only on special cards.
+/// They fade in on the transient token as arrange mode starts, and turn 20 % on hover.
 pub fn handles(look: &crate::controls::Look, at: Placement, special: bool) -> Vec<(Edge, El)> {
-    let strip = |x: f32, y: f32, w: f32, h: f32| el().absolute(x, y).size(w, h).fill(look.elev.alpha(0.05)).hover(look.elev.alpha(0.15));
+    use crate::motion::{Token, EASE};
+    // `transition: opacity var(--dur-transient) ease, background var(--dur-transient) ease`.
+    let fade = look.motion.presence(rune::Transition::opacity(), Token::Transient, EASE, Some(EASE));
+    let ease = look.motion.tween(look.motion.duration(Token::Transient), EASE);
+    let strip = |x: f32, y: f32, w: f32, h: f32| {
+        el().absolute(x, y).size(w, h).fill(look.elev.alpha(0.05)).hover_fill(look.elev.alpha(0.2)).hover_motion(ease, ease).transition(fade)
+    };
     let mut out = vec![
         (Edge::Left, strip(2.0, 10.0, 4.0, (at.h - 20.0).max(0.0))),
         (Edge::Right, strip(at.w - 6.0, 10.0, 4.0, (at.h - 20.0).max(0.0))),
@@ -167,7 +176,7 @@ pub fn handles(look: &crate::controls::Look, at: Placement, special: bool) -> Ve
     if special {
         out.push((Edge::Top, strip(10.0, 2.0, (at.w - 20.0).max(0.0), 4.0)));
         out.push((Edge::Bottom, strip(10.0, at.h - 6.0, (at.w - 20.0).max(0.0), 4.0)));
-        out.push((Edge::Corner, el().absolute(at.w - 14.0, at.h - 14.0).size(12.0, 12.0).radius(2.0).fill(look.elev.alpha(0.3))));
+        out.push((Edge::Corner, el().absolute(at.w - 14.0, at.h - 14.0).size(12.0, 12.0).radius(2.0).fill(look.elev.alpha(0.3)).transition(fade)));
     }
     out
 }
@@ -177,17 +186,19 @@ pub fn remove_button(look: &crate::controls::Look, at: Placement, key: String) -
     let cross = [([18.0, 6.0], [6.0, 18.0]), ([6.0, 6.0], [18.0, 18.0])];
     col().key(key).label("Убрать виджет").absolute(at.w - 27.0, 5.0).size(22.0, 22.0).radius(11.0)
         .fill(look.scrim.alpha(0.48)).border(1.0, look.elev.alpha(0.18))
-        .hover(look.status_error.alpha(0.72))
+        .hover_fill(look.status_error.alpha(0.72)).hover_border(look.elev.alpha(0.32))
         .items_center().justify_center()
         .child(el().size(12.0, 12.0).shape(crate::controls::glyph(&cross, look.fg.alpha(0.82), 2.4)))
 }
 
-/// The dots of the arrange grid: one every 32 px in 22 % ink.
-pub fn grid(look: &crate::controls::Look, canvas: (f32, f32)) -> El {
+/// The dots of the arrange grid: one every 32 px in 22 % ink, the canvas's background
+/// (`body.edit-mode .widgets-canvas`), so they start at its corner.
+pub fn grid(look: &crate::controls::Look, area: Placement) -> El {
     let mut shape = rune::Shape::new();
-    let mut y = 16.0;
+    let canvas = (area.x + area.w, area.y + area.h);
+    let mut y = area.y + 16.0;
     while y < canvas.1 {
-        let mut x = 16.0;
+        let mut x = area.x + 16.0;
         while x < canvas.0 {
             shape = shape.fill(
                 (0..6).map(|i| {
@@ -207,13 +218,20 @@ pub fn grid(look: &crate::controls::Look, canvas: (f32, f32)) -> El {
 /// the middle so the folder form grows upward; it slides 24 px in on `expoOut`.
 pub fn bar_frame(look: &crate::controls::Look, theme: &crate::theme::Theme, canvas: (f32, f32), side_right: bool, dragging: bool, children: Vec<El>) -> El {
     let motion = theme.motion();
-    let mut bar = col().key("hit:arrange-bar").label("Расстановка виджетов")
+    let bar = col().key("hit:arrange-bar").label("Расстановка виджетов").on_press(|_: &mut crate::Host| {})
         .w(188.0).padding(14.0).gap(8.0).radius(16.0)
-        .fill(look.surface.alpha(0.96)).border(1.0, look.elev.alpha(0.14))
-        .shadow(18.0, 50.0, Color::BLACK.alpha(0.5))
+        .fill(look.surface.alpha(0.96)).border(1.0, look.elev.alpha(0.14)).border_layout();
+    // `box-shadow: var(--theme-surface-shadow)`, as the menu panel wears it.
+    let mut bar = crate::menu::surface_shadow(bar, theme, look)
         .opacity(if dragging { 0.3 } else { 1.0 })
         .opacity_motion(motion.tween(motion.duration(crate::motion::Token::Hover), crate::motion::STANDARD))
-        .transition(rune::Transition::offset(if side_right { 24.0 } else { -24.0 }, 0.0).combined(rune::Transition::opacity()));
+        // `arrange-island-in`: 24 px in on `expoOut` over the motion token; `[hidden]` goes at once.
+        .transition(motion.presence(
+            rune::Transition::offset(if side_right { 24.0 } else { -24.0 }, 0.0).combined(rune::Transition::opacity()),
+            crate::motion::Token::Motion,
+            crate::motion::EXPO_OUT,
+            None,
+        ));
     for child in children {
         bar = bar.child(child);
     }

@@ -336,6 +336,30 @@ fn apply_op(root: &mut Map<String, Value>, op: &Map<String, Value>) -> Result<()
             }
             entry.extend(patch.fields);
         }
+        "settings" => {
+            // A widget's own settings stored beside its geometry (a Telegram dock's
+            // `expanded`, a player's `aiDj`): named keys merged in, never a geometry field.
+            let id = widget_id(op.get("id"), kind)?;
+            let mut fields = op.clone();
+            fields.remove("op");
+            fields.remove("id");
+            if fields.is_empty() {
+                return Err("settings needs at least one field".into());
+            }
+            for key in fields.keys() {
+                if matches!(key.as_str(), "x" | "y" | "w" | "h" | "ax" | "ay" | "anchor") {
+                    return Err(format!("'{key}' is a position field: use the position operation"));
+                }
+                if key.is_empty() || key.len() > 32 || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Err(format!("invalid setting name '{key}'"));
+                }
+            }
+            bounded(&Value::Object(fields.clone()), "settings")?;
+            let positions = object_entry(root, "positions", json!({}))?.as_object_mut().expect("checked");
+            let entry = positions.entry(id.clone()).or_insert_with(|| json!({}));
+            let entry = entry.as_object_mut().ok_or_else(|| format!("the stored position of '{id}' is not an object"))?;
+            entry.extend(fields);
+        }
         "forget" => {
             let id = widget_id(op.get("id"), kind)?;
             if let Some(positions) = root.get_mut("positions").and_then(Value::as_object_mut) {
@@ -646,6 +670,21 @@ mod tests {
         let mut fast = now_ms() + 10_000;
         let (x, y) = (bump(&mut fast), bump(&mut fast));
         assert_eq!(y, x + 1);
+    }
+
+    #[test]
+    fn a_widgets_settings_merge_beside_its_geometry_and_never_replace_it() {
+        let merged = apply_ops(Some(json!({ "positions": { "telegram": { "x": 1, "w": 70 } } })), &ops(json!([
+            { "op": "settings", "id": "telegram", "expanded": true, "showSettings": false },
+        ]))).unwrap();
+        assert_eq!(merged["positions"]["telegram"], json!({ "x": 1, "w": 70, "expanded": true, "showSettings": false }));
+        for refused in [
+            json!([{ "op": "settings", "id": "telegram", "x": 5 }]),
+            json!([{ "op": "settings", "id": "telegram" }]),
+            json!([{ "op": "settings", "id": "telegram", "bad key": 1 }]),
+        ] {
+            assert!(apply_ops(Some(json!({ "positions": {} })), &ops(refused.clone())).is_err(), "{refused}");
+        }
     }
 
     #[test]

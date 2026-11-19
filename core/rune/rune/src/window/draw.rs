@@ -334,6 +334,9 @@ impl<S: 'static> Host<S> {
         #[cfg(feature = "frame-profile")]
         let fp_encoded = fp_start.map(|_| crate::frame::live_log::Stamp::now());
         renderer.submit(&gpu.queue, enc);
+        // The last frame of a motion: nothing will reuse a spare layer target soon. `wgpu`
+        // keeps a texture the submitted frame reads until the GPU is done with it.
+        if !animating { renderer.release_spare_layers(); }
         #[cfg(feature = "frame-profile")]
         let fp_submitted = fp_start.map(|_| crate::frame::live_log::Stamp::now());
         crate::marks::mark_once(&FIRST_ENCODED, "frame.first.encoded");

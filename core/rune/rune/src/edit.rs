@@ -65,6 +65,9 @@ pub struct TextEdit {
     allowed_blocks: Option<u8>,
     /// Whether a user has edited the value since `replace_text`.
     edited_tag: EditedTag,
+    /// HTML's `maxlength`: an edit that would make the text longer than this many characters
+    /// keeps only what fits; text set in code is not cut.
+    max_chars: Option<usize>,
 }
 
 impl std::fmt::Debug for TextEdit {
@@ -161,6 +164,7 @@ impl TextEdit {
             line_mode: LineMode::Default,
             rich: false,
             allowed_marks: None,
+            max_chars: None,
             allowed_blocks: None,
             edited_tag: EditedTag::default(),
         }
@@ -620,6 +624,12 @@ impl TextEdit {
         self.replace(self.range(), s, EditKind::Other);
     }
 
+    /// Limits what a person can type or paste to `n` characters, as HTML's `maxlength` does.
+    pub fn max_chars(mut self, n: usize) -> TextEdit {
+        self.max_chars = Some(n);
+        self
+    }
+
     /// Line index (`0..line_count`) containing `byte`.
     pub fn line_of_byte(&self, byte: usize) -> usize {
         let clamped = byte.min(self.text.len());
@@ -840,6 +850,17 @@ impl TextEdit {
         if self.is_hidden_multiline() && self.is_pristine() {
             (a, b) = (0, self.text.len());
         }
+        // `maxlength`: what is inserted is cut to the room left (a whole character at a time).
+        let limited;
+        let s = match self.max_chars {
+            Some(max) => {
+                let kept = self.text[..a].chars().count() + self.text[b..].chars().count();
+                let room = max.saturating_sub(kept);
+                limited = s.chars().take(room).collect::<String>();
+                limited.as_str()
+            }
+            None => s,
+        };
         if self.secure {
             let mut next = String::with_capacity(self.text.len() - (b - a) + s.len());
             next.push_str(&self.text[..a]);

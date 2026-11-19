@@ -20,6 +20,7 @@ impl Default for ElementInfo {
             label: None,
             text: None,
             rect: [0.0; 4],
+            shadow_extent: [0.0; 4],
             target: [0.0; 4],
             opacity: 1.0,
             scale: 1.0,

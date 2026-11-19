@@ -1,0 +1,18 @@
+[package]
+name = "unidtk-native-clock"
+version = "0.1.0"
+edition = "2021"
+description = "The clock's native half: its widget on the Rune desk"
+
+# A module's native half depends on the shell's widget contract (`unidtk-shell`) and on its
+# own backend crate only, never on another module (r[modules.contract-only]).
+
+[lib]
+name = "unidtk_native_clock"
+path = "lib.rs"
+
+[dependencies]
+unidtk-shell = { path = "../../../core/desktop" }
+rune = { path = "../../../core/rune/rune" }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

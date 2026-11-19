@@ -379,6 +379,7 @@ pub use video::PlayerState;
 pub use video::Video;
 pub use window::InjectedKey;
 pub use window::WindowHandle;
+pub use window::GpuMemory;
 pub use window::spec as windows;
 pub use windows::AnyWindowSpec;
 pub use windows::ConfiguredWindowOptions;

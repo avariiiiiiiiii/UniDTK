@@ -19,7 +19,7 @@ impl Scene {
         let anim = anim.into();
         if self.store.reduced_motion() {
             self.remove(from);
-            let entrance = Anim::from(self.nodes[b].transition.springs.enter);
+            let entrance = self.nodes[b].transition.enter_anim();
             let acts = self.nodes[b].phase_step(PhaseEvent::FadeIn { entrance });
             self.apply(b, acts);
             return;

@@ -46,7 +46,7 @@ fn create_folder<S: MenuHost>(state: &mut S) {
     store(state, "folder-create", record, move |state: &mut S, _tx: &mut Tx| {
         let menu = state.menu();
         menu.creating_folder = false;
-        menu.new_folder_name = TextEdit::new("");
+        menu.new_folder_name = TextEdit::new("").max_chars(40);
         state.toasts().show(format!("Папка «{name}» появилась на столе"), false, None);
     });
 }
@@ -67,7 +67,7 @@ fn delete_folder<S: MenuHost>(state: &mut S, id: &str, tx: &mut Tx) {
             ops.push(json!({ "op": "remove_instance", "id": instance["instanceId"] }));
         }
         state.apply(ops, tx);
-        state.menu().sheet = None;
+        menu::close_sheet(state, tx);
         crate::menu_desk::load_folders(state);
         menu::undo_toast(state, format!("Папка «{name}» удалена"), Box::new(move |state: &mut S, _tx: &mut Tx| {
             let (position, instances, id) = (position.clone(), instances.clone(), id.clone());
@@ -157,22 +157,25 @@ pub fn section<S: MenuHost>(state: &S, look: &Look) -> El {
     section = section.child(row().py(8.0).child(controls::button(look, "hit:folder-new".into(), "+ Папка", ButtonKind::Normal, |state: &mut S, _tx: &mut Tx| {
         let menu = state.menu();
         menu.creating_folder = !menu.creating_folder;
+        menu.new_folder_icon = "folder";
+        // `nameInput.focus()` as the form opens.
+        menu.new_folder_name.focused = menu.creating_folder;
     })));
     if creating {
         let name_field = text_input(&state.menu_ref().new_folder_name, look.font(13.0, 400.0))
-            .single_line().key("hit:folder-new-name")
+            .single_line().key("hit:folder-new-name").label("Название папки")
             .placeholder("Название, например «Игры»", look.fg.alpha(0.55))
             .on_edit(|state: &mut S| &mut state.menu().new_folder_name)
             .on_submit(|state: &mut S, _tx: &mut Tx| create_folder(state));
         let chosen = state.menu_ref().new_folder_icon;
         let mut icons = row().gap(6.0).flex_wrap();
-        for (key, _, svg) in FOLDER_ICONS {
+        for (key, label, svg) in FOLDER_ICONS {
             let icon = match state.svg(svg, 22.0, look.fg) {
                 Some(pixels) => el().size(22.0, 22.0).pixels(&pixels),
                 None => el().size(22.0, 22.0),
             };
             icons = icons.child(
-                col().key(format!("hit:folder-icon:{key}")).size(36.0, 36.0).radius(10.0).items_center().justify_center()
+                col().key(format!("hit:folder-icon:{key}")).label(label).size(36.0, 36.0).radius(10.0).items_center().justify_center()
                     .border(1.0, if key == chosen { look.accent } else { look.elev.alpha(0.14) })
                     .fill(if key == chosen { look.elev.alpha(0.14) } else { Color::TRANSPARENT })
                     .child(icon)
@@ -181,7 +184,7 @@ pub fn section<S: MenuHost>(state: &S, look: &Look) -> El {
         }
         section = section.child(
             col().gap(8.0).py(8.0)
-                .child(el().w_full().min_h(32.0).px(10.0).py(6.0).radius(9.0).border(1.0, look.elev.alpha(0.16)).fill(look.well.alpha(0.25)).child(name_field))
+                .child(el().w_full().min_h(32.0).px(10.0).py(6.0).radius(9.0).border(1.0, look.elev.alpha(0.16)).border_layout().fill(look.well.alpha(0.25)).child(name_field))
                 .child(icons)
                 .child(
                     row().gap(8.0)
@@ -214,6 +217,7 @@ pub fn section<S: MenuHost>(state: &S, look: &Look) -> El {
                     None => el().size(20.0, 20.0),
                 };
                 let (open_id, toggle_id) = (id.clone(), id.clone());
+                let rect_key = format!("hit:folder-open:{id}");
                 list = list.child(
                     row().key(format!("hit:folder-row:{id}")).w_full().min_h(44.0).px(8.0).py(6.0).gap(10.0).radius(12.0).items_center().hover(look.elev.alpha(0.07))
                         .child(col().size(28.0, 28.0).items_center().justify_center().child(icon))
@@ -222,13 +226,13 @@ pub fn section<S: MenuHost>(state: &S, look: &Look) -> El {
                                 .child(text(name).font(look.font(13.0, 400.0)).color(look.fg).single_line().truncate())
                                 .child(text(shortcut_count(count)).font(look.font(12.0, 400.0)).color(look.fg.alpha(0.72)).single_line()),
                         )
-                        .child(controls::button(look, format!("hit:folder-open:{id}"), "Настроить…", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
-                            state.menu().sheet = Some(Sheet::Folder(open_id.clone()));
-                        }))
+                        .child(controls::button(look, format!("hit:folder-open:{id}"), "Настроить…", ButtonKind::Normal, move |state: &mut S, tx: &mut Tx| {
+                            menu::open_sheet(state, Sheet::Folder(open_id.clone()), &format!("hit:folder-open:{open_id}"), tx);
+                        }).on_layout_tx(move |state: &mut S, rect: [f32; 4], tx: &mut Tx| menu::remember_rect(state, &rect_key, rect, tx)))
                         .child(controls::switch(look, format!("hit:folder-shown:{id}"), shown, move |state: &mut S, tx: &mut Tx| {
                             let op = if shown { "hide" } else { "show" };
                             state.apply(vec![json!({ "op": op, "id": toggle_id })], tx);
-                        })),
+                        }).help("Показывать на столе")),
                 );
             }
             section.child(list)
@@ -238,7 +242,7 @@ pub fn section<S: MenuHost>(state: &S, look: &Look) -> El {
 
 pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width: f32, height: f32) -> El {
     let Some(record) = folder(state, id) else {
-        return menu::sheet_frame::<S>(look, theme, "Папка", width, height, col());
+        return menu::sheet_frame::<S>(state, look, theme, "Папка", width, height, col());
     };
     let id = id.to_string();
     let items = record["items"].as_array().cloned().unwrap_or_default();
@@ -252,8 +256,8 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
     let shown_name = state.menu_ref().folder_names.get(&id).cloned().unwrap_or_else(|| TextEdit::new(name.clone()));
     let first_name = name.clone();
     let name_field = text_input(&shown_name, look.font(13.0, 600.0))
-        .single_line().key(format!("hit:folder-name:{id}"))
-        .on_edit(move |state: &mut S| state.menu().folder_names.entry(edit_id.clone()).or_insert_with(|| TextEdit::new(first_name.clone())))
+        .single_line().key(format!("hit:folder-name:{id}")).label("Название папки")
+        .on_edit(move |state: &mut S| state.menu().folder_names.entry(edit_id.clone()).or_insert_with(|| TextEdit::new(first_name.clone()).max_chars(40)))
         .on_submit(move |state: &mut S, _tx: &mut Tx| {
             // An empty name puts the old one back.
             let Some(mut record) = folder(state, &rename_id) else { return };
@@ -265,16 +269,18 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
             }
             record["name"] = json!(typed);
             let id = rename_id.clone();
-            store(state, &format!("folder-rename:{id}"), record, |_, _| {});
+            menu::run_once_as(state, &format!("folder-rename:{id}"), "save_folder", json!({ "folder": record }), "Не переименовано", |state: &mut S, _, _tx: &mut Tx| {
+                crate::menu_desk::load_folders(state);
+            });
         });
     let trash = [([3.0, 6.0], [21.0, 6.0]), ([19.0, 6.0], [19.0, 20.0]), ([5.0, 6.0], [5.0, 20.0]), ([5.0, 20.0], [19.0, 20.0]), ([8.0, 6.0], [8.0, 4.0]), ([16.0, 6.0], [16.0, 4.0]), ([8.0, 3.0], [16.0, 3.0])];
     let head = row().w_full().gap(8.0).items_center().mb(4.0)
         .child(col().w(32.0).items_center().child(head_icon))
-        .child(el().grow(1.0).min_h(32.0).px(10.0).py(6.0).radius(9.0).border(1.0, look.elev.alpha(0.16)).fill(look.well.alpha(0.25)).child(name_field))
+        .child(el().grow(1.0).min_h(32.0).px(10.0).py(6.0).radius(9.0).border(1.0, look.elev.alpha(0.16)).border_layout().fill(look.well.alpha(0.25)).child(name_field))
         .child(text(shortcut_count(items.len())).font(look.font(12.0, 400.0)).color(look.fg.alpha(0.72)).single_line())
-        .child(controls::icon_button(look, format!("hit:folder-delete:{id}"), controls::glyph(&trash, look.fg.alpha(0.75), 2.0), move |state: &mut S, tx: &mut Tx| delete_folder(state, &delete_id, tx)));
+        .child(controls::icon_button(look, format!("hit:folder-delete:{id}"), &format!("Удалить папку «{name}»"), &trash, 15.0, move |state: &mut S, tx: &mut Tx| delete_folder(state, &delete_id, tx)));
 
-    let mut card = col().w_full().my(10.0).padding(8.0).radius(16.0).fill(look.elev.alpha(0.05)).border(1.0, look.elev.alpha(0.08)).child(head);
+    let mut card = col().w_full().my(10.0).padding(8.0).radius(16.0).fill(look.elev.alpha(0.05)).border(1.0, look.elev.alpha(0.08)).border_layout().child(head);
     if items.is_empty() {
         card = card.child(controls::note(look, "Пусто. Добавьте программу из Пуска, файл или папку."));
     } else {
@@ -303,8 +309,8 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
             let item_name = item["name"].as_str().unwrap_or_default().to_string();
             let shown_item = state.menu_ref().item_names.get(&item_id).cloned().unwrap_or_else(|| TextEdit::new(item_name.clone()));
             let input = text_input(&shown_item, look.font(13.0, 400.0))
-                .single_line().key(format!("hit:item-name:{item_id}"))
-                .on_edit(move |state: &mut S| state.menu().item_names.entry(edit_item.clone()).or_insert_with(|| TextEdit::new(item_name.clone())))
+                .single_line().key(format!("hit:item-name:{item_id}")).label("Название ярлыка")
+                .on_edit(move |state: &mut S| state.menu().item_names.entry(edit_item.clone()).or_insert_with(|| TextEdit::new(item_name.clone()).max_chars(60)))
                 .on_submit(move |state: &mut S, _tx: &mut Tx| {
                     let typed = state.menu().item_names.get(&submit_item).map(|e| e.text.trim().to_string()).unwrap_or_default();
                     if typed.is_empty() {
@@ -316,7 +322,7 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
                 .child(col().size(28.0, 28.0).items_center().justify_center().opacity(if gone { 0.45 } else { 1.0 }).child(icon))
                 .child({
                     let mut text_col = col().grow(1.0).min_w(0.0).gap(2.0)
-                        .child(el().w_full().min_h(28.0).px(6.0).py(3.0).radius(9.0).hover(look.elev.alpha(0.0)).child(input));
+                        .child(el().w_full().min_h(28.0).px(6.0).py(3.0).radius(9.0).border(1.0, Color::TRANSPARENT).border_layout().hover_border(look.elev.alpha(0.16)).hover_motion(look.motion.tween(look.motion.duration(crate::motion::Token::Hover), crate::motion::STANDARD), look.motion.tween(look.motion.duration(crate::motion::Token::Hover), crate::motion::STANDARD)).child(input));
                     if gone {
                         text_col = text_col.child(text("Недоступен — файл перемещён или удалён").font(look.font(12.0, 400.0)).color(look.status_warn).single_line());
                     }
@@ -324,9 +330,9 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
                 });
             if gone {
                 let (relink_folder, relink_item, is_folder) = (id.clone(), item_id.clone(), item["kind"] == "folder");
-                line = line.child(controls::button(look, format!("hit:item-relink:{item_id}"), "Найти…", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
+                line = line.child(controls::small_button(look, format!("hit:item-relink:{item_id}"), "Найти…", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
                     let (folder_id, item_id) = (relink_folder.clone(), relink_item.clone());
-                    menu::run_once(state, &format!("relink:{item_id}"), "pick_shortcut_target", json!({ "folder": is_folder }), move |state: &mut S, draft, _tx: &mut Tx| {
+                    menu::run_once(state, &format!("item-relink:{item_id}"), "pick_shortcut_target", json!({ "folder": is_folder }), move |state: &mut S, draft, _tx: &mut Tx| {
                         if draft.is_null() {
                             return;
                         }
@@ -339,7 +345,7 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
                 }));
             }
             let (remove_folder, remove_item_id) = (id.clone(), item_id.clone());
-            line = line.child(controls::icon_button(look, format!("hit:item-remove:{item_id}"), controls::glyph(&cross, look.fg.alpha(0.75), 2.0), move |state: &mut S, _tx: &mut Tx| {
+            line = line.child(controls::icon_button(look, format!("hit:item-remove:{item_id}"), &format!("Убрать «{}»", item["name"].as_str().unwrap_or_default()), &cross, 14.0, move |state: &mut S, _tx: &mut Tx| {
                 remove_item(state, &remove_folder, &remove_item_id);
             }));
             list = list.child(line);
@@ -351,14 +357,16 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
     let (start_id, file_id, dir_id, paste_id) = (id.clone(), id.clone(), id.clone(), id.clone());
     card = card.child(
         row().gap(8.0).mt(6.0).mb(2.0).flex_wrap()
-            .child(controls::button(look, "hit:from-start".into(), "Из Пуска", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
+            .child(controls::small_button(look, "hit:from-start".into(), "Из Пуска", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
                 let menu = state.menu();
                 menu.start_for = if menu.start_for.as_deref() == Some(start_id.as_str()) { None } else { Some(start_id.clone()) };
+                // `search.focus()` as the list unfolds.
+                menu.start_search.focused = menu.start_for.is_some();
                 if menu.start_for.is_some() && !matches!(menu.start_list, Loaded::Ready(_)) {
                     load_start(state);
                 }
             }))
-            .child(controls::button(look, "hit:pick-file".into(), "Файл…", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
+            .child(controls::small_button(look, "hit:pick-file".into(), "Файл…", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
                 let id = file_id.clone();
                 menu::run_once(state, "pick-file", "pick_shortcut_target", json!({ "folder": false }), move |state: &mut S, draft, _tx: &mut Tx| {
                     if !draft.is_null() {
@@ -366,7 +374,7 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
                     }
                 });
             }))
-            .child(controls::button(look, "hit:pick-folder".into(), "Папку…", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
+            .child(controls::small_button(look, "hit:pick-folder".into(), "Папку…", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| {
                 let id = dir_id.clone();
                 menu::run_once(state, "pick-folder", "pick_shortcut_target", json!({ "folder": true }), move |state: &mut S, draft, _tx: &mut Tx| {
                     if !draft.is_null() {
@@ -374,12 +382,12 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
                     }
                 });
             }))
-            .child(controls::button(look, "hit:paste".into(), "Вставить", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| paste(state, &paste_id))),
+            .child(controls::small_button(look, "hit:paste".into(), "Вставить", ButtonKind::Normal, move |state: &mut S, _tx: &mut Tx| paste(state, &paste_id)).help("То, что скопировано: файлы или ссылка")),
     );
     if picker_open {
         card = card.child(start_picker(state, look, &id));
     }
-    menu::sheet_frame::<S>(look, theme, "Папка", width, height, card)
+    menu::sheet_frame::<S>(state, look, theme, "Папка", width, height, card)
 }
 
 /// `clipboardDrafts`: copied files first, else a link or a path typed as text.
@@ -435,8 +443,8 @@ pub(crate) fn open_start_picker<S: MenuHost>(state: &mut S, id: &str, tx: &mut T
     } else {
         menu::show_view(state, crate::menu::View::Desk, tx);
     }
+    menu::open_sheet(state, Sheet::Folder(id.to_string()), &format!("hit:folder-open:{id}"), tx);
     let menu = state.menu();
-    menu.sheet = Some(Sheet::Folder(id.to_string()));
     menu.start_for = Some(id.to_string());
     if !matches!(state.menu_ref().start_list, Loaded::Ready(_)) {
         load_start(state);
@@ -456,11 +464,11 @@ fn load_start<S: MenuHost>(state: &mut S) {
 /// `bindStartPicker`: the Start menu's programs filtered by the search, at most 200 shown.
 fn start_picker<S: MenuHost>(state: &S, look: &Look, id: &str) -> El {
     let search = text_input(&state.menu_ref().start_search, look.font(13.0, 400.0))
-        .single_line().key("hit:start-search")
+        .single_line().key("hit:start-search").label("Поиск программы")
         .placeholder("Поиск программы", look.fg.alpha(0.55))
         .on_edit(|state: &mut S| &mut state.menu().start_search);
-    let mut picker = col().gap(6.0).mt(6.0)
-        .child(el().w_full().min_h(32.0).px(10.0).py(6.0).radius(9.0).border(1.0, look.elev.alpha(0.16)).fill(look.well.alpha(0.25)).child(search));
+    let picker = col().gap(6.0).mt(6.0)
+        .child(el().w_full().min_h(32.0).px(10.0).py(6.0).radius(9.0).border(1.0, look.elev.alpha(0.16)).border_layout().fill(look.well.alpha(0.25)).child(search));
     let note = |message: &str, error: bool| text(message.to_string()).font(look.font(13.0, 400.0)).color(if error { look.status_error } else { look.fg.alpha(0.78) }).wrap();
     match state.menu_ref().start_list.clone() {
         Loaded::Loading => picker.child(note("Загрузка…", false)),
@@ -475,7 +483,7 @@ fn start_picker<S: MenuHost>(state: &S, look: &Look, id: &str) -> El {
             if shown.is_empty() {
                 return picker.child(note("Ничего не нашлось", false));
             }
-            let mut list = col().gap(2.0).max_h(280.0).scroll(rune::ScrollSpec { stick_bottom: false });
+            let mut list = col().label("Программы из Пуска").gap(2.0).max_h(280.0).scroll(rune::ScrollSpec { stick_bottom: false });
             for (index, app) in shown.into_iter().enumerate() {
                 let target = app["target"].as_str().unwrap_or_default().to_string();
                 let icon = match state.shortcut_icon(&target) {

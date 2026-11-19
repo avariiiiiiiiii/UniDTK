@@ -30,8 +30,6 @@ pub trait MenuHost: Sized + 'static {
     fn theme_record(&self) -> Value;
     /// Shows `record` without storing it (a slider being dragged, `setLiveToken`).
     fn preview_theme(&mut self, record: Value);
-    /// Drops the preview: the stored theme shows again.
-    fn end_preview(&mut self);
     /// `desk_apply` with these operations; a failure is reported in a toast.
     fn apply(&mut self, ops: Vec<Value>, tx: &mut Tx);
     /// Any kernel command; `then` runs on the UI thread with the answer.
@@ -40,12 +38,19 @@ pub trait MenuHost: Sized + 'static {
     fn enter_arrange(&mut self, tx: &mut Tx);
     /// SVG markup as an image `size` points square, tinted where it says `currentColor`.
     fn svg(&self, markup: &str, size: f32, colour: Color) -> Option<rune::Pixels>;
+    /// The desk draws module `id` (its native half is registered): the menu offers only what
+    /// changes something on screen.
+    fn draws(&self, id: &str) -> bool;
+    /// The jelly grain the desk's cards wear, and the size it covers in points.
+    fn grain(&self) -> (&rune::Pixels, (f32, f32));
     /// The Windows icon of a shortcut target, once the kernel has sent it; asking for one
     /// the host does not have queues the request.
     fn shortcut_icon(&self, target: &str) -> Option<rune::Pixels>;
     /// The system colour dialog, on a worker; `then` runs on the UI thread with the choice.
     fn pick_color(&mut self, initial: [u8; 3], then: Box<dyn FnOnce(&mut Self, [u8; 3], &mut Tx) + Send>);
     fn canvas(&self) -> (f32, f32);
+    /// The widgets' canvas (`#widgets`), which records are relative to.
+    fn desk_size(&self) -> (f32, f32);
     fn arranging(&self) -> bool;
 }
 
@@ -85,7 +90,13 @@ pub struct Menu {
     /// the transition's own end here).
     pub closing_until: Option<std::time::Instant>,
     pub view: View,
+    /// The sheet open, or `None` while it folds back into its row.
     pub sheet: Option<Sheet>,
+    /// The sheet drawn: the open one, or the one folding, with its morph out of the row that
+    /// opened it (`openSurface({ origin })`, `r[shell.one-morph]`).
+    pub sheet_shown: Option<(Sheet, crate::surface::Morph)>,
+    /// Where each "Настроить…" row and the panel lie in the window, for the sheet's origin.
+    pub rects: std::collections::HashMap<String, [f32; 4]>,
     pub fine_open: bool,
     pub preset_name: TextEdit,
     /// `previousColors`: what "Перемешать цвета" replaced, for its undo.
@@ -107,6 +118,10 @@ pub struct Menu {
     pub vpn: crate::menu_vpn::VpnPane,
     /// The widget row the pointer is over: its card is highlighted on the desk.
     pub highlight: Option<String>,
+    /// The body is taller than the panel: it keeps room for the scrollbar
+    /// (`scrollbar-width: thin`, 11 px in Chromium), as the page's does. Set from the scroll
+    /// view's own report, so it shows from the frame after the content outgrows the panel.
+    pub overflow: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl Default for Menu {
@@ -117,15 +132,17 @@ impl Default for Menu {
             closing_until: None,
             view: View::Desk,
             sheet: None,
+            sheet_shown: None,
+            rects: std::collections::HashMap::new(),
             fine_open: false,
-            preset_name: TextEdit::new(""),
+            preset_name: TextEdit::new("").max_chars(32),
             previous_colors: None,
             busy: HashSet::new(),
             disabled_modules: Loaded::Loading,
             folders: Loaded::Loading,
             missing: HashSet::new(),
             creating_folder: false,
-            new_folder_name: TextEdit::new(""),
+            new_folder_name: TextEdit::new("").max_chars(40),
             new_folder_icon: "folder",
             start_for: None,
             start_list: Loaded::Loading,
@@ -134,6 +151,7 @@ impl Default for Menu {
             item_names: Default::default(),
             vpn: Default::default(),
             highlight: None,
+            overflow: Default::default(),
         }
     }
 }
@@ -153,20 +171,26 @@ pub fn toggle<S: MenuHost>(state: &mut S, tx: &mut Tx) {
     menu.open = true;
     menu.closing_until = None;
     show_view(state, view, tx);
+    // `panel.querySelector(#tab-…).focus()`.
+    tx.focus(format!("hit:tab:{}", if view == View::Look { "look" } else { "desk" }), false);
 }
 
 /// `closeMenu`: slides out, then leaves the tree.
-pub fn close<S: MenuHost>(state: &mut S, _tx: &mut Tx) {
+pub fn close<S: MenuHost>(state: &mut S, tx: &mut Tx) {
     if !state.menu_ref().open {
         return;
     }
-    let motion = state.layout().map(|layout| layout.theme.motion());
-    let duration = motion.map_or(0.3, |m| m.duration(Token::Motion));
+    // The theme shown, a draft being edited included: dragging the animation length changes
+    // the next close, not only the one after the slider is let go.
+    let duration = Theme::normalize(&state.theme_record()).motion().duration(Token::Motion);
     let menu = state.menu();
     menu.open = false;
+    // The sheet stays drawn and slides out with the panel (`settle` drops it).
     menu.sheet = None;
     menu.highlight = None;
     menu.closing_until = Some(std::time::Instant::now() + std::time::Duration::from_secs_f32(duration));
+    // `opener.focus()` (`restoreFocus`); in arrange mode the opener is gone and nothing happens.
+    tx.focus("hit:menu-button", false);
 }
 
 /// `handleMenuEscape`: an open sheet closes first, VPN steps back to "Стол", anything else
@@ -176,11 +200,13 @@ pub fn escape<S: MenuHost>(state: &mut S, tx: &mut Tx) -> bool {
         return false;
     }
     if state.menu_ref().sheet.is_some() {
-        state.menu().sheet = None;
+        close_sheet(state, tx);
     } else if state.menu_ref().view == View::Vpn {
         show_view(state, View::Desk, tx);
     } else {
         close(state, tx);
+        // From the keyboard, so the opener shows its ring (`:focus-visible`).
+        tx.focus("hit:menu-button", true);
     }
     true
 }
@@ -192,9 +218,69 @@ pub fn settle<S: MenuHost>(state: &mut S, now: std::time::Instant) -> Option<std
         let menu = state.menu();
         menu.shown = false;
         menu.closing_until = None;
+        // The sheet slid out with the panel.
+        menu.sheet_shown = None;
         return None;
     }
     Some(until)
+}
+
+/// Opens `sheet` grown out of the element keyed `origin` (its row's "Настроить…"), or out of
+/// the middle of the panel when that is not on screen. The sheet's first control takes focus
+/// (`onOpened`).
+pub fn open_sheet<S: MenuHost>(state: &mut S, sheet: Sheet, origin: &str, tx: &mut Tx) {
+    let theme = Theme::normalize(&state.theme_record());
+    let motion = theme.motion();
+    let menu = state.menu();
+    let now = std::time::Instant::now();
+    let panel = menu.rects.get("hit:menu").copied().unwrap_or([0.0, 0.0, 420.0, 600.0]);
+    let frame = crate::desk::Placement { x: 0.0, y: 0.0, w: panel[2], h: panel[3] };
+    let tile = match menu.rects.get(origin) {
+        Some(r) => crate::desk::Placement { x: r[0] - panel[0], y: r[1] - panel[1], w: r[2], h: r[3] },
+        None => crate::desk::Placement { x: panel[2] * 0.25, y: panel[3] * 0.25, w: panel[2] * 0.5, h: panel[3] * 0.5 },
+    };
+    let morph = match menu.sheet_shown.take() {
+        // The same sheet folding back turns round from where it is.
+        Some((shown, mut morph)) if shown == sheet => {
+            morph.reopen(now);
+            morph
+        }
+        _ => crate::surface::Morph::open("menu-sheet", &motion, frame, tile, 10.0, theme.radius_surface, now),
+    };
+    menu.sheet = Some(sheet.clone());
+    menu.sheet_shown = Some((sheet, morph));
+    tx.instant();
+    crate::surface::keep_frames(tx);
+    tx.focus("hit:menu-sheet", false);
+}
+
+/// Notes where `key` lies, for a sheet that grows out of it; nothing on screen changes.
+pub fn remember_rect<S: MenuHost>(state: &mut S, key: &str, rect: [f32; 4], tx: &mut Tx) {
+    state.menu().rects.insert(key.to_string(), rect);
+    tx.live_only();
+}
+
+/// Folds the sheet back into its row (`closeSurface`).
+pub fn close_sheet<S: MenuHost>(state: &mut S, tx: &mut Tx) {
+    let menu = state.menu();
+    menu.sheet = None;
+    if let Some((_, morph)) = menu.sheet_shown.as_mut() {
+        morph.close(std::time::Instant::now());
+    }
+    crate::surface::keep_frames(tx);
+}
+
+/// The poll's part for the sheet: true while its morph runs or has just ended, so the desk
+/// draws the next frame; a folded sheet leaves the tree.
+pub fn sheet_frame_due<S: MenuHost>(state: &mut S, now: std::time::Instant) -> bool {
+    let menu = state.menu();
+    let Some((_, morph)) = menu.sheet_shown.as_ref() else { return false };
+    let pose = morph.pose(now);
+    if pose.done && !morph.is_open() {
+        menu.sheet_shown = None;
+        return true;
+    }
+    !pose.done
 }
 
 /// `showView`: a pane reads what it shows from the kernel each time it is shown.
@@ -216,6 +302,18 @@ pub fn run_once<S: MenuHost>(
     args: Value,
     then: impl FnOnce(&mut S, Value, &mut Tx) + Send + 'static,
 ) {
+    run_once_as(state, key, cmd, args, "Не получилось", then);
+}
+
+/// `runOnce` whose error toast starts with `failed` ("Не переименовано", ...).
+pub fn run_once_as<S: MenuHost>(
+    state: &mut S,
+    key: &str,
+    cmd: &str,
+    args: Value,
+    failed: &'static str,
+    then: impl FnOnce(&mut S, Value, &mut Tx) + Send + 'static,
+) {
     if !state.menu().busy.insert(key.to_string()) {
         return;
     }
@@ -227,7 +325,7 @@ pub fn run_once<S: MenuHost>(
             state.menu().busy.remove(&key);
             match result {
                 Ok(value) => then(state, value, tx),
-                Err(error) => error_toast(state, &format!("Не получилось: {error}")),
+                Err(error) => error_toast(state, &format!("{failed}: {error}")),
             }
         }),
     );
@@ -241,54 +339,74 @@ pub fn undo_toast<S: MenuHost>(state: &mut S, message: String, undo: Action<S>) 
     state.toasts().undo(message, undo);
 }
 
-/// The panel's paint in each material (`.menu-container`, and the jelly panel recipe).
-fn panel_paint(panel: El, theme: &Theme, look: &Look) -> El {
+/// The panel's paint in each material (`.menu-container`, and the jelly panel recipe), `w` x
+/// `h` points: the sheen is `120% 95%` of the panel itself, and a jelly panel wears the grain
+/// under its content (`::before`).
+fn panel_paint<S: MenuHost>(state: &S, panel: El, theme: &Theme, look: &Look, (w, h): (f32, f32)) -> El {
     let hi = Color::WHITE;
     match theme.material {
         Material::Flat => {
-            let panel = panel.fill(look.surface.alpha(0.97)).border(1.0, look.elev.alpha(0.12));
-            // `--theme-surface-shadow`: the computed one when the theme has a glass shadow.
-            if theme.glass_shadow > 0.0 {
-                panel
-                    .box_shadow(Shadow { y: 1.0, color: look.elev.alpha(theme.glass_rim * 0.4), inset: true, ..Shadow::default() })
-                    .box_shadow(Shadow { y: 24.0, blur: 70.0, spread: -6.0, color: look.scrim.alpha(theme.glass_shadow * 0.65), ..Shadow::default() })
-                    .box_shadow(Shadow { y: 12.0, blur: 30.0, spread: -4.0, color: theme.bg_base.alpha(theme.glass_shadow * 0.35), ..Shadow::default() })
-            } else {
-                panel
-                    .box_shadow(Shadow { y: 28.0, blur: 90.0, color: Color::BLACK.alpha(0.8), ..Shadow::default() })
-                    .box_shadow(Shadow { y: 1.0, color: look.elev.alpha(0.08), inset: true, ..Shadow::default() })
+            let mut panel = panel.fill(look.surface.alpha(0.97)).border(1.0, look.elev.alpha(0.12)).border_layout();
+            if theme.glass_grain > 0.0 {
+                // Grain is Sea Glass's on the page; "Зерно" reaches the flat panel here.
+                let (grain, grain_size) = state.grain();
+                panel = panel.child(el().absolute(0.0, 0.0).size(w, h).clip_rounded(theme.radius_surface).child(el().size(grain_size.0, grain_size.1).pixels(grain)));
             }
+            surface_shadow(panel, theme, look)
         }
         Material::Jelly => {
             let tint = theme.tint("panel", "calm", "lilac");
             let offset = theme.shadow_offset;
+            let (grain, grain_size) = state.grain();
             panel
                 .fill(mix_oklch(tint, theme.surface_tint, hi))
-                .radial_gradient([0.18, 0.08], [1.2 * 420.0, 0.95 * 700.0], [(0.0, hi.alpha(theme.glass_sheen * 0.7)), (0.58, hi.alpha(0.0))])
-                .border(1.0, hi.alpha(0.75))
+                .radial_gradient([0.18, 0.08], [1.2 * w, 0.95 * h], [(0.0, hi.alpha(theme.glass_sheen * 0.7)), (0.58, hi.alpha(0.0))])
+                .child(el().absolute(0.0, 0.0).size(w, h).clip_rounded(theme.radius_surface).child(el().size(grain_size.0, grain_size.1).pixels(grain)))
+                .border(1.0, hi.alpha(0.75)).border_layout()
                 .box_shadow(Shadow { y: 1.5, color: hi.alpha(theme.glass_rim * 0.9), inset: true, ..Shadow::default() })
                 .box_shadow(Shadow { y: offset * 2.0, blur: offset * 5.0, color: scaled(tint, 0.4, 1.0, 0.02, theme.glass_shadow * 0.4), ..Shadow::default() })
         }
     }
 }
 
+/// `--theme-surface-shadow`: the computed one when the theme has a glass shadow, else the
+/// deep drop and the 8 % inner rim.
+pub fn surface_shadow(element: El, theme: &Theme, look: &Look) -> El {
+    if theme.glass_shadow > 0.0 {
+        element
+            .box_shadow(Shadow { y: 1.0, color: look.elev.alpha(theme.glass_rim * 0.4), inset: true, ..Shadow::default() })
+            .box_shadow(Shadow { y: 24.0, blur: 70.0, spread: -6.0, color: look.scrim.alpha(theme.glass_shadow * 0.65), ..Shadow::default() })
+            .box_shadow(Shadow { y: 12.0, blur: 30.0, spread: -4.0, color: theme.bg_base.alpha(theme.glass_shadow * 0.35), ..Shadow::default() })
+    } else {
+        element
+            .box_shadow(Shadow { y: 28.0, blur: 90.0, color: Color::BLACK.alpha(0.8), ..Shadow::default() })
+            .box_shadow(Shadow { y: 1.0, color: look.elev.alpha(0.08), inset: true, ..Shadow::default() })
+    }
+}
+
 /// The three-line button of the top bar (`#openMenu`, `.action-btn`): 36 px, radius 11, at
-/// 18 px from the top right; it lifts a pixel on hover. Hidden while arranging.
+/// 18 px from the top right. On hover (220 ms `ease`) its fill turns to 10 % elevated, its
+/// border to 18 %, its glyph from 45 % to 85 % ink, and it lifts a point; a press shrinks it
+/// to 92 %. Hidden while arranging.
 pub fn opener<S: MenuHost>(state: &S, theme: &Theme, canvas: (f32, f32)) -> Option<El> {
     if state.arranging() {
         return None;
     }
     let motion = theme.motion();
-    let ease = motion.tween(motion.duration(Token::Transient), STANDARD);
+    let ease = motion.tween(motion.duration(Token::Transient), crate::motion::EASE);
     let lines = [([3.0, 12.0], [21.0, 12.0]), ([3.0, 6.0], [21.0, 6.0]), ([3.0, 18.0], [21.0, 18.0])];
-    let ink = theme.fg.alpha(0.45);
     Some(
         col().key("hit:menu-button").label("Меню UniDTK")
             .absolute(canvas.0 - 18.0 - 36.0, 18.0).size(36.0, 36.0).radius(11.0)
             .fill(theme.bg_base.alpha(0.78)).border(1.0, theme.bg_elevated.alpha(0.08))
-            .hover(theme.bg_elevated.alpha(0.1)).hover_motion(ease, ease)
+            .hover_fill(theme.bg_elevated.alpha(0.1)).hover_border(theme.bg_elevated.alpha(0.18)).hover_lift(0.0, -1.0).hover_motion(ease, ease)
+            .press_scale(0.92)
             .items_center().justify_center()
-            .child(el().size(18.0, 18.0).shape(controls::glyph(&lines, ink, 2.0)))
+            .child(
+                el().size(18.0, 18.0)
+                    .child(el().absolute(0.0, 0.0).size(18.0, 18.0).shape(controls::glyph(&lines, theme.fg.alpha(0.45), 2.0)))
+                    .child(el().absolute(0.0, 0.0).size(18.0, 18.0).shape(controls::glyph(&lines, theme.fg.alpha(0.85), 2.0)).group_opacity(0.0, 1.0)),
+            )
             .on_press_tx(|state: &mut S, tx: &mut Tx| toggle(state, tx)),
     )
 }
@@ -300,7 +418,7 @@ pub fn panel<S: MenuHost>(state: &S, theme: &Theme, canvas: (f32, f32)) -> Optio
     if !state.menu_ref().shown {
         return None;
     }
-    let look = Look::panel(theme);
+    let look = Look { busy: std::rc::Rc::new(state.menu_ref().busy.clone()), ..Look::panel(theme) };
     let open = state.menu_ref().open;
     let width = (canvas.0 - 24.0).min(420.0);
     let motion = theme.motion();
@@ -311,7 +429,7 @@ pub fn panel<S: MenuHost>(state: &S, theme: &Theme, canvas: (f32, f32)) -> Optio
     let close_cross = [([18.0, 6.0], [6.0, 18.0]), ([6.0, 6.0], [18.0, 18.0])];
     let header = row().w_full().justify_between().items_center().pl(20.0).pr(16.0).pt(16.0).pb(8.0)
         .child(text("Настройки").font(look.font(17.0, 600.0)).color(look.fg).single_line())
-        .child(controls::icon_button(&look, "hit:menu-close".into(), controls::glyph(&close_cross, look.fg.alpha(0.75), 2.0), |state: &mut S, tx: &mut Tx| close(state, tx)));
+        .child(controls::icon_button(&look, "hit:menu-close".into(), "Закрыть (Esc)", &close_cross, 16.0, |state: &mut S, tx: &mut Tx| close(state, tx)));
     let tabs = (view != View::Vpn).then(|| {
         el().w_full().px(16.0).pb(8.0).child(controls::tabs(
             &look,
@@ -325,25 +443,38 @@ pub fn panel<S: MenuHost>(state: &S, theme: &Theme, canvas: (f32, f32)) -> Optio
         View::Look => crate::menu_look::pane(state, &look),
         View::Vpn => crate::menu_vpn::pane(state, &look),
     };
-    let body = col().key("menu-body").w_full().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).px(16.0).pt(4.0).pb(16.0).child(pane);
+    let overflow = state.menu_ref().overflow.clone();
+    let gutter = if overflow.get() { 11.0 } else { 0.0 };
+    let body = col().key("menu-body").w_full().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).pl(16.0).pr(16.0 + gutter).pt(4.0).pb(16.0)
+        .on_scroll_offset(move |at: rune::ScrollPos| overflow.set(at.max[1] > 0.5))
+        .child(pane);
     let quit = controls::button(&look, "hit:menu-quit".into(), "Выйти из UniDTK", ButtonKind::Quiet, |state: &mut S, _tx: &mut Tx| {
         run_once(state, "menu-quit", "quit_app", serde_json::json!({}), |_, _, _| {});
     });
     let footer = el().w_full().px(16.0).pt(10.0).pb(14.0).border_sides([1.0, 0.0, 0.0, 0.0], look.elev.alpha(0.1)).child(row().child(quit));
 
     let mut panel = col().key("hit:menu").label("Настройки")
+        .on_press(|_: &mut S| {})
+        .on_layout_tx(|state: &mut S, rect: [f32; 4], tx: &mut Tx| remember_rect(state, "hit:menu", rect, tx))
         .absolute(canvas.0 - 12.0 - width, 12.0).w(width).h(canvas.1 - 24.0)
         .radius(theme.radius_surface)
         .offset(if open { 0.0 } else { width + 24.0 }, 0.0).offset_motion(slide)
         .opacity(if open { 1.0 } else { 0.0 }).opacity_motion(fade)
         .child(header);
-    panel = panel_paint(panel, theme, &look);
+    panel = panel_paint(state, panel, theme, &look, (width, canvas.1 - 24.0));
     if let Some(tabs) = tabs {
         panel = panel.child(tabs);
     }
     panel = panel.child(body).child(footer);
-    if let Some(sheet) = state.menu_ref().sheet.clone() {
-        panel = panel.child(crate::menu_desk::sheet(state, &look, theme, &sheet, width, canvas.1 - 24.0));
+    if let Some((sheet, morph)) = state.menu_ref().sheet_shown.as_ref() {
+        // Laid out over the whole panel from the first frame; the clip grows out of the row.
+        let pose = morph.pose(std::time::Instant::now());
+        let window = pose.clip.window(morph.frame);
+        let height = canvas.1 - 24.0;
+        panel = panel.child(
+            el().absolute(window.x, window.y).size(window.w, window.h).clip_rounded(pose.clip.radius)
+                .child(el().absolute(-window.x, -window.y).size(width, height).child(crate::menu_desk::sheet(state, &look, theme, sheet, width, height))),
+        );
     }
     Some(panel)
 }
@@ -362,19 +493,16 @@ pub fn shortcut_count(n: usize) -> String {
 
 /// A sheet's frame (`.menu-sheet`): the panel's paint over the whole panel, a 15 px title and
 /// a close button, its body scrolling.
-pub fn sheet_frame<S: MenuHost>(look: &Look, theme: &Theme, title: &str, width: f32, height: f32, body: El) -> El {
+pub fn sheet_frame<S: MenuHost>(state: &S, look: &Look, theme: &Theme, title: &str, width: f32, height: f32, body: El) -> El {
     let close_cross = [([18.0, 6.0], [6.0, 18.0]), ([6.0, 6.0], [18.0, 18.0])];
     let frame = col().key("hit:menu-sheet").absolute(0.0, 0.0).w(width).h(height).radius(theme.radius_surface)
-        .transition(rune::Transition::opacity())
         .child(
             row().w_full().justify_between().items_center().pl(20.0).pr(16.0).pt(18.0).pb(8.0)
                 .child(text(title.to_string()).font(look.font(15.0, 600.0)).color(look.fg).single_line())
-                .child(controls::icon_button(look, "hit:sheet-close".into(), controls::glyph(&close_cross, look.fg.alpha(0.75), 2.0), |state: &mut S, _tx: &mut Tx| {
-                    state.menu().sheet = None;
-                })),
+                .child(controls::icon_button(look, "hit:sheet-close".into(), "Закрыть", &close_cross, 14.0, |state: &mut S, tx: &mut Tx| close_sheet(state, tx))),
         )
         .child(col().w_full().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).px(20.0).pb(20.0).child(body));
-    panel_paint(frame, theme, look)
+    panel_paint(state, frame, theme, look, (width, height))
 }
 
 #[cfg(test)]

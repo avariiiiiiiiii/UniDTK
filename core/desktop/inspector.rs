@@ -28,7 +28,17 @@ pub struct Snapshot {
     pub cpu_frame_ms: VecDeque<f64>,
     pub last_frame: Option<Instant>,
     pub region: Vec<[i32; 4]>,
-    pub widget_rects: Vec<[f32; 4]>,
+    /// Each `widget:` and `hit:` element's rect, with how far its shadows reach past it.
+    pub widget_rects: Vec<([f32; 4], [f32; 4])>,
+    /// How many times the window region was set (`SetWindowRgn`), and the gaps between drawn
+    /// frames that follow each other within a second (an animation), in ms.
+    pub region_sets: u64,
+    pub frame_gaps_ms: VecDeque<f64>,
+    /// Each region change's time on the UI thread, in ms: `SetWindowRgn` alone, and with the
+    /// occlusion check after it.
+    pub region_set_ms: VecDeque<f64>,
+    pub region_ms: VecDeque<f64>,
+    pub last_drawn_at: Option<Instant>,
 }
 
 pub struct Inspector {
@@ -36,6 +46,12 @@ pub struct Inspector {
     pub hwnd: AtomicIsize,
     pub input_count: AtomicU64,
     pub tree_seq: AtomicU64,
+    /// When a tool last read the element tree (ms since start, 0 never), and whether commits
+    /// went by since without the tree being made (`tree_in_use`).
+    pub tree_read_ms: AtomicU64,
+    pub tree_stale: std::sync::atomic::AtomicBool,
+    /// The app, to ask for a commit when a tool reads a stale tree.
+    pub app: Mutex<Option<rune::AppHandle<crate::Host>>>,
     pub window: Mutex<Option<rune::WindowHandle>>,
     pub stopping: AtomicBool,
     pub failure: Mutex<Option<String>>,
@@ -65,6 +81,7 @@ impl Inspector {
         Ok(Arc::new(Self {
             snapshot: Mutex::new(Snapshot::default()), hwnd: AtomicIsize::new(0),
             input_count: AtomicU64::new(0), tree_seq: AtomicU64::new(0), window: Mutex::new(None),
+            tree_read_ms: AtomicU64::new(0), tree_stale: std::sync::atomic::AtomicBool::new(true), app: Mutex::new(None),
             stopping: AtomicBool::new(false), failure: Mutex::new(None), outbox: Mutex::new(None), wants_keyboard: AtomicBool::new(false),
             data_dir,
             started: Instant::now(), token: crate::desktop_host::random_token()?,
@@ -87,7 +104,35 @@ impl Inspector {
             && !snapshot.region.is_empty())
     }
 
+    /// A tool read the tree in the last ten seconds: the host keeps it current on every commit.
+    pub(crate) fn tree_in_use(&self) -> bool {
+        let read = self.tree_read_ms.load(Ordering::Acquire);
+        read != 0 && (self.started.elapsed().as_millis() as u64).saturating_sub(read) < 10_000
+    }
+
+    /// Marks the tree in use and, when commits went by without it, has the UI thread describe
+    /// the committed tree (`AppHandle::inspect`) and waits for it, at most a second. A covered
+    /// desk commits nothing, so a commit cannot be waited for. Every commit from now on makes
+    /// the tree itself, so a description a newer commit already replaced is dropped.
+    pub(crate) fn fresh_tree(&self) {
+        self.tree_read_ms.store((self.started.elapsed().as_millis() as u64).max(1), Ordering::Release);
+        if !self.tree_stale.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(app) = self.app.lock().ok().and_then(|app| app.clone()) else { return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.inspect(move |rt| { let _ = tx.send(describe(rt)); });
+        let Ok(elements) = rx.recv_timeout(Duration::from_secs(1)) else { return };
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            if self.tree_stale.load(Ordering::Acquire) {
+                snapshot.elements = elements;
+                self.tree_stale.store(false, Ordering::Release);
+            }
+        }
+    }
+
     pub(crate) fn tree_snapshot(&self) -> Result<Value, String> {
+        self.fresh_tree();
         let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?;
         if snapshot.committed == 0 {
             return Err("host has not committed its initial element tree".into());
@@ -393,6 +438,9 @@ impl Inspector {
     /// The point a posted gesture starts at, in points and in client pixels, refused when the
     /// host does not take it or (without `force`) something covers it.
     fn input_point(&self, hwnd: isize, args: &Value) -> Result<([f64; 2], (i32, i32), bool), String> {
+        if args["target"].is_string() {
+            self.fresh_tree();
+        }
         let point = {
             let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?;
             if snapshot.committed == 0 { return Err("host has not committed its initial element tree".into()); }
@@ -415,7 +463,9 @@ impl Inspector {
 
     fn frames(&self) -> Result<Value, String> {
         let snapshot = self.snapshot.lock().map_err(|e| e.to_string())?.clone();
-        let stats = self.window.lock().map_err(|e| e.to_string())?.as_ref().map(|w| w.surface_stats());
+        let window = self.window.lock().map_err(|e| e.to_string())?.clone();
+        let stats = window.as_ref().map(|w| w.surface_stats());
+        let gpu = window.as_ref().and_then(|w| w.gpu_memory()).map(|report| gpu_report(&report));
         let (cpu_ms, working_set, private) = crate::desktop_host::process_usage();
         let (handles, gdi_objects, user_objects) = crate::desktop_host::process_handles();
         Ok(json!({
@@ -424,6 +474,8 @@ impl Inspector {
             "drawn": snapshot.drawn, "skipped": snapshot.skipped, "unchanged": snapshot.unchanged,
             "since_last_frame_ms": snapshot.last_frame.map(|at| at.elapsed().as_millis() as u64),
             "encode_ms": quantiles(snapshot.encode_ms), "update_ms": quantiles(snapshot.update_ms),
+            "frame_gap_ms": quantiles(snapshot.frame_gaps_ms), "region_sets": snapshot.region_sets,
+            "region": snapshot.region, "region_set_ms": quantiles(snapshot.region_set_ms), "region_ms": quantiles(snapshot.region_ms),
             "cpu_frame_ms": quantiles(snapshot.cpu_frame_ms),
             "surface": stats.map(|s| json!({
                 "turns": s.totals.turns,
@@ -439,8 +491,44 @@ impl Inspector {
             })),
             "cpu_ms": cpu_ms, "working_set_mb": working_set as f64 / 1048576.0, "private_mb": private as f64 / 1048576.0,
             "handles": handles, "gdi_objects": gdi_objects, "user_objects": user_objects,
+            "gpu": gpu,
         }))
     }
+}
+
+/// The inspector's description of every element of the committed tree.
+pub(crate) fn describe(rt: &rune::Runtime<crate::Host>) -> Vec<Value> {
+    rt.elements().iter().map(|element| json!({
+        "path": element.path, "key": element.key, "role": element.role,
+        "label": element.label, "text": element.text, "rect": element.rect,
+        "opacity": element.opacity,
+    })).collect()
+}
+
+/// What the host's GPU device holds, in MB: `wgpu`'s counters of every texture and buffer,
+/// Rune's layer targets (in use and cached, and the spare ones kept for reuse), and the
+/// allocator's report by label where the backend suballocates. On a GPU that shares system
+/// memory these are most of the host's private bytes.
+fn gpu_report(memory: &rune::GpuMemory) -> Value {
+    let mb = |bytes: f64| (bytes / 1048576.0 * 10.0).round() / 10.0;
+    let hal = &memory.counters.hal;
+    let mut by_label: Vec<(String, u64, u64)> = Vec::new();
+    for allocation in memory.report.iter().flat_map(|r| &r.allocations) {
+        match by_label.iter_mut().find(|(name, ..)| *name == allocation.name) {
+            Some(entry) => { entry.1 += allocation.size; entry.2 += 1; }
+            None => by_label.push((allocation.name.clone(), allocation.size, 1)),
+        }
+    }
+    by_label.sort_by(|a, b| b.1.cmp(&a.1));
+    json!({
+        "textures": hal.textures.read(), "texture_mb": mb(hal.texture_memory.read() as f64),
+        "buffers": hal.buffers.read(), "buffer_mb": mb(hal.buffer_memory.read() as f64),
+        "allocations": hal.memory_allocations.read(),
+        "render_pipelines": hal.render_pipelines.read(), "shader_modules": hal.shader_modules.read(),
+        "bind_groups": hal.bind_groups.read(), "texture_views": hal.texture_views.read(),
+        "layers": { "targets": memory.layers.targets, "mb": mb(memory.layers.bytes as f64), "spare": memory.layers.spare, "spare_mb": mb(memory.layers.spare_bytes as f64) },
+        "by_label": by_label.iter().take(16).map(|(name, bytes, count)| json!({"label": name, "mb": mb(*bytes as f64), "count": count})).collect::<Vec<_>>(),
+    })
 }
 
 fn pid_metadata_path(dir: &std::path::Path, pid: u32) -> PathBuf {

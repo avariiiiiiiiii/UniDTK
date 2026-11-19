@@ -34,6 +34,8 @@
       ]
     }
   ],
+  "radius": "strip",
   "backend": true,
+  "instanceSize": { "w": 56, "h": 520 },
   "defaultPlacement": { "x": 1090, "y": 30, "w": 70, "h": 590, "expanded": false, "showSettings": false }
 }

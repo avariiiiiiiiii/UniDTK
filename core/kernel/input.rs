@@ -36,19 +36,23 @@ static NATIVE_LISTENERS_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NativePointerAction {
     KeepFocusHostOwnsClick,
+    /// A press in another window: the keys stop going to the host, nothing on the desk closes.
     BlurFocus,
+    /// A press on the bare desk: the keys stop going to the host and its top layer closes
+    /// (`PointerOutside`), as the page's outside-click handler hears only presses on the desk.
+    BlurFocusAndCloseTop,
 }
 
 #[inline]
 pub(crate) fn native_click_policy(
     native_mode: bool,
     hits_host_window: bool,
-    _hits_own_webview: bool,
+    on_bare_desk: bool,
 ) -> NativePointerAction {
-    if native_mode && !hits_host_window {
-        NativePointerAction::BlurFocus
-    } else {
-        NativePointerAction::KeepFocusHostOwnsClick
+    match (native_mode && !hits_host_window, on_bare_desk) {
+        (false, _) => NativePointerAction::KeepFocusHostOwnsClick,
+        (true, true) => NativePointerAction::BlurFocusAndCloseTop,
+        (true, false) => NativePointerAction::BlurFocus,
     }
 }
 
@@ -208,13 +212,17 @@ fn send_mouse_input(msg: u32, point: POINT, w_param: WPARAM) {
             if matches!(
                 msg,
                 WindowsAndMessaging::WM_LBUTTONDOWN | WindowsAndMessaging::WM_RBUTTONDOWN
-            ) && native_click_policy(true, hits_host, false) == NativePointerAction::BlurFocus
-            {
-                crate::hotkeys::reset_input_focus();
-                if let Some(generation) = crate::host_supervisor::active_generation() {
-                    let _ = crate::hotkeys::send_host_control(
-                        crate::host_supervisor::ControlMessage::PointerOutside { generation },
-                    );
+            ) {
+                let action = native_click_policy(true, hits_host, is_desktop_class(hwnd_under_cursor));
+                if action != NativePointerAction::KeepFocusHostOwnsClick {
+                    crate::hotkeys::reset_input_focus();
+                }
+                if action == NativePointerAction::BlurFocusAndCloseTop {
+                    if let Some(generation) = crate::host_supervisor::active_generation() {
+                        let _ = crate::hotkeys::send_host_control(
+                            crate::host_supervisor::ControlMessage::PointerOutside { generation },
+                        );
+                    }
                 }
             }
             return;
@@ -889,13 +897,19 @@ mod lparam_tests {
             native_click_policy(true, true, false),
             NativePointerAction::KeepFocusHostOwnsClick
         );
+        // A press on the bare desk closes the host's top layer; one in another window (a
+        // terminal over the desk) only takes the keys back.
         assert_eq!(
             native_click_policy(true, false, true),
-            NativePointerAction::BlurFocus
+            NativePointerAction::BlurFocusAndCloseTop
         );
         assert_eq!(
             native_click_policy(true, false, false),
             NativePointerAction::BlurFocus
+        );
+        assert_eq!(
+            native_click_policy(false, false, true),
+            NativePointerAction::KeepFocusHostOwnsClick
         );
         assert!(!should_emit_webview_wheel(true, true, false, false));
         assert!(!should_emit_webview_wheel(true, false, false, true));

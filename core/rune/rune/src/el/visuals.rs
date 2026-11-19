@@ -331,6 +331,37 @@ impl El {
         self.vis.set_hover(c);
         self
     }
+    /// Border colour while hovered, as CSS `:hover { border-color }` with a transition: the
+    /// border mixes toward `c` on the hover track (its curves are [`Self::hover_motion`]).
+    /// It gives the element a hover track of its own, as [`Self::hover_group`] does.
+    pub fn hover_border(mut self, c: Color) -> Self {
+        self.vis.cold_mut().hover_border = Some(c);
+        self.vis_flags.set(VisualFlags::HOVER_GROUP, true);
+        self
+    }
+    /// Fill while hovered, as CSS `:hover { background }` with a transition: the fill mixes
+    /// toward `c` on the hover track, where [`Self::hover`] would only paint over it (a
+    /// translucent button that turns more transparent on hover needs this). It gives the
+    /// element a hover track of its own, as [`Self::hover_group`] does.
+    pub fn hover_fill(mut self, c: Color) -> Self {
+        self.vis.cold_mut().hover_fill = Some(c);
+        self.vis_flags.set(VisualFlags::HOVER_GROUP, true);
+        self
+    }
+    /// Move this element and everything in it by `(dx, dy)` points at full hover, as CSS
+    /// `:hover { transform: translate(..) }` with a transition: `hover_lift(0.0, -1.0)` lifts a
+    /// button a point. Paint only: layout and hit testing keep the resting place. It gives the
+    /// element a hover track of its own, as [`Self::hover_group`] does.
+    pub fn hover_lift(mut self, dx: f32, dy: f32) -> Self {
+        let lift = (dx.is_finite() && dy.is_finite() && (dx, dy) != (0.0, 0.0)).then_some([dx, dy]);
+        if lift.is_some() || !self.vis.cold.is_empty() {
+            self.vis.cold_mut().hover_lift = lift;
+            if lift.is_some() {
+                self.vis_flags.set(VisualFlags::HOVER_GROUP, true);
+            }
+        }
+        self
+    }
     /// Overlay drawn over the fill while pressed.
     #[inline]
     pub fn press(mut self, c: Color) -> Self {

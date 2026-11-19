@@ -213,6 +213,7 @@ fn copy_native_binaries(target_dir: &Path) {
 
 fn lint_modules_integrity() {
     println!("cargo:rerun-if-changed=../core/kernel/registry.rs");
+    println!("cargo:rerun-if-changed=../core/desktop/main.rs");
     let modules_dir = Path::new("../modules");
     let Ok(entries) = std::fs::read_dir(modules_dir) else {
         return;
@@ -220,28 +221,54 @@ fn lint_modules_integrity() {
 
     let registry_content = std::fs::read_to_string("../core/kernel/registry.rs").unwrap_or_default();
     let toolchain_cargo = std::fs::read_to_string("Cargo.toml").unwrap_or_default();
+    let desktop_main = std::fs::read_to_string("../core/desktop/main.rs").unwrap_or_default();
+    // A dependency line names the crate exactly: `unidtk-mod-vpn = ...`, never a longer name.
+    let declares = |manifest: &str, krate: &str| manifest.lines().any(|line| line.trim_start().starts_with(&format!("{krate} =")));
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            let rust_dir = path.join("rust");
-            let cargo_toml = rust_dir.join("Cargo.toml");
-            if cargo_toml.is_file() {
-                let Some(id) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                if !registry_content.contains(&format!("\"{id}\"")) {
-                    panic!(
-                        "BUILD INTEGRITY ERROR: Rust module '{id}' found at {} is missing from core/kernel/registry.rs (ALL_MODULE_IDS)!",
-                        path.display()
-                    );
-                }
-                let expected_dep = format!("unidtk-mod-{}", id);
-                if !toolchain_cargo.contains(&expected_dep) {
-                    panic!(
-                        "BUILD INTEGRITY ERROR: Rust module '{id}' ({expected_dep}) found at {} is missing from toolchain/Cargo.toml dependencies!",
-                        path.display()
-                    );
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let cargo_toml = path.join("rust").join("Cargo.toml");
+        if cargo_toml.is_file() {
+            if !registry_content.contains(&format!("\"{id}\"")) {
+                panic!(
+                    "BUILD INTEGRITY ERROR: Rust module '{id}' found at {} is missing from core/kernel/registry.rs (ALL_MODULE_IDS)!",
+                    path.display()
+                );
+            }
+            let expected_dep = format!("unidtk-mod-{}", id);
+            if !declares(&toolchain_cargo, &expected_dep) {
+                panic!(
+                    "BUILD INTEGRITY ERROR: Rust module '{id}' ({expected_dep}) found at {} is missing from toolchain/Cargo.toml dependencies!",
+                    path.display()
+                );
+            }
+        }
+        // The native half (r[modules.vertical-slice]): linked into the desk binary, registered
+        // there, and depending on the shell and its own backend only (r[modules.contract-only]).
+        let native = path.join("native").join("Cargo.toml");
+        if native.is_file() {
+            println!("cargo:rerun-if-changed={}", native.display());
+            let krate = format!("unidtk-native-{id}");
+            if !declares(&toolchain_cargo, &krate) {
+                panic!("BUILD INTEGRITY ERROR: native half '{krate}' is missing from toolchain/Cargo.toml dependencies");
+            }
+            let registered = format!("{}::WIDGET", krate.replace('-', "_"));
+            if !desktop_main.contains(&registered) {
+                panic!("BUILD INTEGRITY ERROR: native half '{krate}' is not registered in core/desktop/main.rs ({registered})");
+            }
+            let manifest = std::fs::read_to_string(&native).unwrap_or_default();
+            for line in manifest.lines().map(str::trim_start) {
+                let foreign = (line.starts_with("unidtk-mod-") && !line.starts_with(&format!("unidtk-mod-{id} =")))
+                    || line.starts_with("unidtk-native-")
+                    || line.starts_with("unidtk =");
+                if foreign {
+                    panic!("BUILD INTEGRITY ERROR: {} depends on another module or the kernel: {line}", native.display());
                 }
             }
         }
@@ -345,6 +372,22 @@ fn lint_module_contracts() {
                 if !named {
                     fail(format!("motion.open {open} is not named in any ui/*.js"));
                 }
+            }
+        }
+        // The native shell reads these to draw the card (r[shell.widget-contract]).
+        if let Some(chrome) = value.get("chrome") {
+            if !matches!(chrome.as_str(), Some("header" | "bare")) {
+                fail(format!("chrome must be \"header\" or \"bare\": {chrome}"));
+            }
+        }
+        if let Some(radius) = value.get("radius") {
+            if !matches!(radius.as_str(), Some("card" | "strip")) {
+                fail(format!("radius must be \"card\" or \"strip\": {radius}"));
+            }
+        }
+        if let Some(size) = value.get("instanceSize") {
+            if !(size["w"].is_number() && size["h"].is_number()) {
+                fail(format!("instanceSize needs numeric w and h: {size}"));
             }
         }
         for tint in value["tints"].as_array().into_iter().flatten() {

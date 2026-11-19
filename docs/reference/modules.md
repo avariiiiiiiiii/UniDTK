@@ -12,10 +12,12 @@ A module lives in `modules/<id>/`:
 modules/<id>/
   rust/      crate unidtk-mod-<id>: the backend half
   ui/        widget.js + metadata.json + icon.svg: the interface half
+  native/    crate unidtk-native-<id>: the widget on the native desk (shell.md)
   helper/    optional second binary (vpn-helper.exe for vpn)
+  tests/     the module's own tests
 ```
 
-The two halves of one feature are never split across modules. A module without a backend has only `ui/` (today that is `clock`). Built-in modules ship inside the application resources; there is no user `mods/` directory.
+The halves of one feature are never split across modules. A module without a backend has no `rust/` (today that is `clock`), and a module the native desk does not draw yet has no `native/`. `metadata.json` serves both interfaces. Built-in modules ship inside the application resources; there is no user `mods/` directory.
 
 The modules are `clock`, `explorer`, `glyph-bar`, `micrographics`, `mp3-player`, `telegram`, and `vpn`. Each one is described in [modules/](../modules/README.md).
 
@@ -27,11 +29,11 @@ Modules are compiled crates, linked into the application. There are no dynamic p
 
 r[modules.contract-only]
 
-A module crate depends on `unidtk-api` and never on the kernel crate. Tauri host types (`AppHandle`, `Emitter`, `async_runtime`) are allowed, because a module that owns its own runtime needs them. `lint_modules_integrity()` in `toolchain/build.rs` fails the build when this is broken.
+A module's backend crate (`rust/`) depends on `unidtk-api` and never on the kernel crate. Tauri host types (`AppHandle`, `Emitter`, `async_runtime`) are allowed, because a module that owns its own runtime needs them. A module's native half (`native/`) depends on the shell's widget contract (`unidtk-shell`) and on its own backend crate only ([shell.widget-contract](shell.md#r-shell.widget-contract)). `lint_modules_integrity()` in `toolchain/build.rs` fails the build when either is broken.
 
 r[modules.no-module-to-module]
 
-Modules do not call each other, and Cargo must not allow one module crate to depend on another. They talk only through the contract's events: `unidtk_api::emit`, `subscribe`, and `state`.
+Modules do not call each other, and Cargo must not allow one module crate to depend on another. They talk only through the contract's events: `unidtk_api::emit`, `subscribe`, and `state`. A module's native half may depend on its own backend crate, never on another module's.
 
 r[modules.command-table]
 
@@ -66,4 +68,4 @@ A module is in one of three states (`moduleState` in `core/ui/menu.js`): `off`; 
 
 r[modules.metadata]
 
-`metadata.json` declares how the menu and the desk treat a module: `backend: true` allows the background state, `settingsView` names the view that "Configure…" opens, `tints` and `lookOptions` give its share of the theme, `container` and `embeddable` decide nesting, `defaultPlacement` (the card's position and settings) and `defaultParent` (the container it starts in) make up the default desk layout, which the page assembles in `getDefaultWidgetConfig` (`core/ui/widgets-api.js`) for the first run and "Reset positions", and `motion.open` names the selector in its desk card whose click opens a surface with no other effect (empty means the card), for the motion budget of `udtk doctor -simulate`. `lint_module_contracts()` in `toolchain/build.rs` checks the theme slots, the nesting fields, that a `defaultPlacement` has numeric `x`, `y`, `w` and `h` and a `defaultParent` names a container module, and that a `motion.open` class is named in the module's `ui/*.js`, and fails the build on an error.
+`metadata.json` declares how the menu and the desk treat a module: `backend: true` allows the background state, `settingsView` names the view that "Configure…" opens, `tints` and `lookOptions` give its share of the theme, `container` and `embeddable` decide nesting, `defaultPlacement` (the card's position and settings) and `defaultParent` (the container it starts in) make up the default desk layout, `instanceSize` is the size of an instance added in arrange mode (340 x 64 without it), which the page assembles in `getDefaultWidgetConfig` (`core/ui/widgets-api.js`) for the first run and "Reset positions", and `motion.open` names the selector in its desk card whose click opens a surface with no other effect (empty means the card), for the motion budget of `udtk doctor -simulate`. `lint_module_contracts()` in `toolchain/build.rs` checks the theme slots, the nesting fields, that a `defaultPlacement` has numeric `x`, `y`, `w` and `h` and an `instanceSize` numeric `w` and `h` and a `defaultParent` names a container module, and that a `motion.open` class is named in the module's `ui/*.js`, and fails the build on an error.

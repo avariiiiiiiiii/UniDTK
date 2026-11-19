@@ -28,6 +28,8 @@ pub struct Look {
     pub display: Family,
     pub material: Material,
     pub motion: Motion,
+    /// The actions in flight (`Menu::busy`, without `hit:`): their buttons show disabled.
+    pub busy: std::rc::Rc<std::collections::HashSet<String>>,
 }
 
 /// WCAG contrast of two colours (`contrastRatio`).
@@ -69,11 +71,13 @@ impl Look {
             display: Theme::family(theme.font_display),
             material: theme.material,
             motion: theme.motion(),
+            busy: Default::default(),
         }
     }
 
+    /// The body font at `size`, on the font's own lines (`line-height: normal`).
     pub fn font(&self, size: f32, weight: f32) -> TextStyle {
-        TextStyle::new(size, weight).family(self.body)
+        TextStyle::new(size, weight).family(self.body).lh_normal()
     }
 
     fn hover_anim(&self) -> rune::Anim {
@@ -101,18 +105,31 @@ pub enum ButtonKind {
 }
 
 /// `.menu-btn`, `.menu-btn-primary`, `.menu-btn-quiet`: 32 px high, 6 x 14 padding, radius 10.
+/// Hover changes the fill itself, as the page's `:hover { background }` does: 7 % to 14 %, the
+/// accent to `brightness(1.08)`, a quiet one from nothing to 14 %.
 pub fn button<S: 'static>(look: &Look, key: String, label: &str, kind: ButtonKind, on_press: impl Fn(&mut S, &mut Tx) + 'static) -> El {
+    sized_button(look, key, label, kind, (32.0, 14.0, 6.0, 13.0), on_press)
+}
+
+/// `.menu-folder .menu-btn`: 28 px high, 4 x 10 padding, 12 px.
+pub fn small_button<S: 'static>(look: &Look, key: String, label: &str, kind: ButtonKind, on_press: impl Fn(&mut S, &mut Tx) + 'static) -> El {
+    sized_button(look, key, label, kind, (28.0, 10.0, 4.0, 12.0), on_press)
+}
+
+fn sized_button<S: 'static>(look: &Look, key: String, label: &str, kind: ButtonKind, (min_h, px, py, size): (f32, f32, f32, f32), on_press: impl Fn(&mut S, &mut Tx) + 'static) -> El {
+    let brighter = |c: Color| Color { r: (c.r * 1.08).min(1.0), g: (c.g * 1.08).min(1.0), b: (c.b * 1.08).min(1.0), a: c.a };
     let (fill, border, ink, hover) = match kind {
-        ButtonKind::Normal => (look.elev.alpha(0.07), look.elev.alpha(0.16), look.fg, look.elev.alpha(0.07)),
-        // `filter: brightness(1.08)` on hover.
-        ButtonKind::Primary => (look.accent, look.accent, look.on_accent, Color::WHITE.alpha(0.08)),
-        ButtonKind::Quiet => (Color::TRANSPARENT, Color::TRANSPARENT, look.fg.alpha(0.78), look.elev.alpha(0.14)),
+        ButtonKind::Normal => (look.elev.alpha(0.07), look.elev.alpha(0.16), look.fg, look.elev.alpha(0.14)),
+        ButtonKind::Primary => (look.accent, look.accent, look.on_accent, brighter(look.accent)),
+        ButtonKind::Quiet => (look.elev.alpha(0.0), Color::TRANSPARENT, look.fg.alpha(0.78), look.elev.alpha(0.14)),
     };
-    row().key(key).min_h(32.0).px(14.0).py(6.0).radius(10.0).fill(fill).border(1.0, border)
-        .hover(hover).hover_motion(look.hover_anim(), look.hover_anim())
+    // `.menu-btn:disabled { opacity: 0.5 }` while its action runs (`runOnce`).
+    let busy = key.strip_prefix("hit:").is_some_and(|action| look.busy.contains(action));
+    let button = row().key(key).min_h(min_h).px(px).py(py).radius(10.0).fill(fill).border(1.0, border).border_layout()
+        .hover_fill(hover).hover_motion(look.hover_anim(), look.hover_anim())
         .items_center().justify_center()
-        .child(text(label.to_string()).font(look.font(13.0, 500.0)).color(ink).single_line())
-        .on_press_tx(on_press)
+        .child(text(label.to_string()).font(look.font(size, 500.0)).color(ink).single_line());
+    if busy { button.opacity(0.5).disabled(true) } else { button.on_press_tx(on_press) }
 }
 
 /// The three-line menu glyph, the close cross and the other strokes the menu draws, in a
@@ -121,11 +138,16 @@ pub fn glyph(lines: &[([f32; 2], [f32; 2])], colour: Color, width: f32) -> Shape
     lines.iter().fold(Shape::new().view_box(24.0, 24.0), |shape, (a, b)| shape.line(*a, *b, width, LineCap::Round, colour))
 }
 
-/// `.menu-icon-btn`: 32 x 32, radius 9, the glyph at 75 % turning full on hover.
-pub fn icon_button<S: 'static>(look: &Look, key: String, icon: Shape, on_press: impl Fn(&mut S, &mut Tx) + 'static) -> El {
-    col().key(key).size(32.0, 32.0).radius(9.0).items_center().justify_center()
+/// `.menu-icon-btn`: 32 x 32, radius 9, the glyph `size` points at 75 % turning full on hover.
+/// `lines` is the glyph's strokes in a 24-unit box; `label` its `aria-label`.
+pub fn icon_button<S: 'static>(look: &Look, key: String, label: &str, lines: &[([f32; 2], [f32; 2])], size: f32, on_press: impl Fn(&mut S, &mut Tx) + 'static) -> El {
+    col().key(key).label(label.to_string()).size(32.0, 32.0).radius(9.0).items_center().justify_center()
         .hover(look.elev.alpha(0.12)).hover_motion(look.hover_anim(), look.hover_anim())
-        .child(el().size(18.0, 18.0).shape(icon))
+        .child(
+            el().size(size, size)
+                .child(el().absolute(0.0, 0.0).size(size, size).shape(glyph(lines, look.fg.alpha(0.75), 2.0)))
+                .child(el().absolute(0.0, 0.0).size(size, size).shape(glyph(lines, look.fg, 2.0)).group_opacity(0.0, 1.0)),
+        )
         .on_press_tx(on_press)
 }
 
@@ -140,7 +162,7 @@ pub fn pills<S: 'static>(look: &Look, key: &str, options: &[(&str, &str)], check
         group = group.child(
             row().key(format!("{key}:{value}")).min_h(28.0).px(12.0).py(4.0).radius(999.0)
                 .fill(if on { look.elev.alpha(0.18) } else { Color::TRANSPARENT })
-                .border(1.0, if on { look.accent } else { look.elev.alpha(0.16) })
+                .border(1.0, if on { look.accent } else { look.elev.alpha(0.16) }).border_layout()
                 .items_center()
                 .child(text(label.to_string()).font(look.font(12.0, 400.0)).color(if on { look.fg } else { look.fg.alpha(0.85) }).single_line())
                 .on_press_tx(move |state: &mut S, tx: &mut Tx| choose(state, &value, tx)),
@@ -153,11 +175,16 @@ pub fn pills<S: 'static>(look: &Look, key: &str, options: &[(&str, &str)], check
 /// 16 px on the transient token.
 pub fn switch<S: 'static>(look: &Look, key: String, on: bool, toggle: impl Fn(&mut S, &mut Tx) + 'static) -> El {
     let slide = look.motion.tween(look.motion.duration(Token::Transient), STANDARD);
+    // The track's and the knob's colours ease over the same token (`background` in the
+    // transition list); Rune moves a paint change on a spring, here one without bounce.
+    let paint = rune::Spring::new(look.motion.duration(Token::Transient), 0.0);
     el().key(key).size(40.0, 24.0).radius(12.0)
         .fill(if on { look.accent } else { look.fg.alpha(0.22) })
+        .token_motion(paint)
         .child(
             el().absolute(3.0, 3.0).size(18.0, 18.0).radius(9.0)
                 .fill(if on { look.on_accent } else { look.fg })
+                .token_motion(paint)
                 .offset(if on { 16.0 } else { 0.0 }, 0.0)
                 .offset_motion(slide),
         )
@@ -183,7 +210,28 @@ pub fn slider<S: 'static>(
         let stepped = min + ((raw - min) / step).round() * step;
         (stepped.clamp(min, max) * 1e4).round() / 1e4
     };
-    el().key(key).w_full().h(20.0)
+    let preview = std::rc::Rc::new(preview);
+    let commit = std::rc::Rc::new(commit);
+    let (key_preview, key_commit) = (preview.clone(), commit.clone());
+    // The keys of `<input type="range">`: arrows a step, Page keys a tenth, Home and End the
+    // ends; each change is committed at once, as a key's `change` event commits it.
+    let keyed = move |state: &mut S, event: &rune::KeyEvent, tx: &mut Tx| {
+        let next = match event.key {
+            rune::Key::Left | rune::Key::Down => value - step,
+            rune::Key::Right | rune::Key::Up => value + step,
+            rune::Key::PageDown => value - (max - min) / 10.0,
+            rune::Key::PageUp => value + (max - min) / 10.0,
+            rune::Key::Home => min,
+            rune::Key::End => max,
+            _ => return false,
+        };
+        let stepped = (min + ((next - min) / step).round() * step).clamp(min, max);
+        key_preview(state, (stepped * 1e4).round() / 1e4, tx);
+        key_commit(state, tx);
+        true
+    };
+    el().key(key).w_full().h(20.0).radius(10.0)
+        .focusable(true).focus_ring(2.0, 2.0, look.accent).on_key(keyed)
         .child(el().absolute(0.0, 8.0).w_full().h(4.0).radius(2.0).fill(look.fg.alpha(0.18)))
         .child(
             row().absolute(0.0, 0.0).w_full().h(20.0)
@@ -200,25 +248,48 @@ pub fn slider<S: 'static>(
         })
 }
 
-/// `.menu-field-label`: the label and its value, 12 px at 78 %, the value in full ink.
+/// `.menu-field-label` inside a `.menu-field` (no margin of its own): the label and its value,
+/// 12 px at 78 %, the value in full ink.
 pub fn field_label(look: &Look, label: &str, output: &str) -> El {
-    row().w_full().justify_between().pl(0.0).pt(12.0).pr(0.0).pb(6.0)
+    row().w_full().justify_between()
         .child(text(label.to_string()).font(look.font(12.0, 400.0)).color(look.fg.alpha(0.78)).single_line())
         .child(text(output.to_string()).font(look.font(12.0, 400.0).features("'tnum' 1")).color(look.fg).single_line())
 }
 
-/// `.menu-tabs`: a well of 18 % around equal tabs, the selected one on a 16 % fill.
+/// A `.menu-field-label` standing alone, between sections: 12 px above, 6 below.
+pub fn field_heading(look: &Look, label: &str) -> El {
+    el().w_full().pt(12.0).pb(6.0).child(field_label(look, label, ""))
+}
+
+/// `.menu-tabs`: a well of 18 % around equal tabs, the selected one on a 16 % fill; an
+/// unselected tab's label turns full ink on hover.
+/// Left and Right move to the neighbouring tab, wrapping, and take the focus with them.
 pub fn tabs<S: 'static>(look: &Look, tabs: &[(&str, &str)], selected: &str, choose: impl Fn(&mut S, &str, &mut Tx) + Clone + 'static) -> El {
     let mut bar = row().w_full().gap(4.0).padding(4.0).radius(12.0).fill(look.well.alpha(0.18));
-    for (id, label) in tabs {
+    let ids: Vec<String> = tabs.iter().map(|(id, _)| id.to_string()).collect();
+    for (index, (id, label)) in tabs.iter().enumerate() {
         let on = *id == selected;
         let id = id.to_string();
         let choose = choose.clone();
+        let (keys_choose, ids) = (choose.clone(), ids.clone());
         bar = bar.child(
             col().key(format!("hit:tab:{id}")).grow(1.0).min_h(32.0).radius(9.0)
+                .focusable(true).focus_ring(2.0, 2.0, look.accent)
+                .on_key(move |state: &mut S, event: &rune::KeyEvent, tx: &mut Tx| {
+                    let step = match event.key {
+                        rune::Key::Left => ids.len() - 1,
+                        rune::Key::Right => 1,
+                        _ => return false,
+                    };
+                    let next = &ids[(index + step) % ids.len()];
+                    keys_choose(state, next, tx);
+                    tx.focus(format!("hit:tab:{next}"), true);
+                    true
+                })
                 .fill(if on { look.elev.alpha(0.16) } else { Color::TRANSPARENT })
+                .hover_group().hover_motion(look.hover_anim(), look.hover_anim())
                 .items_center().justify_center()
-                .child(text(label.to_string()).font(look.font(13.0, 500.0)).color(if on { look.fg } else { look.fg.alpha(0.78) }).single_line())
+                .child(text(label.to_string()).font(look.font(13.0, 500.0)).color(if on { look.fg } else { look.fg.alpha(0.78) }).group_color(look.fg).single_line())
                 .on_press_tx(move |state: &mut S, tx: &mut Tx| choose(state, &id, tx)),
         );
     }

@@ -59,7 +59,7 @@ mod events;
 mod file_drop;
 pub(crate) mod frame;
 mod handle;
-pub use handle::{InjectedKey, WindowHandle};
+pub use handle::{GpuMemory, InjectedKey, WindowHandle};
 use handle::native_window_number;
 mod life;
 pub(crate) use life::Life;
@@ -116,6 +116,8 @@ pub(crate) enum WakeEvent {
     InjectFocusLost(usize),
     /// Offscreen RGBA capture request answered asynchronously off the UI thread.
     Capture(usize, std::sync::mpsc::SyncSender<Result<handle::PendingCapture, String>>),
+    /// The GPU allocator's report of the window's device (`WindowHandle::gpu_memory`).
+    GpuMemory(usize, std::sync::mpsc::SyncSender<Option<handle::GpuMemory>>),
 }
 
 /// What `Windows` needs of a host, whatever its state type: an app window or an overlay.
@@ -323,7 +325,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
             WakeEvent::DisplayTick(i) | WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Window(i, _) | WakeEvent::Focus(i)
                 | WakeEvent::Position(i, _) | WakeEvent::Level(i, _) | WakeEvent::Place(i, _) | WakeEvent::Frame(i, _)
                 | WakeEvent::A11y(i) | WakeEvent::Covered(i, _) | WakeEvent::InjectKey(i, _)
-                | WakeEvent::InjectFocusLost(i) | WakeEvent::Capture(i, _) => *i,
+                | WakeEvent::InjectFocusLost(i) | WakeEvent::Capture(i, _) | WakeEvent::GpuMemory(i, _) => *i,
             WakeEvent::Reopen => {
                 self.reopen(event_loop);
                 self.cleanup(event_loop);

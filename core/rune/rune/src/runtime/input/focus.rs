@@ -96,6 +96,14 @@ impl<S: 'static> Runtime<S> {
         }
         self.modal_scope = Some(ModalScope { index, members });
     }
+    /// Something in the window has focus that can take it and is not leaving: keys typed now
+    /// go to it. Stricter than [`Self::has_focus`], which counts a focus path whose element is
+    /// gone or leaving.
+    pub fn focus_takes_keys(&self) -> bool {
+        self.focus.path().and_then(|path| self.nodes.iter().position(|n| n.path == path))
+            .is_some_and(|i| self.can_focus(i) && !self.subtree_exiting(i))
+    }
+
     /// Input may reach node `i`: it's outside any `El::inert` subtree and not behind a modal.
     pub(super) fn allowed(&self, i: usize) -> bool {
         !self.nodes.get(i).is_some_and(|n| n.inert) && self.modal_member(i)

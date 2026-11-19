@@ -1680,8 +1680,11 @@ fn run_installer_and_verify(
         Err(e) => return Err(format!("failed to run installer: {e}")),
     }
     if elevated {
+        // `Start-Process -Wait` alone exits 0 whatever the installer returned; pass its code on,
+        // so an install that could not write a file (another copy of the app started meanwhile)
+        // fails here with the installer's code.
         let ps = format!(
-            "Start-Process -FilePath '{}' -ArgumentList '/S' -Verb RunAs -Wait",
+            "$p = Start-Process -FilePath '{}' -ArgumentList '/S' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
             installer.display()
         );
         let el = std::process::Command::new("powershell.exe")

@@ -84,6 +84,14 @@ pub fn load<S: MenuHost>(state: &mut S, _tx: &mut Tx) {
     }));
 }
 
+/// `vpnSubForm`'s submit: the link is stored and the server list read again.
+fn save_subscription<S: MenuHost>(state: &mut S) {
+    let url = state.menu_ref().vpn.subscription.text.trim().to_string();
+    menu::run_once(state, "vpn-sub-save", "vpn_set_subscription_url", json!({ "url": url }), |state: &mut S, _, _| {
+        state.toasts().show("Подписка сохранена, список серверов обновлён", false, None);
+    });
+}
+
 fn save_home<S: MenuHost>(state: &mut S, key: &str, toast: &'static str) {
     let config = state.menu_ref().vpn.home_config();
     menu::run_once(state, key, "vpn_set_home_server_config", json!({ "config": config }), move |state: &mut S, _, _| {
@@ -91,10 +99,11 @@ fn save_home<S: MenuHost>(state: &mut S, key: &str, toast: &'static str) {
     });
 }
 
-fn input<S: MenuHost>(look: &Look, key: String, edit: &TextEdit, placeholder: &str, field: impl for<'a> Fn(&'a mut S) -> &'a mut TextEdit + 'static) -> El {
+/// `.menu-input`; Enter submits its form, as the page's `<form>` does.
+fn input<S: MenuHost>(look: &Look, key: String, label: &str, edit: &TextEdit, placeholder: &str, field: impl for<'a> Fn(&'a mut S) -> &'a mut TextEdit + 'static, submit: impl Fn(&mut S, &mut Tx) + 'static) -> El {
     el().w_full().min_h(32.0).px(10.0).py(6.0).radius(9.0)
-        .border(1.0, look.elev.alpha(0.16)).fill(look.well.alpha(0.25))
-        .child(text_input(edit, look.font(13.0, 400.0)).single_line().key(key).placeholder(placeholder.to_string(), look.fg.alpha(0.55)).on_edit(field))
+        .border(1.0, look.elev.alpha(0.16)).border_layout().fill(look.well.alpha(0.25))
+        .child(text_input(edit, look.font(13.0, 400.0)).single_line().key(key).label(label.to_string()).placeholder(placeholder.to_string(), look.fg.alpha(0.55)).on_edit(field).on_submit(submit))
 }
 
 pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
@@ -130,15 +139,10 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
     pane = pane.child(row().items_center().gap(8.0).child(controls::heading(look, "VPN")).child(status_pill));
 
     pane = pane.child(
-        col().gap(8.0).py(8.0)
+        col().gap(6.0).py(10.0)
             .child(controls::field_label(look, "Ссылка на подписку", ""))
-            .child(input(look, "hit:vpn-sub".into(), &pane_state.subscription, "https://…", |state: &mut S| &mut state.menu().vpn.subscription))
-            .child(row().child(controls::button(look, "hit:vpn-sub-save".into(), "Сохранить подписку", ButtonKind::Primary, |state: &mut S, _tx: &mut Tx| {
-                let url = state.menu_ref().vpn.subscription.text.trim().to_string();
-                menu::run_once(state, "vpn-sub", "vpn_set_subscription_url", json!({ "url": url }), |state: &mut S, _, _| {
-                    state.toasts().show("Подписка сохранена, список серверов обновлён", false, None);
-                });
-            }))),
+            .child(input(look, "hit:vpn-sub".into(), "Ссылка на подписку", &pane_state.subscription, "https://…", |state: &mut S| &mut state.menu().vpn.subscription, |state: &mut S, _tx: &mut Tx| save_subscription(state)))
+            .child(row().child(controls::button(look, "hit:vpn-sub-save".into(), "Сохранить подписку", ButtonKind::Primary, |state: &mut S, _tx: &mut Tx| save_subscription(state)))),
     );
 
     let auto = pane_state.auto_connect;
@@ -166,9 +170,11 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
         let mut form = col().gap(8.0).py(8.0);
         for (index, (id, label, placeholder)) in HOME_FIELDS.iter().enumerate() {
             form = form.child(
-                col().gap(6.0).py(10.0)
+                col().gap(6.0).pt(10.0)
                     .child(controls::field_label(look, label, ""))
-                    .child(input(look, format!("hit:vpn-home-{id}"), &pane_state.home[index], placeholder, move |state: &mut S| &mut state.menu().vpn.home[index])),
+                    .child(input(look, format!("hit:vpn-home-{id}"), label, &pane_state.home[index], placeholder, move |state: &mut S| &mut state.menu().vpn.home[index], |state: &mut S, _tx: &mut Tx| {
+                        save_home(state, "vpn-home-save", "Настройки сервера сохранены");
+                    })),
             );
         }
         form = form.child(row().child(controls::button(look, "hit:vpn-home-save".into(), "Сохранить сервер", ButtonKind::Primary, |state: &mut S, _tx: &mut Tx| {

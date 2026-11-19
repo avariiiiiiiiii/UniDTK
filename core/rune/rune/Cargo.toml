@@ -49,7 +49,7 @@ rune-motion = { path = "../rune-motion" }
 rune-staging = { path = "../rune-staging" }
 rune-taffy = { path = "../rune-taffy" }
 # Allow backend patch fixes; headless pixel equivalence guards the precompiled Metal path.
-wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl", "counters"] }
 # Keep Wayland client-side frames/buttons without the title font's ab_glyph/ttf-parser.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
