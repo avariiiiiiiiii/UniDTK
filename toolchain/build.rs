@@ -380,6 +380,11 @@ fn lint_module_contracts() {
                 fail(format!("chrome must be \"header\" or \"bare\": {chrome}"));
             }
         }
+        if let Some(flat) = value.get("flatChrome") {
+            if flat.as_str() != Some("none") {
+                fail(format!("flatChrome must be \"none\": {flat}"));
+            }
+        }
         if let Some(radius) = value.get("radius") {
             if !matches!(radius.as_str(), Some("card" | "strip")) {
                 fail(format!("radius must be \"card\" or \"strip\": {radius}"));

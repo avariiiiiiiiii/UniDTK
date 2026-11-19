@@ -40,6 +40,9 @@ pub struct Card {
     pub bare: bool,
     /// `"radius": "strip"`: a full pill under jelly.
     pub strip: bool,
+    /// `"flatChrome": "none"`: under the flat material the card paints nothing of its own (the page's
+    /// `.glyph-bar-widget` is transparent with no border, shadow or blur), only its content shows.
+    pub clear_flat: bool,
     /// The module's first tint: its id, role and default palette key.
     pub tint: (String, String, String),
 }
@@ -147,6 +150,7 @@ pub fn desk(layout: &Layout, folders: &[Value], disabled: &HashSet<String>, draw
                 folder: false,
                 bare: meta["chrome"] == "bare",
                 strip: meta["radius"] == "strip",
+                clear_flat: meta["flatChrome"] == "none",
                 tint: (field("id", &module.id), field("role", "calm"), field("default", "lilac")),
             });
         }
@@ -167,6 +171,7 @@ pub fn desk(layout: &Layout, folders: &[Value], disabled: &HashSet<String>, draw
             folder: true,
             bare: false,
             strip: false,
+            clear_flat: false,
             tint: ("folder".into(), "folder".into(), "mint".into()),
         });
     }

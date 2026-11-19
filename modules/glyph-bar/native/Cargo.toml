@@ -1,0 +1,17 @@
+[package]
+name = "unidtk-native-glyph-bar"
+version = "0.1.0"
+edition = "2021"
+description = "The Glyph Bar's native half: its LED volume strip on the Rune desk"
+
+# A module's native half depends on the shell's widget contract (`unidtk-shell`) and on its
+# own backend crate only, never on another module (r[modules.contract-only]).
+
+[lib]
+name = "unidtk_native_glyph_bar"
+path = "lib.rs"
+
+[dependencies]
+unidtk-shell = { path = "../../../core/desktop" }
+rune = { path = "../../../core/rune/rune" }
+serde_json = "1"

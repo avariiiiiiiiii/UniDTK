@@ -7,7 +7,7 @@
 #[global_allocator]
 static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-static WIDGETS: &[&unidtk_shell::widget::WidgetType] = &[&unidtk_native_clock::WIDGET, &unidtk_native_vpn::WIDGET];
+static WIDGETS: &[&unidtk_shell::widget::WidgetType] = &[&unidtk_native_clock::WIDGET, &unidtk_native_glyph_bar::WIDGET, &unidtk_native_vpn::WIDGET];
 
 fn main() {
     unidtk_shell::main(include_str!(concat!(env!("OUT_DIR"), "/modules.json")), WIDGETS);

@@ -173,6 +173,8 @@ pub struct Frame<'a> {
     pub theme: &'a Theme,
     pub tint: Color,
     pub strip: bool,
+    /// The card paints nothing of its own (`"flatChrome": "none"` under the flat material).
+    pub clear: bool,
     /// The tile on the canvas, and the box it opens into.
     pub tile: Placement,
     pub frame: Placement,
@@ -217,7 +219,11 @@ pub fn view(host: &Host, f: Frame<'_>) -> El {
     let shift = |element: El, x: f32, y: f32| element.absolute(x - window.x, y - window.y);
 
     // Inside the clip: the jelly sheen, wash and grain, the content, the header, the zone.
-    let mut inside = el().absolute(0.0, 0.0).size(window.w, window.h).clip_rounded(radius);
+    let mut inside = el().absolute(0.0, 0.0).size(window.w, window.h);
+    // `overflow: visible` on a card that paints nothing: the LEDs' glow is not cut at its edge.
+    if !f.clear {
+        inside = inside.clip_rounded(radius);
+    }
     let jelly = theme.material == Material::Jelly;
     let painted_box = if open { (f.frame.w, f.frame.h) } else { (window.w, window.h) };
     let origin = if open { (0.0, 0.0) } else { (window.x, window.y) };
@@ -238,7 +244,7 @@ pub fn view(host: &Host, f: Frame<'_>) -> El {
             );
         }
         inside = inside.child(shift(el().size(f.grain_size.0, f.grain_size.1).pixels(f.grain), 0.0, 0.0));
-    } else if theme.glass_grain > 0.0 {
+    } else if theme.glass_grain > 0.0 && !f.clear {
         // The page draws grain on Sea Glass only; "Зерно" works on flat glass here.
         inside = inside.child(shift(el().size(f.grain_size.0, f.grain_size.1).pixels(f.grain), 0.0, 0.0));
     }
@@ -274,8 +280,9 @@ pub fn view(host: &Host, f: Frame<'_>) -> El {
             .child(shift(paint(el().size(f.frame.w, f.frame.h), theme, f.tint, surface_radius(theme), true, f.editing), 0.0, 0.0))
             .child(inside)
     } else {
-        paint(el().key(format!("card:{}", f.id)).label(f.label.to_string()).absolute(window.x, window.y).size(window.w, window.h), theme, f.tint, radius, false, f.editing)
-            .child(inside)
+        let body = el().key(format!("card:{}", f.id)).label(f.label.to_string()).absolute(window.x, window.y).size(window.w, window.h);
+        // `.glyph-bar-widget` under the flat material: transparent, no border, shadow or blur.
+        if f.clear { body.child(inside) } else { paint(body, theme, f.tint, radius, false, f.editing).child(inside) }
     };
     card = (f.window)(card);
     if f.dragged {
@@ -295,7 +302,7 @@ pub fn view(host: &Host, f: Frame<'_>) -> El {
     let mut out = el().key(format!("widget:{}", f.id)).absolute(f.frame.x, f.frame.y).size(f.frame.w, f.frame.h);
     // `.widget-card.jelly.expanded { backdrop-filter: none }`: an open Sea Glass card is a wash over
     // its dock body, not glass over the wallpaper.
-    if let Some((backdrop, canvas)) = f.backdrop.filter(|_| !(open && jelly)) {
+    if let Some((backdrop, canvas)) = f.backdrop.filter(|_| !(open && jelly) && !f.clear) {
         // `backdrop-filter`: the wallpaper under the card, blurred, under its translucent fill.
         out = out.child(
             el().absolute(window.x, window.y).size(window.w, window.h).clip_rounded(radius)

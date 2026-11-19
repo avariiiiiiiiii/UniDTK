@@ -15,6 +15,8 @@
       "role": "player"
     }
   ],
+  "chrome": "bare",
+  "flatChrome": "none",
   "radius": "strip",
   "backend": true,
   "instanceSize": { "w": 10, "h": 127 },

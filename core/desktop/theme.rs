@@ -373,7 +373,7 @@ impl Theme {
 }
 
 /// OKLab of a linear sRGB color: lightness, chroma, hue in radians.
-fn oklch_of(color: Color) -> (f32, f32, f32) {
+pub fn oklch_of(color: Color) -> (f32, f32, f32) {
     let [l, a, b, _] = color.to_oklab();
     (l, a.hypot(b), b.atan2(a))
 }

@@ -62,6 +62,7 @@ rune = { path = "../core/rune/rune" }
 unidtk-shell = { path = "../core/desktop" }
 # The modules' native halves, registered in ../core/desktop/main.rs.
 unidtk-native-clock = { path = "../modules/clock/native" }
+unidtk-native-glyph-bar = { path = "../modules/glyph-bar/native" }
 unidtk-native-vpn = { path = "../modules/vpn/native" }
 raw-window-handle = "0.6"
 png = "0.18"

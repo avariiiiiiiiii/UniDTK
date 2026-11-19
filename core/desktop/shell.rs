@@ -23,7 +23,7 @@ use crate::desk_cards::{self, Card, Desk};
 use crate::inspector::Inspector;
 use crate::menu::{self, Menu, MenuHost};
 use crate::surface::{Morph, Pose};
-use crate::theme::Theme;
+use crate::theme::{Material, Theme};
 use crate::toast::Toasts;
 use crate::widget::{Act, Init, Op, Reply, SurfaceSize, View, Widget, WidgetType};
 
@@ -59,6 +59,10 @@ pub struct Host {
     /// The widget types the binary registered.
     pub(crate) types: &'static [&'static WidgetType],
     pub(crate) widgets: BTreeMap<String, Slot>,
+    /// The last payload of each kernel event the types subscribed to. A state event's catch-up
+    /// comes once, at subscribe, usually before the layout has made any widget; a widget made
+    /// later is given it from here.
+    sticky: HashMap<String, Value>,
     next_gen: u64,
     /// What the widgets were last made from: the layout's run and revision, the switched-off.
     synced: Option<(String, u64, Vec<String>)>,
@@ -123,6 +127,7 @@ impl Host {
             grain_made_for: None,
             types,
             widgets: BTreeMap::new(),
+            sticky: HashMap::new(),
             next_gen: 1,
             synced: None,
             open: None,
@@ -240,10 +245,11 @@ impl Host {
 
     /// Makes, keeps and drops the widgets so they are the ones the desk shows, and tells each
     /// its record. The open card and the morphs of widgets gone go with them.
-    fn sync_widgets(&mut self) {
-        let Some(desk) = self.desk() else { return };
-        let Some(layout) = self.layout.as_ref() else { return };
+    fn sync_widgets(&mut self) -> Vec<String> {
+        let Some(desk) = self.desk() else { return Vec::new() };
+        let Some(layout) = self.layout.as_ref() else { return Vec::new() };
         let mut keep = HashSet::new();
+        let mut made = Vec::new();
         for (id, entry) in &desk.widgets {
             let Some(ty) = self.type_of(&entry.widget_type) else { continue };
             keep.insert(id.clone());
@@ -254,6 +260,7 @@ impl Host {
                     let widget = (ty.make)(&Init { id, record: &record });
                     self.widgets.insert(id.clone(), Slot { gen: self.next_gen, ty, widget, visible: false, due: None });
                     self.next_gen += 1;
+                    made.push(id.clone());
                 }
             }
         }
@@ -267,6 +274,20 @@ impl Host {
         }
         if self.menu.highlight.as_ref().is_some_and(|id| !desk.widgets.contains_key(id)) {
             self.menu.highlight = None;
+        }
+        made
+    }
+
+    /// The last payloads of the events a just-made widget's type asked for, as the catch-up frame
+    /// a subscribe replays (`snapshot`).
+    fn replay_events(&mut self, made: &[String], tx: &mut Tx) {
+        for id in made {
+            let Some(ty) = self.widgets.get(id).map(|slot| slot.ty) else { continue };
+            for &event in ty.events {
+                if let Some(payload) = self.sticky.get(event).cloned() {
+                    self.with_dyn(id, tx, |widget, act| widget.on_event(event, &payload, true, act));
+                }
+            }
         }
     }
 
@@ -716,6 +737,7 @@ impl Host {
 
     /// A kernel event, to every widget whose type asked for it.
     pub(crate) fn deliver_event(&mut self, event: &str, payload: &Value, snapshot: bool, tx: &mut Tx) {
+        self.sticky.insert(event.to_string(), payload.clone());
         let ids: Vec<String> = self.widgets.iter().filter(|(_, slot)| slot.ty.events.contains(&event)).map(|(id, _)| id.clone()).collect();
         for id in ids {
             self.with_dyn(&id, tx, |widget, act| widget.on_event(event, payload, snapshot, act));
@@ -1028,6 +1050,7 @@ fn card_element(state: &Host, desk: &Desk, card: &Card, tile: Placement, theme: 
         theme,
         tint,
         strip: card.strip,
+        clear: card.clear_flat && theme.material == Material::Flat,
         tile,
         frame,
         pose,
@@ -1377,7 +1400,8 @@ pub(crate) fn poll(state: &mut Host, _: f64, tx: &mut Tx) -> bool {
     let signature = (layout.instance.clone(), layout.rev, disabled);
     if state.synced.as_ref() != Some(&signature) {
         state.synced = Some(signature);
-        state.sync_widgets();
+        let made = state.sync_widgets();
+        state.replay_events(&made, tx);
         state.update_visibility(tx);
         changed = true;
     }
