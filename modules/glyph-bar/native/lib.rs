@@ -164,9 +164,10 @@ impl Widget for GlyphBar {
         }
     }
 
-    /// `nudgeSystemVolume(notches * 10)`: a notch is 10 %.
-    fn wheel(&mut self, notches: i32, act: &mut Act<'_>) -> bool {
-        if let Some((volume, ask)) = logic::nudge(notches * 10, self.volume) {
+    /// `nudgeSystemVolume(notches * 10)`: a notch is 10 %. A touchpad is read as the fingers move
+    /// along the bar (up is louder), not as the system scrolls (natural: fingers up scroll down).
+    fn wheel(&mut self, notches: i32, touchpad: bool, act: &mut Act<'_>) -> bool {
+        if let Some((volume, ask)) = logic::nudge(logic::step(notches, touchpad), self.volume) {
             self.ask(volume, ask, act);
         }
         true

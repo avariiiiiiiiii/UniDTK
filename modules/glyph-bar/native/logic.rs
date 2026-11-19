@@ -74,6 +74,13 @@ pub fn drag_to(index: usize) -> (Volume, Ask) {
     (Volume { level, muted: false }, Ask::Volume(level))
 }
 
+/// The volume step of `notches` of wheel travel: 10 % a notch. A touchpad's travel follows the
+/// system's scroll direction (natural: the fingers moving up count as a wheel turned down), but
+/// the bar is a vertical slider: fingers up is louder, so it is turned back.
+pub fn step(notches: i32, touchpad: bool) -> i32 {
+    notches * 10 * if touchpad { -1 } else { 1 }
+}
+
 /// `nudgeSystemVolume`: a wheel step of `delta` points. Muted, a step up unmutes at
 /// `max(10, delta)` (not at the level it had), a step down does nothing; reaching 0 mutes and
 /// keeps the level.
@@ -127,6 +134,14 @@ mod tests {
         assert_eq!(nudge(10, V(70, true)), Some((V(10, false), Ask::Volume(10))));
         assert_eq!(nudge(30, V(70, true)), Some((V(30, false), Ask::Volume(30))));
         assert_eq!(nudge(-10, V(70, true)), None);
+    }
+
+    #[test]
+    fn a_touchpad_is_read_the_other_way_round_than_a_wheel() {
+        assert_eq!(step(1, false), 10, "a wheel turned away from the user is louder");
+        assert_eq!(step(-3, false), -30);
+        assert_eq!(step(1, true), -10, "natural scrolling: fingers down is a positive notch, and quieter");
+        assert_eq!(step(-2, true), 20, "fingers up is louder");
     }
 
     #[test]

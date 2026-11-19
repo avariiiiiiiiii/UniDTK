@@ -44,6 +44,8 @@ pub enum ControlCommand {
         x: i32,
         y: i32,
         delta: i32,
+        #[serde(default)]
+        touchpad: bool,
     },
 }
 
@@ -63,7 +65,7 @@ pub trait ControlSink {
     fn on_inject_key(&mut self, _cmd: ControlCommand) {}
     fn on_focus_lost(&mut self, _generation: u64) {}
     fn on_pointer_outside(&mut self, _generation: u64) {}
-    fn on_wheel(&mut self, _generation: u64, _x: i32, _y: i32, _delta: i32) {}
+    fn on_wheel(&mut self, _generation: u64, _x: i32, _y: i32, _delta: i32, _touchpad: bool) {}
 }
 
 pub fn read_control_stream<R: BufRead, S: ControlSink>(
@@ -108,7 +110,7 @@ pub fn read_control_stream<R: BufRead, S: ControlSink>(
                     Ok(cmd @ ControlCommand::InjectKey { .. }) => sink.on_inject_key(cmd),
                     Ok(ControlCommand::FocusLost { generation }) => sink.on_focus_lost(generation),
                     Ok(ControlCommand::PointerOutside { generation }) => sink.on_pointer_outside(generation),
-                    Ok(ControlCommand::Wheel { generation, x, y, delta }) => sink.on_wheel(generation, x, y, delta),
+                    Ok(ControlCommand::Wheel { generation, x, y, delta, touchpad }) => sink.on_wheel(generation, x, y, delta, touchpad),
                     Ok(ControlCommand::Stop) => {
                         sink.on_stop("stop");
                         return Ok(());

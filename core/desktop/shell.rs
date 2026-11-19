@@ -563,7 +563,7 @@ impl Host {
     /// tile is under it gets whole notches, and the rest of a turn waits for the next (a
     /// touchpad sends many small ones). Nothing takes it while arranging, with the menu or a
     /// surface open: there the page scrolls what is under the pointer, and nothing here scrolls.
-    pub(crate) fn wheel(&mut self, x: f32, y: f32, delta: f32, tx: &mut Tx) {
+    pub(crate) fn wheel(&mut self, x: f32, y: f32, delta: f32, touchpad: bool, tx: &mut Tx) {
         if self.arrange.is_some() || self.menu.open || self.open.is_some() {
             return;
         }
@@ -574,7 +574,7 @@ impl Host {
         self.wheel_carry.insert(id.clone(), carry);
         if notches != 0 {
             self.with_dyn(&id, tx, |widget, act| {
-                widget.wheel(notches, act);
+                widget.wheel(notches, touchpad, act);
             });
         }
     }

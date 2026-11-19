@@ -501,23 +501,26 @@ fn a_wheel_line_from_the_kernel_parses() {
     use crate::supervisor::{read_control_stream, ControlSink, StartHandshake};
 
     #[derive(Default)]
-    struct Wheels(Vec<(u64, i32, i32, i32)>);
+    struct Wheels(Vec<(u64, i32, i32, i32, bool)>);
 
     impl ControlSink for Wheels {
         fn on_start(&mut self, _: StartHandshake) {}
         fn on_taskbar_created(&mut self) {}
         fn on_show(&mut self) {}
         fn on_stop(&mut self, _: &str) {}
-        fn on_wheel(&mut self, generation: u64, x: i32, y: i32, delta: i32) {
-            self.0.push((generation, x, y, delta));
+        fn on_wheel(&mut self, generation: u64, x: i32, y: i32, delta: i32, touchpad: bool) {
+            self.0.push((generation, x, y, delta, touchpad));
         }
     }
 
     // The line `host_supervisor::tests::a_wheel_is_one_line_the_host_can_read` pins.
-    let input = concat!(r#"{"cmd":"wheel","generation":2,"x":-40,"y":612,"delta":-120}"#, "\n");
+    let input = concat!(
+        r#"{"cmd":"wheel","generation":2,"x":-40,"y":612,"delta":-120,"touchpad":true}"#, "\n",
+        r#"{"cmd":"wheel","generation":2,"x":5,"y":6,"delta":120}"#, "\n",
+    );
     let mut sink = Wheels::default();
     read_control_stream(std::io::Cursor::new(input), &mut sink).unwrap();
-    assert_eq!(sink.0, vec![(2, -40, 612, -120)]);
+    assert_eq!(sink.0, vec![(2, -40, 612, -120, true), (2, 5, 6, 120, false)]);
 }
 
 #[test]

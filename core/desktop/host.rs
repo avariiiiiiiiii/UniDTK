@@ -326,12 +326,12 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
 
             /// Wheel travel over a widget (`wallpaper-wheel`): the kernel sends window pixels,
             /// the desk lays out in points.
-            fn on_wheel(&mut self, generation: u64, x: i32, y: i32, delta: i32) {
+            fn on_wheel(&mut self, generation: u64, x: i32, y: i32, delta: i32, touchpad: bool) {
                 if generation != self.active_generation.load(Ordering::Acquire) {
                     return;
                 }
                 let scale = crate::scale();
-                self.ui.update(move |state: &mut Host, tx| state.wheel(x as f32 / scale, y as f32 / scale, delta as f32, tx));
+                self.ui.update(move |state: &mut Host, tx| state.wheel(x as f32 / scale, y as f32 / scale, delta as f32, touchpad, tx));
             }
 
             fn on_focus_lost(&mut self, generation: u64) {

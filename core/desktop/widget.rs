@@ -117,8 +117,10 @@ pub trait Widget: Any {
     }
 
     /// The wheel turned `notches` over its tile (a notch is 120 units; positive is away from the
-    /// user, as the page's `deltaY < 0`), while no surface or menu is open. `true` when it took it.
-    fn wheel(&mut self, _notches: i32, _act: &mut Act<'_>) -> bool {
+    /// user, as the page's `deltaY < 0`), while no surface or menu is open. `touchpad` marks
+    /// travel that follows the system's scroll direction (natural: fingers down is positive),
+    /// which a control that wants the fingers' own direction turns back. `true` when it took it.
+    fn wheel(&mut self, _notches: i32, _touchpad: bool, _act: &mut Act<'_>) -> bool {
         false
     }
 

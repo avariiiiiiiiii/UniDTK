@@ -87,6 +87,9 @@ pub enum ControlMessage {
         x: i32,
         y: i32,
         delta: i32,
+        /// The travel is a touchpad's (`touchpad.rs`), which follows the system's scroll
+        /// direction, not a wheel's.
+        touchpad: bool,
     },
 }
 
@@ -840,8 +843,8 @@ mod tests {
     /// The host parses this exact line (`core/desktop/tests.rs`, `a_wheel_line_from_the_kernel_parses`).
     #[test]
     fn a_wheel_is_one_line_the_host_can_read() {
-        let line = encode_control(&ControlMessage::Wheel { generation: 2, x: -40, y: 612, delta: -120 }).unwrap();
-        assert_eq!(line, r#"{"cmd":"wheel","generation":2,"x":-40,"y":612,"delta":-120}"#);
+        let line = encode_control(&ControlMessage::Wheel { generation: 2, x: -40, y: 612, delta: -120, touchpad: true }).unwrap();
+        assert_eq!(line, r#"{"cmd":"wheel","generation":2,"x":-40,"y":612,"delta":-120,"touchpad":true}"#);
     }
 
     #[test]
