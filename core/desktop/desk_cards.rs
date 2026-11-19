@@ -289,9 +289,9 @@ fn launch(state: &mut Host, item: &Value) {
     let name = item["name"].as_str().unwrap_or_default();
     let target = if name.trim().eq_ignore_ascii_case("explorer") { "explorer.exe" } else { item["target"].as_str().unwrap_or_default() };
     let args = item["args"].as_str().unwrap_or_default();
-    state.call("launch_shortcut", json!({ "target": target, "args": args }), Box::new(|state: &mut Host, result, _tx: &mut Tx| {
+    state.call("launch_shortcut", json!({ "target": target, "args": args }), Box::new(|state: &mut Host, result, tx: &mut Tx| {
         if let Err(error) = result {
-            state.show_debug(format!("open error: {error}"));
+            state.show_debug(format!("open error: {error}"), tx);
             menu::error_toast(state, &format!("Не открылось: {error}"));
         }
     }));

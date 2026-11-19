@@ -189,6 +189,7 @@ pub fn close<S: MenuHost>(state: &mut S, tx: &mut Tx) {
     menu.sheet = None;
     menu.highlight = None;
     menu.closing_until = Some(std::time::Instant::now() + std::time::Duration::from_secs_f32(duration));
+    crate::surface::keep_frames(tx);
     // `opener.focus()` (`restoreFocus`); in arrange mode the opener is gone and nothing happens.
     tx.focus("hit:menu-button", false);
 }

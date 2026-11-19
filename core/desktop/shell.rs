@@ -490,8 +490,9 @@ impl Host {
     }
 
     /// `showDebugMessage`.
-    pub(crate) fn show_debug(&mut self, text: String) {
+    pub(crate) fn show_debug(&mut self, text: String, tx: &mut Tx) {
         self.debug = Some((text, Instant::now() + Duration::from_secs(4)));
+        crate::surface::keep_frames(tx);
     }
 
     /// Whether the host wants the desk's keys: a menu, the arrange island or a surface is open.
@@ -573,6 +574,7 @@ impl Host {
             }
         }
         self.settling_until = Some(Instant::now() + Duration::from_secs_f32(self.motion.duration(crate::motion::Token::Motion)));
+        crate::surface::keep_frames(tx);
         if !self.menu.open {
             menu::toggle(self, tx);
         }
@@ -682,8 +684,11 @@ impl Host {
                     op["id"] = json!(id);
                     self.apply(vec![op], tx);
                 }
-                Op::Toast { text, error } => self.toasts.show(text, error, None),
-                Op::Debug(text) => self.show_debug(text),
+                Op::Toast { text, error } => {
+                    self.toasts.show(text, error, None);
+                    crate::surface::keep_frames(tx);
+                }
+                Op::Debug(text) => self.show_debug(text, tx),
                 Op::Log(text) => log_frontend(self, &text),
                 Op::Open => {
                     if self.open.as_deref() != Some(id) {
