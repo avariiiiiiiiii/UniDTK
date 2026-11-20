@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
+| **148** | 2026-11-20 | `0425c33` | G2 Rune VPN picker refreshes by subscription revision and rejects stale actions | [Rune panel](../modules/vpn/native/lib.rs), [VPN commands](../modules/vpn/rust/vpn.rs) |
 | **147** | 2026-11-20 | `b1b860d` | Serialized VPN settings writes, atomic subscription cache reset and verified the Rune save path | [VPN store](../modules/vpn/rust/settings.rs), [redb adapter](../core/kernel/module_db.rs) |
 | **146** | 2026-11-20 | `12864d6` | G2 module-owned settings in Rune, VPN port validation and acknowledged switches | [Native settings contract](../core/desktop/settings.rs), [VPN settings](../modules/vpn/native/settings.rs) |
 | **145** | 2026-11-19 | `0fe3091` | G1: the wheel reaches the native desk (`wheel` control message, `Widget::wheel`), the Glyph Bar's volume steps | `core/kernel/input.rs`, `core/desktop/shell.rs`, `core/desktop/widget.rs`, `modules/glyph-bar/native/` |
@@ -5736,3 +5737,25 @@ The VPN store serializes reads and commits for updates under one module lock. It
 ### 147.5 Verification and metrics
 
 All 11 VPN tests passed. An isolated Cargo harness importing `module_db.rs` ran its five tests against redb, including the empty database case. `udtk doctor -check` and `udtk doc --check` passed. `udtk build -j 2` built, installed and verified the release. The CLI restarted the installed process directly after Task Scheduler declined its start request. The installed Rune menu saved the unchanged subscription, showed the confirmation and returned an identical settings snapshot. `udtk doctor --simulate` and `udtk doctor -kernel -modules -ping` passed. Kernel IPC measured 1–2 ms. The host used 101.36 MB Working Set and 119.06 MB private memory with 4.38 ms frame CPU p95. The kernel used 84.31 MB Working Set. The ERROR query and the latest 30 frontend records contained zero errors. The reviewed `udtk shot --host` capture shows the save confirmation with the form closed at `C:\Users\admin\Pictures\Screenshots\unidtk_host_2026-11-20_20-36-39_27272.png`.
+
+## 148. Session 2026-11-20 — Subscription revisions in Rune
+
+### 148.1 Context and symptoms
+
+After session 147, a Rune VPN widget could still show the previous subscription's servers after saving a different URL. The list could remain stale after the card was folded and reopened.
+
+### 148.2 Root cause
+
+The widget cached its first list for the lifetime of the instance. The status poll carried tunnel state without a subscription identity. List and ping replies and picker handlers could outlive the subscription from which they took a tag. The kernel could also decide that a tag was already connected when a different subscription had reused it. A URL write could commit after the kernel took its snapshot from a warm list but before it reserved the connection.
+
+### 148.3 Architecture decision
+
+The settings snapshot supplies the revision in `vpn_status`. The widget uses its visible status poll and its first read after opening to clear outdated tags, selection and latency results, close the picker and reload the list. The same revision identifies list, ping and connect requests and their callbacks. The existing command table accepts the revision as an optional argument. The kernel orders the connection reservation against URL writes under the settings lock before the Win32 sequence. The active tunnel records its own revision for repeat connects. Rules kept include `r[ipc.one-contract]`, `r[modules.idempotent]`, `r[shell.widget-contract]` and `r[kernel.no-blocking-main-thread]`.
+
+### 148.4 Changed files
+
+[Rune VPN panel and tests](../modules/vpn/native/lib.rs), [VPN settings store](../modules/vpn/rust/settings.rs), [settings tests](../modules/vpn/rust/settings_tests.rs), [VPN commands and runtime](../modules/vpn/rust/vpn.rs), [VPN chapter](modules/vpn.md), [CLI module chapter](udtk/ch15-how-a-module-joins-the-bridge.md), [technical debt](dev/ideas-and-debt.md), [status](status.md) and [this journal](sessions.md).
+
+### 148.5 Verification and metrics
+
+All 20 targeted release tests passed (12 backend and 8 native). Isolated fixtures exercised URL changes, stale replies and connection reservation with repeated tags. `udtk doctor -check` and `udtk doc --check` passed. `udtk build -j 2` built and verified the installation. The CLI started the app directly after Task Scheduler declined its start request. The installed kernel returned revision 0 and rejected a mismatched list request. The nested VPN picker loaded its servers, opened and closed the menu, and displayed the list after the Clock card was reopened. The VPN settings snapshots before and after matched. `udtk doctor --simulate`, `udtk doctor -kernel -modules -ping` and the installed `udtk doctor -quick` passed. Kernel IPC RTT was 1 ms and the native inspector RTT was 4 ms. The Rune host used 109.42 MB Working Set and 127.50 MB private memory with 4.71 ms frame CPU p95. The kernel used 45.77 MB Working Set. The ERROR query returned zero records, and the latest 30 frontend records contained zero errors. The reviewed `udtk shot --host` capture shows the loaded picker at `C:\Users\admin\Pictures\Screenshots\unidtk_host_2026-11-20_21-25-27_11424.png`.
