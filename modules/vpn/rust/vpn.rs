@@ -109,19 +109,20 @@ fn settings_status(settings: VpnSettings) -> VpnSettingsStatus {
 // ── Commands ────────────────────────────────────────────────────────────────
 // The writes answer `null` or the settings, exactly as the Tauri commands of the
 // same names did, so the interface sees the same shapes.
+// The Rune picker supplies an optional revision through the same contract (r[ipc.one-contract]).
 
 unidtk_api::module_commands! {
     impl VpnModule {
         read_only "vpn_status" "VPN runtime status" |this| Ok(status(&this.runtime));
         read_only "vpn_settings" "VPN settings" |this| settings();
-        read_only "vpn_list_servers" "VPN servers" |this| list_servers(&this.runtime);
+        read_only "vpn_list_servers" "VPN servers" |this, subscription_revision: Option<u64>| list_servers(&this.runtime, subscription_revision);
         write "vpn_refresh_servers" "Fetch the subscription again" |this| refresh_servers(&this.runtime);
         write "vpn_set_auto_connect" "Toggle connect-on-startup" |this, enabled: bool| set_auto_connect(enabled);
         write "vpn_set_subscription_url" "Set the subscription URL" |this, url: String| set_subscription_url(url);
         write "vpn_set_home_server_config" "Set the home server" |this, config: HomeServerConfig| set_home_server_config(config);
-        write "vpn_connect" "Connect to a server (or the selected one)" |this, tag: Option<String>| {
+        write "vpn_connect" "Connect to a server (or the selected one)" |this, tag: Option<String>, subscription_revision: Option<u64>| {
             unidtk_api::log(format!("vpn: command connect tag={tag:?}"));
-            connect(&this.runtime, tag)
+            connect(&this.runtime, tag, subscription_revision)
         };
         write "vpn_disconnect" "Drop the current connection" |this| {
             disconnect(&this.runtime);
@@ -130,7 +131,7 @@ unidtk_api::module_commands! {
         write "vpn_select_server" "Select the server to connect to" |this, tag: String| select_server(&this.runtime, tag);
         // Not a read, though it answers with measurements: it takes a global
         // in-progress guard and stores the results.
-        write "vpn_ping_all" "Measure latency of every server" |this| ping_all(&this.runtime);
+        write "vpn_ping_all" "Measure latency of every server" |this, subscription_revision: Option<u64>| ping_all(&this.runtime, subscription_revision);
     }
 }
 
@@ -210,6 +211,8 @@ pub struct VpnStatus {
     pub ip_unverified: bool,
     pub error: Option<String>,
     pub auto_connect: bool,
+    /// The current subscription, when the settings snapshot is available.
+    pub subscription_revision: Option<u64>,
     /// Subscription entries that are not VLESS or Trojan, or do not parse.
     #[serde(rename = "skippedServers")]
     pub skipped_servers: usize,
@@ -242,6 +245,8 @@ struct RuntimeInner {
     /// See `VpnStatus::ip_unverified`. Sticky from last successful connect.
     ip_unverified: bool,
     connected: bool,
+    /// The revision used to start the live tunnel. Meaningful while connected.
+    connected_revision: u64,
     connecting: bool,
     last_error: Option<String>,
     /// Entries of the last subscription this module could not use.
@@ -255,6 +260,47 @@ impl RuntimeInner {
             self.servers.clear();
             self.skipped_servers = 0;
         }
+    }
+
+    fn reserve_connect(
+        &mut self,
+        settings_store: &SettingsStore,
+        snapshot: &Snapshot,
+        tag: Option<&str>,
+    ) -> Result<Option<(VpnServer, u64)>, String> {
+        // A URL write can commit while the runtime waits on a subscription fetch.
+        // Order reservation against that write, then release both locks for bring-up.
+        settings_store.with_current_subscription(snapshot.revision, || {
+            let settings = &snapshot.settings;
+            let remembered = self
+                .selected_tag
+                .as_deref()
+                .or(settings.last_tag.as_deref())
+                .filter(|tag| !tag.is_empty())
+                .or(Some(settings.default_tag.as_str()));
+            let (server, fell_back) = pick_server(&self.servers, tag, remembered)?;
+            if fell_back {
+                unidtk_api::log(format!(
+                    "vpn: remembered server {remembered:?} not in subscription; connecting to '{}' instead",
+                    server.tag
+                ));
+            }
+            // Two subscriptions can use the same tag for different servers.
+            if self.connected
+                && self.connected_revision == snapshot.revision
+                && self.selected_tag.as_deref() == Some(server.tag.as_str())
+            {
+                unidtk_api::log(format!("vpn: connect to '{}' ignored: already connected to it", server.tag));
+                return Ok(None);
+            }
+            let epoch = CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
+            self.connecting = true;
+            self.last_error = None;
+            self.proxy_latency_ms = None;
+            self.proxy_error = None;
+            self.ip_unverified = false;
+            Ok(Some((server, epoch)))
+        })
     }
 }
 
@@ -1419,7 +1465,10 @@ fn probe_proxy_get(port: u16, timeout: Duration) -> Result<u32, String> {
 
 static PING_IN_PROGRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub fn ping_all(runtime: &VpnRuntime) -> Result<Vec<VpnPingResult>, String> {
+pub fn ping_all(
+    runtime: &VpnRuntime,
+    subscription_revision: Option<u64>,
+) -> Result<Vec<VpnPingResult>, String> {
     if PING_IN_PROGRESS
         .compare_exchange(
             false,
@@ -1439,11 +1488,11 @@ pub fn ping_all(runtime: &VpnRuntime) -> Result<Vec<VpnPingResult>, String> {
     }
     let _guard = PingGuard;
 
-    ensure_binaries_present()?;
     let settings_store = store()?;
     let (servers, revision) = {
         let mut inner = runtime.inner.lock().unwrap();
-        let snapshot = settings_store.snapshot()?;
+        let snapshot = settings_store.snapshot(subscription_revision)?;
+        ensure_binaries_present()?;
         ensure_servers(&mut inner, settings_store, &snapshot)?;
         (inner.servers.clone(), snapshot.revision)
     };
@@ -1600,18 +1649,21 @@ pub fn ping_all(runtime: &VpnRuntime) -> Result<Vec<VpnPingResult>, String> {
 
 // ─── Public API used by Tauri commands ───
 
-pub fn list_servers(runtime: &VpnRuntime) -> Result<Vec<VpnServer>, String> {
+pub fn list_servers(
+    runtime: &VpnRuntime,
+    subscription_revision: Option<u64>,
+) -> Result<Vec<VpnServer>, String> {
     let mut inner = runtime.inner.lock().unwrap();
     let settings_store = store()?;
-    let snapshot = settings_store.snapshot()?;
+    let snapshot = settings_store.snapshot(subscription_revision)?;
     ensure_servers(&mut inner, settings_store, &snapshot)?;
-    Ok(inner.servers.clone())
+    settings_store.with_current_subscription(snapshot.revision, || Ok(inner.servers.clone()))
 }
 
 pub fn refresh_servers(runtime: &VpnRuntime) -> Result<Vec<VpnServer>, String> {
     let mut inner = runtime.inner.lock().unwrap();
     let settings_store = store()?;
-    let snapshot = settings_store.snapshot()?;
+    let snapshot = settings_store.snapshot(None)?;
     inner.use_subscription(snapshot.revision);
     refresh_servers_locked(&mut inner, settings_store, &snapshot)?;
     Ok(inner.servers.clone())
@@ -1703,18 +1755,7 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
                 unidtk_api::log("vpn: cleanup after a crashed core did not finish");
             }
         });
-        let inner = runtime.inner.lock().unwrap();
-        return VpnStatus {
-            connected: inner.connected,
-            connecting: inner.connecting,
-            selected_tag: inner.selected_tag.clone(),
-            proxy_latency_ms: inner.proxy_latency_ms,
-            proxy_error: inner.proxy_error.clone(),
-            ip_unverified: inner.ip_unverified,
-            error: inner.last_error.clone(),
-            auto_connect: load_settings().is_ok_and(|settings| settings.auto_connect),
-            skipped_servers: inner.skipped_servers,
-        };
+        inner = runtime.inner.lock().unwrap();
     }
     // NOTE (proxy health mid-session): this watchdog only checks the local
     // SOCKS port. It does NOT re-run `probe_vpn_transport()` or any commercial-
@@ -1727,6 +1768,8 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
     // background, rate-limited health probe could refresh `proxy_error`
     // without auto-disconnecting (same surface-don't-kill philosophy as
     // `ip_unverified`).
+    let settings = store().and_then(|store| store.snapshot(None)).ok();
+    let subscription_revision = settings.as_ref().map(|snapshot| snapshot.revision);
     VpnStatus {
         connected: inner.connected,
         connecting: inner.connecting,
@@ -1735,12 +1778,21 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
         proxy_error: inner.proxy_error.clone(),
         ip_unverified: inner.ip_unverified,
         error: inner.last_error.clone(),
-        auto_connect: load_settings().is_ok_and(|settings| settings.auto_connect),
-        skipped_servers: inner.skipped_servers,
+        auto_connect: settings.as_ref().is_some_and(|snapshot| snapshot.settings.auto_connect),
+        subscription_revision,
+        skipped_servers: if subscription_revision == Some(inner.servers_revision) {
+            inner.skipped_servers
+        } else {
+            0
+        },
     }
 }
 
-pub fn connect(runtime: &VpnRuntime, tag: Option<String>) -> Result<(), String> {
+pub fn connect(
+    runtime: &VpnRuntime,
+    tag: Option<String>,
+    subscription_revision: Option<u64>,
+) -> Result<(), String> {
     // Hold the lock only long enough to reserve the "connecting" state and
     // snapshot the chosen server; the actual bring-up (tens of seconds of
     // port/TUN waits) then runs unlocked so status polling stays responsive.
@@ -1753,36 +1805,12 @@ pub fn connect(runtime: &VpnRuntime, tag: Option<String>) -> Result<(), String> 
             unidtk_api::log("vpn: connect ignored: already connecting");
             return Err("VPN connection is already in progress".into());
         }
-        let snapshot = settings_store.snapshot()?;
+        let snapshot = settings_store.snapshot(subscription_revision)?;
         ensure_servers(&mut inner, settings_store, &snapshot)?;
-        let settings = &snapshot.settings;
-        let remembered = inner
-            .selected_tag
-            .clone()
-            .or(settings.last_tag.clone())
-            .filter(|t| !t.is_empty())
-            .or_else(|| Some(settings.default_tag.clone()));
-        let (server, fell_back) = pick_server(&inner.servers, tag.as_deref(), remembered.as_deref())?;
-        if fell_back {
-            // The panel shows `selected_tag` after the connect, which is then the
-            // server that is really in use; the log says why it differs.
-            unidtk_api::log(format!(
-                "vpn: remembered server {remembered:?} not in subscription; connecting to '{}' instead",
-                server.tag
-            ));
-        }
-        // Commands must be safe to repeat: asking for the server the tunnel already
-        // uses must not tear the running core down and start it again.
-        if inner.connected && inner.selected_tag.as_deref() == Some(server.tag.as_str()) {
-            unidtk_api::log(format!("vpn: connect to '{}' ignored: already connected to it", server.tag));
+        let Some((server, epoch)) = inner.reserve_connect(settings_store, &snapshot, tag.as_deref())?
+        else {
             return Ok(());
-        }
-        let epoch = CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
-        inner.connecting = true;
-        inner.last_error = None;
-        inner.proxy_latency_ms = None;
-        inner.proxy_error = None;
-        inner.ip_unverified = false;
+        };
         (server, epoch, snapshot)
     };
 
@@ -1817,6 +1845,7 @@ pub fn connect(runtime: &VpnRuntime, tag: Option<String>) -> Result<(), String> 
     match result {
         Ok(outcome) => {
             inner.connected = true;
+            inner.connected_revision = snapshot.revision;
             CONNECTED.store(true, std::sync::atomic::Ordering::SeqCst);
             inner.selected_tag = Some(server.tag.clone());
             inner.proxy_latency_ms = outcome.latency_ms;
@@ -1935,7 +1964,7 @@ pub fn select_server(runtime: &VpnRuntime, tag: String) -> Result<(), String> {
     store()?.update(|settings| settings.last_tag = Some(tag.clone()))?;
     if inner.connected {
         drop(inner);
-        connect(runtime, Some(tag))
+        connect(runtime, Some(tag), None)
     } else {
         inner.selected_tag = Some(tag);
         Ok(())
@@ -2038,7 +2067,7 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
                 return;
             }
             unidtk_api::log(format!("vpn: auto-connect attempt {attempt} -> {target}"));
-            match connect(&runtime, Some(target.clone())) {
+            match connect(&runtime, Some(target.clone()), None) {
                 Ok(()) => {
                     unidtk_api::log("vpn: auto-connect succeeded");
                     return;

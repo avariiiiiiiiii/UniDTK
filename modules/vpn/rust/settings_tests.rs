@@ -1,4 +1,5 @@
 use super::*;
+use super::super::{parse_vless_line, RuntimeInner};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Barrier, TryLockError};
 use unidtk_api::InMemoryModuleDb;
@@ -97,7 +98,7 @@ fn failed_writes_preserve_settings_and_the_subscription_revision() {
         db.kv_get(CACHE).unwrap().as_deref(),
         Some(&b"previous cache"[..])
     );
-    assert_eq!(store.snapshot().unwrap().revision, 0);
+    assert_eq!(store.snapshot(None).unwrap().revision, 0);
 }
 
 #[test]
@@ -109,12 +110,12 @@ fn changing_the_subscription_invalidates_even_an_earlier_fetch_of_the_same_url()
     store
         .update(|settings| settings.subscription_url = first_url.into())
         .unwrap();
-    let first = store.snapshot().unwrap();
+    let first = store.snapshot(None).unwrap();
     db.kv_set(CACHE, b"existing cache").unwrap();
     store
         .update(|settings| settings.subscription_url = first_url.into())
         .unwrap();
-    assert_eq!(store.snapshot().unwrap().revision, first.revision);
+    assert_eq!(store.snapshot(Some(first.revision)).unwrap().revision, first.revision);
     assert_eq!(
         db.kv_get(CACHE).unwrap().as_deref(),
         Some(&b"existing cache"[..])
@@ -129,15 +130,52 @@ fn changing_the_subscription_invalidates_even_an_earlier_fetch_of_the_same_url()
     store
         .remember_connected(first.revision, "stale tag".into())
         .unwrap();
-    let last = store.snapshot().unwrap();
+    let last = store.snapshot(None).unwrap();
     assert_eq!(last.settings.subscription_url, first_url);
     assert!(last.settings.last_tag.is_none());
     assert_ne!(last.revision, first.revision);
+    assert_eq!(
+        store.snapshot(Some(first.revision)).err().as_deref(),
+        Some(SUBSCRIPTION_CHANGED)
+    );
     assert_eq!(db.kv_get(CACHE).unwrap().as_deref(), Some(&b"[]"[..]));
     let result: Result<(), String> = store.with_current_subscription(first.revision, || {
         panic!("a stale fetch must never publish");
     });
     assert!(result.is_err());
+}
+
+#[test]
+fn connection_reservation_checks_the_subscription_even_for_a_warm_list() {
+    let dir = LegacyDir::new();
+    let store = SettingsStore::new(Arc::new(InMemoryModuleDb::new()), dir.0.clone());
+    store.update(|settings| settings.subscription_url = "https://old.example/".into()).unwrap();
+    let old = store.snapshot(None).unwrap();
+    let mut inner = RuntimeInner {
+        servers: vec![parse_vless_line("vless://test@old.example:443#same").unwrap()],
+        servers_revision: old.revision,
+        connected_revision: old.revision,
+        connected: true,
+        selected_tag: Some("same".into()),
+        ..RuntimeInner::default()
+    };
+    assert!(inner.reserve_connect(&store, &old, Some("same")).unwrap().is_none());
+    assert!(!inner.connecting);
+
+    store.update(|settings| settings.subscription_url = "https://new.example/".into()).unwrap();
+    assert_eq!(
+        inner.reserve_connect(&store, &old, Some("same")).err().as_deref(),
+        Some(SUBSCRIPTION_CHANGED)
+    );
+    assert!(!inner.connecting);
+    assert!(inner.connected);
+
+    let current = store.snapshot(None).unwrap();
+    inner.use_subscription(current.revision);
+    inner.servers.push(parse_vless_line("vless://test@new.example:443#same").unwrap());
+    let (server, _) = inner.reserve_connect(&store, &current, Some("same")).unwrap().unwrap();
+    assert!(inner.connecting);
+    assert_eq!(server.host, "new.example");
 }
 
 #[test]

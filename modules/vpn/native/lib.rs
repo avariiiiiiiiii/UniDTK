@@ -2,8 +2,8 @@
 //! and `vpn.css` draw — the state line with its switch, the server picker with its list and
 //! "ПРОВЕРИТЬ ВСЕ", and "АВТО" — as a widget of the shell's contract. It draws in its opened
 //! card and, compact, in a host's nesting zone (`.nested-body > .dash-vpn` drops the margin,
-//! the padding and the background). The server list is read once per run (`vpnServersCache`)
-//! and `vpn_status` every 3 s while the panel is on screen. Writes (`vpn_connect`,
+//! the padding and the background). The server list follows the subscription revision from
+//! `vpn_status`, polled every 3 s while the panel is on screen. Writes (`vpn_connect`,
 //! `vpn_disconnect`, `vpn_set_auto_connect`) go through the interface door.
 
 use std::collections::HashMap;
@@ -33,7 +33,8 @@ struct Ping {
 
 #[derive(Default)]
 struct Vpn {
-    /// `vpnServersCache`: the subscription's server tags.
+    subscription_revision: Option<u64>,
+    /// The server tags for that revision.
     servers: Option<Vec<String>>,
     loading: bool,
     /// The last read failed: the picker offers "Ошибка подписки · повторить".
@@ -98,6 +99,11 @@ fn server_line(status: &Value) -> String {
     line
 }
 
+fn listed_tag<'a>(status: &'a Value, servers: &[String]) -> Option<&'a str> {
+    status["selected_tag"].as_str()
+        .filter(|tag| servers.iter().any(|server| server.as_str() == *tag))
+}
+
 impl Vpn {
     fn connected(&self) -> bool {
         self.status.as_ref().is_some_and(|s| s["connected"] == true)
@@ -108,38 +114,84 @@ impl Vpn {
     }
 
     fn load_servers(&mut self, act: &mut Act<'_>) {
+        let Some(revision) = self.subscription_revision else { return };
+        if self.loading || !self.visible {
+            return;
+        }
         self.loading = true;
         self.failed = false;
-        act.call("vpn_list_servers", json!({}), |vpn: &mut Vpn, result, act| {
-            vpn.loading = false;
-            match result {
-                Ok(list) => {
-                    let tags: Vec<String> = list.as_array().into_iter().flatten().filter_map(|s| s["tag"].as_str().map(str::to_string)).collect();
-                    if vpn.selected.as_ref().map_or(true, |s| !tags.contains(s)) {
-                        vpn.selected = vpn.status.as_ref().and_then(|s| s["selected_tag"].as_str()).map(str::to_string).filter(|t| tags.contains(t)).or_else(|| tags.first().cloned());
-                    }
-                    vpn.servers = Some(tags);
-                }
-                Err(error) => {
-                    vpn.failed = true;
-                    act.log(format!("vpn_list_servers error={error}"));
-                }
+        act.call("vpn_list_servers", json!({ "subscriptionRevision": revision }), move |vpn: &mut Vpn, result, act| {
+            if let Some(error) = vpn.receive_servers(revision, result) {
+                act.log(format!("vpn_list_servers error={error}"));
             }
         });
     }
 
-    /// `refreshVpnStatus`: a failed read changes nothing.
+    fn receive_servers(&mut self, revision: u64, result: Result<Value, String>) -> Option<String> {
+        if self.subscription_revision != Some(revision) {
+            return None;
+        }
+        self.loading = false;
+        match result {
+            Ok(list) => {
+                let tags: Vec<String> = list.as_array().into_iter().flatten()
+                    .filter_map(|server| server["tag"].as_str().map(str::to_string))
+                    .collect();
+                if self.selected.as_ref().map_or(true, |tag| !tags.contains(tag)) {
+                    self.selected = self.status.as_ref().and_then(|status| listed_tag(status, &tags))
+                        .map(str::to_string).or_else(|| tags.first().cloned());
+                }
+                self.servers = Some(tags);
+                None
+            }
+            Err(error) => {
+                self.failed = true;
+                Some(error)
+            }
+        }
+    }
+
+    /// `refreshVpnStatus` also checks whether the visible picker needs a new list.
     fn refresh(&mut self, act: &mut Act<'_>) {
         self.polled = Some(Instant::now());
-        act.call("vpn_status", json!({}), |vpn: &mut Vpn, result, _act| {
-            let Ok(status) = result else { return };
-            if !vpn.busy {
-                if let Some(tag) = status["selected_tag"].as_str().filter(|t| !t.is_empty()) {
-                    vpn.selected = Some(tag.to_string());
+        act.call("vpn_status", json!({}), |vpn: &mut Vpn, result, act| {
+            if vpn.receive_status(result) {
+                vpn.load_servers(act);
+            }
+        });
+    }
+
+    fn receive_status(&mut self, result: Result<Value, String>) -> bool {
+        let Ok(status) = result else {
+            self.failed |= self.subscription_revision.is_none();
+            return false;
+        };
+        let revision = status["subscription_revision"].as_u64();
+        if let Some(revision) = revision {
+            match self.subscription_revision {
+                Some(previous) if previous > revision => return false,
+                Some(previous) if previous == revision => {}
+                _ => {
+                    self.subscription_revision = Some(revision);
+                    self.servers = None;
+                    self.selected = None;
+                    self.pings = None;
+                    self.loading = false;
+                    self.failed = false;
+                    self.pinging = false;
+                    self.menu = false;
                 }
             }
-            vpn.status = Some(status);
-        });
+            if !self.busy {
+                if let Some(tag) = self.servers.as_deref().and_then(|tags| listed_tag(&status, tags)) {
+                    self.selected = Some(tag.to_string());
+                }
+            }
+        } else {
+            self.failed |= self.subscription_revision.is_none();
+        }
+        self.status = Some(status);
+        revision.is_some() && self.visible && self.servers.is_none() && !self.loading && !self.failed
     }
 
     /// `runVpnToggle`.
@@ -148,11 +200,14 @@ impl Vpn {
             self.refresh(act);
             return;
         }
+        if next && self.subscription_revision.is_none() {
+            return;
+        }
         self.busy = true;
         self.pending = Some(next);
         let (cmd, args) = if next {
             let tag = self.servers.as_ref().and_then(|_| self.selected.clone());
-            ("vpn_connect", json!({ "tag": tag }))
+            ("vpn_connect", json!({ "tag": tag, "subscriptionRevision": self.subscription_revision }))
         } else {
             ("vpn_disconnect", json!({}))
         };
@@ -167,13 +222,13 @@ impl Vpn {
     }
 
     /// `connectTo`: a server from the list, or the fastest after a check.
-    fn connect_to(&mut self, tag: String, act: &mut Act<'_>) {
-        if self.busy {
+    fn connect_to(&mut self, tag: String, revision: u64, act: &mut Act<'_>) {
+        if self.busy || self.subscription_revision != Some(revision) {
             return;
         }
         self.busy = true;
         self.selected = Some(tag.clone());
-        act.call("vpn_connect", json!({ "tag": tag }), |vpn: &mut Vpn, result, act| {
+        act.call("vpn_connect", json!({ "tag": tag, "subscriptionRevision": revision }), |vpn: &mut Vpn, result, act| {
             if let Err(error) = result {
                 act.debug(format!("VPN: {error}"));
             }
@@ -183,13 +238,15 @@ impl Vpn {
     }
 
     /// `pingAllServers`: every server checked, the list sorted by the answer, the fastest taken.
-    fn ping_all(&mut self, act: &mut Act<'_>) {
-        if self.pinging {
+    fn ping_all(&mut self, revision: u64, act: &mut Act<'_>) {
+        if self.pinging || !self.menu_is_current(revision) {
             return;
         }
         self.pinging = true;
-        act.call("vpn_ping_all", json!({}), |vpn: &mut Vpn, result, act| {
-            vpn.pinging = false;
+        act.call("vpn_ping_all", json!({ "subscriptionRevision": revision }), move |vpn: &mut Vpn, result, act| {
+            if !vpn.finish_ping(revision) {
+                return;
+            }
             match result {
                 Ok(list) => {
                     let rows: Vec<(String, Ping)> = list.as_array().into_iter().flatten().filter_map(|r| {
@@ -201,7 +258,7 @@ impl Vpn {
                     match best {
                         Some((tag, ms)) => {
                             act.debug(format!("⚡ {} · {ms} мс", display_text(&tag)));
-                            vpn.connect_to(tag, act);
+                            vpn.connect_to(tag, revision, act);
                         }
                         None => act.debug("Рабочих серверов не найдено"),
                     }
@@ -209,6 +266,18 @@ impl Vpn {
                 Err(error) => act.debug(format!("Проверка: {error}")),
             }
         });
+    }
+
+    fn finish_ping(&mut self, revision: u64) -> bool {
+        if self.subscription_revision != Some(revision) {
+            return false;
+        }
+        self.pinging = false;
+        true
+    }
+
+    fn menu_is_current(&self, revision: u64) -> bool {
+        self.menu && self.visible && self.subscription_revision == Some(revision)
     }
 
     fn set_auto(&mut self, next: bool, act: &mut Act<'_>) {
@@ -262,7 +331,7 @@ impl Vpn {
                     .child(text(label.to_uppercase()).font(accent(theme, 10.4)).color(ink.alpha(0.8)).single_line())
                     .child(text(line).font(body(theme, 10.4)).color(ink.alpha(0.4)).single_line().truncate()),
             )
-            .child(switch(v, format!("hit:vpn-toggle:{key}"), on, busy, |vpn: &mut Vpn, act| {
+            .child(switch(v, format!("hit:vpn-toggle:{key}"), on, busy || (!on && self.subscription_revision.is_none()), |vpn: &mut Vpn, act| {
                 let next = !vpn.pending.unwrap_or_else(|| vpn.connected());
                 vpn.toggle(next, act);
             }));
@@ -284,21 +353,27 @@ impl Vpn {
             .opacity(if picker_enabled { 1.0 } else { 0.55 })
             .child(text(picker_label).font(body(theme, 10.4)).color(ink).single_line().truncate())
             .child(el().absolute(inner - 19.0, 4.0).child(text("⌄").font(body(theme, 12.8)).color(ink.alpha(0.8))));
+        let revision = self.subscription_revision;
         if picker_enabled {
-            button = button.on_press_tx(v.on(|vpn: &mut Vpn, act| {
-                if vpn.busy {
+            button = button.on_press_tx(v.on(move |vpn: &mut Vpn, act| {
+                if vpn.busy || !vpn.visible || vpn.subscription_revision != revision {
                     return;
                 }
                 if vpn.failed || vpn.servers.as_ref().map_or(true, Vec::is_empty) {
-                    vpn.load_servers(act);
+                    if revision.is_some() {
+                        vpn.load_servers(act);
+                    } else {
+                        vpn.failed = false;
+                        vpn.refresh(act);
+                    }
                     return;
                 }
                 vpn.menu = !vpn.menu;
             }));
         }
         let mut picker = el().w_full().child(button);
-        if self.menu {
-            picker = picker.child(self.server_menu(v, inner));
+        if let Some(revision) = revision.filter(|_| self.menu) {
+            picker = picker.child(self.server_menu(v, inner, revision));
         }
 
         let auto = row().w_full().pt(2.0).h(22.0).items_center().justify_between()
@@ -322,7 +397,7 @@ impl Vpn {
 
     /// `.vpn-server-menu`: above the picker, the list at most 200 px, options fading up one
     /// after another as the page's `vpnOptIn` (22 ms apart).
-    fn server_menu(&self, v: &View<'_>, width: f32) -> El {
+    fn server_menu(&self, v: &View<'_>, width: f32, revision: u64) -> El {
         let theme = v.theme;
         let ink = v.ink;
         let pinging = self.pinging;
@@ -335,7 +410,7 @@ impl Vpn {
                     .hover(theme.bg_elevated.alpha(0.14))
                     .child(text(if pinging { "ПРОВЕРКА…" } else { "ПРОВЕРИТЬ ВСЕ" }).font(accent(theme, 9.6).tracking(0.96)).color(if pinging { ink.alpha(0.6) } else { ink }));
                 if !pinging {
-                    ping = ping.on_press_tx(v.on(|vpn: &mut Vpn, act| vpn.ping_all(act)));
+                    ping = ping.on_press_tx(v.on(move |vpn: &mut Vpn, act| vpn.ping_all(revision, act)));
                 }
                 ping
             });
@@ -364,8 +439,10 @@ impl Vpn {
                     .transition(rune::Transition::offset(0.0, 6.0).combined(rune::Transition::opacity()))
                     .enter_delay(if v.motion.reduced { 0.0 } else { index as f32 * 0.022 })
                     .on_press_tx(v.on(move |vpn: &mut Vpn, act| {
-                        vpn.menu = false;
-                        vpn.connect_to(choose.clone(), act);
+                        if vpn.menu_is_current(revision) {
+                            vpn.menu = false;
+                            vpn.connect_to(choose.clone(), revision, act);
+                        }
                     })),
             );
         }
@@ -432,13 +509,12 @@ impl Widget for Vpn {
         false
     }
 
-    /// A panel came on screen: the list once per run, and the state now. Off screen, the list
-    /// closes and the polling stops.
+    /// Check for subscription changes on open. Off screen, close the menu and stop polling.
     fn shown(&mut self, visible: bool, act: &mut Act<'_>) {
         self.visible = visible;
         if visible {
-            if self.servers.is_none() && !self.loading {
-                self.load_servers(act);
+            if self.servers.is_none() {
+                self.failed = false;
             }
             self.refresh(act);
         } else {
@@ -487,5 +563,70 @@ mod tests {
         assert_eq!(vpn.wake(&LocalTime::default()), Some(0.0), "never read: now");
         vpn.polled = Some(Instant::now());
         assert!(vpn.wake(&LocalTime::default()).unwrap() > 2.9);
+    }
+
+    #[test]
+    fn a_changed_subscription_reloads_the_visible_picker_and_discards_old_replies() {
+        let mut vpn = Vpn { visible: true, ..Vpn::default() };
+        assert!(vpn.receive_status(Ok(json!({ "subscription_revision": 1 }))));
+        vpn.receive_servers(1, Ok(json!([{ "tag": "old" }])));
+        vpn.menu = true;
+        vpn.pinging = true;
+        vpn.pings = Some(HashMap::from([("old".into(), Ping { ok: true, ms: Some(20) })]));
+        assert!(vpn.menu_is_current(1));
+
+        assert!(vpn.receive_status(Ok(json!({
+            "subscription_revision": 2, "selected_tag": "old", "connected": true,
+        }))));
+        assert!(vpn.servers.is_none());
+        assert!(vpn.selected.is_none());
+        assert!(vpn.pings.is_none());
+        assert!(!vpn.menu);
+        assert!(!vpn.pinging);
+
+        vpn.loading = true;
+        vpn.pinging = true;
+        assert!(!vpn.receive_status(Ok(json!({ "subscription_revision": 1, "connected": false }))));
+        assert!(vpn.connected());
+        vpn.receive_servers(1, Ok(json!([{ "tag": "old" }])));
+        vpn.receive_servers(1, Err("old request failed".into()));
+        assert!(vpn.loading);
+        assert!(vpn.servers.is_none());
+        assert!(!vpn.failed);
+        assert!(!vpn.finish_ping(1));
+        assert!(vpn.pinging);
+
+        vpn.receive_servers(2, Ok(json!([{ "tag": "new" }])));
+        assert!(!vpn.loading);
+        assert_eq!(vpn.selected.as_deref(), Some("new"));
+        vpn.menu = true;
+        assert!(!vpn.menu_is_current(1));
+        assert!(vpn.menu_is_current(2));
+        assert!(vpn.finish_ping(2));
+        assert!(!vpn.pinging);
+        assert!(!vpn.receive_status(Ok(json!({ "subscription_revision": 2, "selected_tag": "old" }))));
+        assert!(vpn.menu);
+        assert_eq!(vpn.selected.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn a_cold_picker_recovers_at_revision_zero_and_defers_loading_when_hidden() {
+        let mut vpn = Vpn { visible: true, ..Vpn::default() };
+        assert!(!vpn.receive_status(Err("status unavailable".into())));
+        assert!(vpn.failed);
+        assert!(!vpn.receive_status(Ok(json!({ "subscription_revision": null }))));
+        assert!(vpn.failed);
+        assert!(vpn.receive_status(Ok(json!({ "subscription_revision": 0 }))));
+        assert!(!vpn.failed);
+        vpn.receive_servers(0, Err("list unavailable".into()));
+        assert!(!vpn.receive_status(Ok(json!({ "subscription_revision": 0 }))));
+        assert!(vpn.failed);
+
+        vpn.visible = false;
+        assert!(!vpn.receive_status(Ok(json!({ "subscription_revision": 1 }))));
+        assert!(!vpn.failed);
+        assert!(vpn.servers.is_none());
+        vpn.visible = true;
+        assert!(vpn.receive_status(Ok(json!({ "subscription_revision": 1 }))));
     }
 }

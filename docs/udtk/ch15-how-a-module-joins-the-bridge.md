@@ -27,7 +27,9 @@ A module declares its commands in one table, with the `module_commands!` macro f
 unidtk_api::module_commands! {
     impl VpnModule {
         read_only "vpn_status" "VPN runtime status" |this| Ok(status(&this.runtime));
-        write "vpn_connect" "Connect to a server" |this, tag: Option<String>| connect(&this.runtime, tag);
+        write "vpn_connect" "Connect to a server" |this, tag: Option<String>, subscription_revision: Option<u64>| {
+            connect(&this.runtime, tag, subscription_revision)
+        };
     }
 }
 ```

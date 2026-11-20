@@ -12,6 +12,7 @@ use super::{HomeServerConfig, VpnServer};
 
 const SETTINGS: &str = "settings";
 const CACHE: &str = "servers_cache";
+const SUBSCRIPTION_CHANGED: &str = "VPN subscription changed during the request";
 
 static STORE: OnceLock<SettingsStore> = OnceLock::new();
 
@@ -44,8 +45,8 @@ pub(super) struct Snapshot {
 pub(super) struct SettingsStore {
     db: Arc<dyn ModuleDb>,
     legacy_dir: PathBuf,
-    // Serializes all read-modify-write operations and cache publication within this process.
-    // Guarded code does only storage work and never acquires the runtime lock.
+    // Serializes settings writes and decisions about a subscription within this process.
+    // Guarded code may use an already locked runtime, but never acquires its lock.
     revision: Mutex<u64>,
 }
 
@@ -72,8 +73,11 @@ impl SettingsStore {
         self.read_or_import()
     }
 
-    pub(super) fn snapshot(&self) -> Result<Snapshot, String> {
+    pub(super) fn snapshot(&self, expected: Option<u64>) -> Result<Snapshot, String> {
         let revision = self.lock()?;
+        if expected.is_some_and(|expected| expected != *revision) {
+            return Err(SUBSCRIPTION_CHANGED.into());
+        }
         let settings = self.read_or_import()?;
         Ok(Snapshot {
             revision: *revision,
@@ -150,8 +154,8 @@ impl SettingsStore {
         Ok(settings)
     }
 
-    /// Accept a refresh result only while it still belongs to the current subscription.
-    /// The caller completes its cache work in the closure, after the network request.
+    /// Make a state decision only while the subscription is still current.
+    /// The closure runs under the settings lock and must finish without network I/O.
     pub(super) fn with_current_subscription<T>(
         &self,
         expected: u64,
@@ -159,7 +163,7 @@ impl SettingsStore {
     ) -> Result<T, String> {
         let revision = self.lock()?;
         if *revision != expected {
-            return Err("VPN subscription changed during the request".into());
+            return Err(SUBSCRIPTION_CHANGED.into());
         }
         finish()
     }
