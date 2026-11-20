@@ -1,13 +1,14 @@
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use unidtk_api::paths::vpn_helper_exe;
 
-static VPN_DB: OnceLock<Arc<dyn unidtk_api::ModuleDb>> = OnceLock::new();
+mod settings;
+use settings::{store, SettingsStore, Snapshot, VpnSettings};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -73,14 +74,6 @@ pub(crate) fn singbox_exe() -> std::path::PathBuf {
     unidtk_api::paths::singbox_exe()
 }
 
-fn settings_path() -> std::path::PathBuf {
-    data_dir().join("vpn_settings.json")
-}
-
-fn servers_cache_path() -> std::path::PathBuf {
-    data_dir().join("vpn_servers.json")
-}
-
 fn singbox_config_path() -> std::path::PathBuf {
     data_dir().join("singbox_config.json")
 }
@@ -103,112 +96,6 @@ fn stop_done_path() -> std::path::PathBuf {
     data_dir().join("vpn_stop.done")
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-struct VpnSettings {
-    #[serde(default)]
-    subscription_url: String,
-    #[serde(default)]
-    default_tag: String,
-    #[serde(default)]
-    last_tag: Option<String>,
-    #[serde(default = "default_auto_connect")]
-    auto_connect: bool,
-    #[serde(default)]
-    home_server: HomeServerConfig,
-}
-
-fn default_auto_connect() -> bool {
-    false
-}
-
-fn default_settings() -> VpnSettings {
-    VpnSettings {
-        subscription_url: String::new(),
-        default_tag: String::new(),
-        last_tag: None,
-        auto_connect: false,
-        home_server: HomeServerConfig::default(),
-    }
-}
-
-fn load_settings() -> VpnSettings {
-    if let Some(db) = VPN_DB.get() {
-        if let Ok(Some(bytes)) = db.kv_get("settings") {
-            if let Ok(settings) = serde_json::from_slice::<VpnSettings>(&bytes) {
-                return settings;
-            }
-        }
-    }
-
-    let legacy_path = settings_path();
-    if legacy_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&legacy_path) {
-            let trimmed = raw.trim_start_matches('\u{feff}');
-            if let Ok(settings) = serde_json::from_str::<VpnSettings>(trimmed) {
-                let _ = std::fs::remove_file(&legacy_path);
-                save_settings(&settings);
-                return settings;
-            }
-        }
-        let _ = std::fs::remove_file(&legacy_path);
-    }
-
-    let settings = default_settings();
-    save_settings(&settings);
-    settings
-}
-
-fn load_settings_from_db(db: &dyn unidtk_api::ModuleDb) -> VpnSettings {
-    if let Ok(Some(bytes)) = db.kv_get("settings") {
-        if let Ok(settings) = serde_json::from_slice::<VpnSettings>(&bytes) {
-            return settings;
-        }
-    }
-    default_settings()
-}
-
-fn save_settings(settings: &VpnSettings) {
-    if let Some(db) = VPN_DB.get() {
-        if let Ok(bytes) = serde_json::to_vec(settings) {
-            let _ = db.kv_set("settings", &bytes);
-        }
-    }
-}
-
-// Persist the last successfully fetched server list in redb so a later launch can still
-// connect using the previous subscription when the subscription host is down.
-fn save_servers_cache(servers: &[VpnServer]) {
-    if let Some(db) = VPN_DB.get() {
-        if let Ok(bytes) = serde_json::to_vec(servers) {
-            let _ = db.kv_set("servers_cache", &bytes);
-        }
-    }
-}
-
-fn load_servers_cache() -> Vec<VpnServer> {
-    if let Some(db) = VPN_DB.get() {
-        if let Ok(Some(bytes)) = db.kv_get("servers_cache") {
-            if let Ok(servers) = serde_json::from_slice::<Vec<VpnServer>>(&bytes) {
-                return servers;
-            }
-        }
-    }
-
-    let legacy_path = servers_cache_path();
-    if legacy_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&legacy_path) {
-            if let Ok(servers) = serde_json::from_str::<Vec<VpnServer>>(raw.trim_start_matches('\u{feff}')) {
-                let _ = std::fs::remove_file(&legacy_path);
-                save_servers_cache(&servers);
-                return servers;
-            }
-        }
-        let _ = std::fs::remove_file(&legacy_path);
-    }
-
-    Vec::new()
-}
-
 fn settings_status(settings: VpnSettings) -> VpnSettingsStatus {
     VpnSettingsStatus {
         auto_connect: settings.auto_connect,
@@ -226,10 +113,10 @@ fn settings_status(settings: VpnSettings) -> VpnSettingsStatus {
 unidtk_api::module_commands! {
     impl VpnModule {
         read_only "vpn_status" "VPN runtime status" |this| Ok(status(&this.runtime));
-        read_only "vpn_settings" "VPN settings" |this| Ok(settings());
+        read_only "vpn_settings" "VPN settings" |this| settings();
         read_only "vpn_list_servers" "VPN servers" |this| list_servers(&this.runtime);
         write "vpn_refresh_servers" "Fetch the subscription again" |this| refresh_servers(&this.runtime);
-        write "vpn_set_auto_connect" "Toggle connect-on-startup" |this, enabled: bool| Ok(set_auto_connect(enabled));
+        write "vpn_set_auto_connect" "Toggle connect-on-startup" |this, enabled: bool| set_auto_connect(enabled);
         write "vpn_set_subscription_url" "Set the subscription URL" |this, url: String| set_subscription_url(url);
         write "vpn_set_home_server_config" "Set the home server" |this, config: HomeServerConfig| set_home_server_config(config);
         write "vpn_connect" "Connect to a server (or the selected one)" |this, tag: Option<String>| {
@@ -247,38 +134,29 @@ unidtk_api::module_commands! {
     }
 }
 
-pub fn settings() -> VpnSettingsStatus {
-    settings_status(load_settings())
+fn load_settings() -> Result<VpnSettings, String> {
+    store()?.read()
 }
 
-pub fn set_auto_connect(enabled: bool) -> VpnSettingsStatus {
-    let mut settings = load_settings();
-    settings.auto_connect = enabled;
-    save_settings(&settings);
+pub fn settings() -> Result<VpnSettingsStatus, String> {
+    Ok(settings_status(load_settings()?))
+}
+
+pub fn set_auto_connect(enabled: bool) -> Result<VpnSettingsStatus, String> {
+    let settings = store()?.update(|settings| settings.auto_connect = enabled)?;
     unidtk_api::log(format!("vpn: auto-connect set to {enabled}"));
-    settings_status(settings)
+    Ok(settings_status(settings))
 }
 
 pub fn set_subscription_url(url: String) -> Result<VpnSettingsStatus, String> {
-    let mut settings = load_settings();
     let url = url.trim().to_string();
-    if url != settings.subscription_url {
-        // The list in memory and the cache on disk belong to the old subscription.
-        // Dropping them makes the next list or connect read the new one, and a
-        // failure to read it is an error instead of the old servers.
-        save_servers_cache(&[]);
-        SERVERS_STALE.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-    settings.subscription_url = url;
-    save_settings(&settings);
+    let settings = store()?.update(|settings| settings.subscription_url = url)?;
     unidtk_api::log("vpn: subscription_url updated in redb");
     Ok(settings_status(settings))
 }
 
 pub fn set_home_server_config(config: HomeServerConfig) -> Result<VpnSettingsStatus, String> {
-    let mut settings = load_settings();
-    settings.home_server = config;
-    save_settings(&settings);
+    let settings = store()?.update(|settings| settings.home_server = config)?;
     unidtk_api::log(format!(
         "vpn: home_server config updated in redb (enabled={})",
         settings.home_server.enabled
@@ -357,6 +235,7 @@ pub struct VpnRuntime {
 #[derive(Default)]
 struct RuntimeInner {
     servers: Vec<VpnServer>,
+    servers_revision: u64,
     selected_tag: Option<String>,
     proxy_latency_ms: Option<u32>,
     proxy_error: Option<String>,
@@ -367,6 +246,16 @@ struct RuntimeInner {
     last_error: Option<String>,
     /// Entries of the last subscription this module could not use.
     skipped_servers: usize,
+}
+
+impl RuntimeInner {
+    fn use_subscription(&mut self, revision: u64) {
+        if self.servers_revision != revision {
+            self.servers_revision = revision;
+            self.servers.clear();
+            self.skipped_servers = 0;
+        }
+    }
 }
 
 // ─── Subscription parsing ───
@@ -1227,7 +1116,7 @@ fn wait_until_stopped(timeout: Duration, stop_nonce: Option<&str>) -> bool {
 /// Bring the tunnel up for `server`. Runs entirely WITHOUT holding the runtime
 /// mutex — the long port/TUN waits and HTTP probe (tens of seconds worst case)
 /// must not block `status()`/`select_server()` polling on the same lock.
-fn bring_up(server: &VpnServer) -> Result<BringUpResult, String> {
+fn bring_up(server: &VpnServer, settings: &VpnSettings) -> Result<BringUpResult, String> {
     ensure_binaries_present()?;
     unidtk_api::log(format!("vpn: bring_up tag={}", server.tag));
     unidtk_api::log(format!(
@@ -1270,8 +1159,7 @@ fn bring_up(server: &VpnServer) -> Result<BringUpResult, String> {
         ));
     }
 
-    let settings = load_settings();
-    let singbox_cfg = build_singbox_config(server, &settings);
+    let singbox_cfg = build_singbox_config(server, settings);
     std::fs::write(
         singbox_config_path(),
         serde_json::to_string_pretty(&singbox_cfg).unwrap_or_default(),
@@ -1552,12 +1440,12 @@ pub fn ping_all(runtime: &VpnRuntime) -> Result<Vec<VpnPingResult>, String> {
     let _guard = PingGuard;
 
     ensure_binaries_present()?;
-    let servers = {
+    let settings_store = store()?;
+    let (servers, revision) = {
         let mut inner = runtime.inner.lock().unwrap();
-        if inner.servers.is_empty() {
-            refresh_servers_locked(&mut inner)?;
-        }
-        inner.servers.clone()
+        let snapshot = settings_store.snapshot()?;
+        ensure_servers(&mut inner, settings_store, &snapshot)?;
+        (inner.servers.clone(), snapshot.revision)
     };
     if servers.is_empty() {
         return Err("no servers to ping".into());
@@ -1707,54 +1595,61 @@ pub fn ping_all(runtime: &VpnRuntime) -> Result<Vec<VpnPingResult>, String> {
             ));
         }
     }
-    Ok(out)
+    settings_store.with_current_subscription(revision, || Ok(out))
 }
 
 // ─── Public API used by Tauri commands ───
 
-/// Set when the subscription URL changed: the servers in memory are the old ones.
-static SERVERS_STALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 pub fn list_servers(runtime: &VpnRuntime) -> Result<Vec<VpnServer>, String> {
     let mut inner = runtime.inner.lock().unwrap();
-    if SERVERS_STALE.swap(false, std::sync::atomic::Ordering::SeqCst) {
-        inner.servers.clear();
-    }
-    if inner.servers.is_empty() {
-        refresh_servers_locked(&mut inner)?;
-    }
+    let settings_store = store()?;
+    let snapshot = settings_store.snapshot()?;
+    ensure_servers(&mut inner, settings_store, &snapshot)?;
     Ok(inner.servers.clone())
 }
 
 pub fn refresh_servers(runtime: &VpnRuntime) -> Result<Vec<VpnServer>, String> {
     let mut inner = runtime.inner.lock().unwrap();
-    refresh_servers_locked(&mut inner)?;
+    let settings_store = store()?;
+    let snapshot = settings_store.snapshot()?;
+    inner.use_subscription(snapshot.revision);
+    refresh_servers_locked(&mut inner, settings_store, &snapshot)?;
     Ok(inner.servers.clone())
 }
 
-fn refresh_servers_locked(inner: &mut RuntimeInner) -> Result<(), String> {
-    let settings = load_settings();
-    if settings.subscription_url.is_empty() {
+fn ensure_servers(inner: &mut RuntimeInner, settings_store: &SettingsStore, snapshot: &Snapshot) -> Result<(), String> {
+    inner.use_subscription(snapshot.revision);
+    if inner.servers.is_empty() {
+        refresh_servers_locked(inner, settings_store, snapshot)?;
+    }
+    Ok(())
+}
+
+fn refresh_servers_locked(inner: &mut RuntimeInner, settings_store: &SettingsStore, snapshot: &Snapshot) -> Result<(), String> {
+    let url = &snapshot.settings.subscription_url;
+    if url.is_empty() {
         return Err("VPN subscription URL is not configured".into());
     }
-    match fetch_servers(&settings.subscription_url) {
+    // Network I/O runs outside the settings lock. Publication and fallback use the same revision.
+    let fetched = fetch_servers(url);
+    settings_store.with_current_subscription(snapshot.revision, || match fetched {
         Ok((servers, skipped)) => {
             unidtk_api::log(format!("vpn: fetched {} servers, {skipped} entries skipped", servers.len()));
-            save_servers_cache(&servers);
+            if let Err(error) = settings_store.save_servers_cache(&servers) {
+                unidtk_api::log(format!("vpn: could not cache refreshed servers: {error}"));
+            }
             inner.servers = servers;
             inner.skipped_servers = skipped;
             Ok(())
         }
         Err(e) => {
             unidtk_api::log(format!("vpn: fetch_servers failed: {e}"));
-            // A failed subscription update must not block connecting: fall back to
-            // the servers we already have, or the last set persisted to disk, so
-            // the user can still reach servers from the previous subscription.
+            // A failed fetch can use the server list saved for this subscription.
             if !inner.servers.is_empty() {
                 unidtk_api::log("vpn: keeping in-memory servers after failed refresh");
                 return Ok(());
             }
-            let cached = load_servers_cache();
+            let cached = settings_store.load_servers_cache();
             if !cached.is_empty() {
                 unidtk_api::log(format!(
                     "vpn: using {} cached servers after failed refresh",
@@ -1765,7 +1660,7 @@ fn refresh_servers_locked(inner: &mut RuntimeInner) -> Result<(), String> {
             }
             Err(e)
         }
-    }
+    })
 }
 
 pub fn status(runtime: &VpnRuntime) -> VpnStatus {
@@ -1817,7 +1712,7 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
             proxy_error: inner.proxy_error.clone(),
             ip_unverified: inner.ip_unverified,
             error: inner.last_error.clone(),
-            auto_connect: load_settings().auto_connect,
+            auto_connect: load_settings().is_ok_and(|settings| settings.auto_connect),
             skipped_servers: inner.skipped_servers,
         };
     }
@@ -1840,7 +1735,7 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
         proxy_error: inner.proxy_error.clone(),
         ip_unverified: inner.ip_unverified,
         error: inner.last_error.clone(),
-        auto_connect: load_settings().auto_connect,
+        auto_connect: load_settings().is_ok_and(|settings| settings.auto_connect),
         skipped_servers: inner.skipped_servers,
     }
 }
@@ -1851,19 +1746,16 @@ pub fn connect(runtime: &VpnRuntime, tag: Option<String>) -> Result<(), String> 
     // port/TUN waits) then runs unlocked so status polling stays responsive.
     // Snapshot CONNECT_EPOCH so we can detect a concurrent disconnect/shutdown
     // that ran while bring_up was unlocked.
-    let (server, epoch) = {
+    let settings_store = store()?;
+    let (server, epoch, snapshot) = {
         let mut inner = runtime.inner.lock().unwrap();
         if inner.connecting {
             unidtk_api::log("vpn: connect ignored: already connecting");
             return Err("VPN connection is already in progress".into());
         }
-        if SERVERS_STALE.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            inner.servers.clear();
-        }
-        if inner.servers.is_empty() {
-            refresh_servers_locked(&mut inner)?;
-        }
-        let settings = load_settings();
+        let snapshot = settings_store.snapshot()?;
+        ensure_servers(&mut inner, settings_store, &snapshot)?;
+        let settings = &snapshot.settings;
         let remembered = inner
             .selected_tag
             .clone()
@@ -1891,10 +1783,10 @@ pub fn connect(runtime: &VpnRuntime, tag: Option<String>) -> Result<(), String> 
         inner.proxy_latency_ms = None;
         inner.proxy_error = None;
         inner.ip_unverified = false;
-        (server, epoch)
+        (server, epoch, snapshot)
     };
 
-    let result = bring_up(&server);
+    let result = bring_up(&server, &snapshot.settings);
 
     let mut inner = runtime.inner.lock().unwrap();
     if CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch {
@@ -1933,18 +1825,15 @@ pub fn connect(runtime: &VpnRuntime, tag: Option<String>) -> Result<(), String> 
             // above) until the detached thread below resolves it — this
             // commit must not wait on any IP lookup.
             inner.last_error = None;
-            drop(inner);
-            // Hand Telegram off to the VPN TUN (managed vless proxy → direct).
-            publish_vpn_state();
-
-            // Remember this server as the auto-connect target. Whether we
-            // actually reconnect on next launch is governed solely by the
-            // AUTO toggle (VpnSettings::auto_connect / set_auto_connect) —
-            // a manual connect here must not flip that setting on its own.
-            let mut settings = load_settings();
-            settings.last_tag = Some(server.tag.clone());
-            save_settings(&settings);
+            // Keep the remembered tag ordered with the live selection. A later
+            // subscription change can supersede this preference during bring-up.
+            let remember = settings_store.remember_connected(snapshot.revision, server.tag.clone());
             MANUAL_DISCONNECT.store(false, std::sync::atomic::Ordering::SeqCst);
+            drop(inner);
+            publish_vpn_state();
+            if let Err(error) = remember {
+                unidtk_api::log(format!("vpn: could not remember connected server: {error}"));
+            }
 
             // Finish egress verification off the hot path: join the
             // already-in-flight pre-connect lookup (started near the top of
@@ -2017,6 +1906,7 @@ pub fn disconnect(runtime: &VpnRuntime) {
         inner.last_error = None;
         // Invalidate any in-flight connect so its post-bring_up commit is a no-op.
         CONNECT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        MANUAL_DISCONNECT.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     CONNECTED.store(false, std::sync::atomic::Ordering::SeqCst);
     // Bring the managed Telegram VLESS tunnel back the moment VPN is down.
@@ -2037,23 +1927,16 @@ pub fn disconnect(runtime: &VpnRuntime) {
         // up disconnect() returning to the UI.
         std::thread::spawn(|| log_public_ip("post-disconnect"));
     }
-    // Does NOT touch the persisted AUTO setting — that's an independent user
-    // preference (see set_auto_connect). Only stop any in-flight startup
-    // auto-connect retry loop from reconnecting right back.
-    MANUAL_DISCONNECT.store(true, std::sync::atomic::Ordering::SeqCst);
     unidtk_api::log("vpn: disconnect complete");
 }
 
 pub fn select_server(runtime: &VpnRuntime, tag: String) -> Result<(), String> {
-    let was_connected = { runtime.inner.lock().unwrap().connected };
-    let mut settings = load_settings();
-    settings.last_tag = Some(tag.clone());
-    save_settings(&settings);
-
-    if was_connected {
+    let mut inner = runtime.inner.lock().unwrap();
+    store()?.update(|settings| settings.last_tag = Some(tag.clone()))?;
+    if inner.connected {
+        drop(inner);
         connect(runtime, Some(tag))
     } else {
-        let mut inner = runtime.inner.lock().unwrap();
         inner.selected_tag = Some(tag);
         Ok(())
     }
@@ -2110,7 +1993,13 @@ pub fn shutdown_and_wait(runtime: &VpnRuntime, budget: Duration) -> bool {
 
 pub fn auto_connect_on_startup(runtime: VpnRuntime) {
     std::thread::spawn(move || {
-        let settings = load_settings();
+        let settings = match load_settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                unidtk_api::log(format!("vpn: auto-connect could not read settings: {error}"));
+                return;
+            }
+        };
         unidtk_api::log(format!(
             "vpn: auto-connect settings enabled={} sub_url_empty={} default_tag={:?} last_tag={:?}",
             settings.auto_connect,
@@ -2140,7 +2029,7 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
             // (set_auto_connect) or a manual disconnect during an in-flight
             // try must both stop further retries instead of reconnecting
             // behind the user.
-            if !load_settings().auto_connect {
+            if !load_settings().is_ok_and(|settings| settings.auto_connect) {
                 unidtk_api::log("vpn: auto-connect aborted, disabled during attempts");
                 return;
             }
@@ -2235,11 +2124,11 @@ impl unidtk_api::Module for VpnModule {
     fn init(&self, ctx: unidtk_api::ModuleContext) -> Result<(), String> {
         if ctx.is_diagnostic() {
             // In diagnostics mode, read only the in-memory settings, without side effects
-            let _settings = load_settings_from_db(&*ctx.db());
+            settings::read_record(ctx.db().as_ref())?;
             return Ok(());
         }
 
-        let _ = VPN_DB.set(ctx.db());
+        settings::bind(ctx.db());
         if !ctx.enabled() {
             unidtk_api::log("vpn: disabled — auto-connect not started");
             return Ok(());

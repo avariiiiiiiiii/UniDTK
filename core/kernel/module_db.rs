@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use redb::{Database, Durability, ReadableTableMetadata, TableDefinition};
+use redb::{Database, Durability, ReadableTableMetadata, TableDefinition, TableError};
 use unidtk_api::{DbOp, ModuleDb, ModuleId};
 
 /// Key slice of all modules: `mods/<slug>/<key>` → bytes.
@@ -62,7 +62,12 @@ impl RedbModuleDb {
 impl ModuleDb for RedbModuleDb {
     fn kv_get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         let txn = self.db.begin_read().map_err(|e| e.to_string())?;
-        let table = txn.open_table(MODULE_KV).map_err(|e| e.to_string())?;
+        let table = match txn.open_table(MODULE_KV) {
+            Ok(table) => table,
+            // The first write creates this table (r[storage.no-raw-db]).
+            Err(TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
         match table.get(self.full_key(key).as_str()).map_err(|e| e.to_string())? {
             Some(value) => Ok(Some(value.value().to_vec())),
             None => Ok(None),
@@ -171,6 +176,18 @@ mod tests {
         let path = dir.join("test.redb");
         let db = Database::create(&path).unwrap();
         (Arc::new(db), dir)
+    }
+
+    #[test]
+    fn a_new_database_has_no_module_values() {
+        let (db, dir) = scratch_db("missing-table");
+        let module = RedbModuleDb::new(db, &ModuleId::new("vpn"));
+        assert_eq!(module.kv_get("settings").unwrap(), None);
+        module.kv_set("settings", b"saved").unwrap();
+        assert_eq!(module.kv_get("settings").unwrap().as_deref(), Some(&b"saved"[..]));
+        drop(module);
+        let _ = std::fs::remove_file(dir.join("test.redb"));
+        let _ = std::fs::remove_dir(dir);
     }
 
     #[test]

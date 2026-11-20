@@ -17,6 +17,7 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 | File | Role |
 | :--- | :--- |
 | [modules/vpn/rust/vpn.rs](../../modules/vpn/rust/vpn.rs) | The module: subscription, configuration, connect, disconnect, status, shutdown (2,240 lines). |
+| [modules/vpn/rust/settings.rs](../../modules/vpn/rust/settings.rs) | Settings updates, legacy import and the subscription cache. |
 | [modules/vpn/helper/main.rs](../../modules/vpn/helper/main.rs) | `vpn-helper.exe`: starts and stops `sing-box.exe` with the rights of its scheduled task (207 lines). |
 | [modules/vpn/native/lib.rs](../../modules/vpn/native/lib.rs) | The native half: the VPN panel on the Rune desk, in its own card and compact in a host's nesting zone ([shell.widget-contract](../reference/shell.md#r-shell.widget-contract)). |
 | [modules/vpn/native/settings.rs](../../modules/vpn/native/settings.rs) | The native menu pane for the subscription, auto-connect, and the home server. |
@@ -27,12 +28,14 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 
 On the Rune desk, open Settings → Desk → VPN → Configure VPN. The pane loads the stored values before showing the form. It sends one write at a time and changes the switches when the kernel acknowledges the command. The home server switch sends the last confirmed configuration with the new `enabled` value. Save Server sends the form's edits. A blank port means 443 and a filled port must be in 1–65535.
 
+The VPN stores settings and the server cache in its `ModuleDb` slice. Each settings update reads the latest record and commits under one module lock. A command reports a storage error to the caller. The saved subscription URL and the empty server cache share one redb transaction when the URL changes. List, refresh, ping and connect use a subscription revision to identify their source. A fetch or ping that finishes after a subscription change returns a retryable error. A connection uses a settings snapshot taken before the stop and start sequence.
+
 Binaries live next to the program (`sing-box.exe`, `vpn-helper.exe`), in the install directory returned by `paths::install_dir()`. Mutable state lives in the data directory, `%LOCALAPPDATA%\UniDTK`:
 
 | State file | Written by | Meaning |
 | :--- | :--- | :--- |
-| `vpn_settings.json` | the module | Subscription URL, auto-connect flag, last server tag, home-server settings. |
-| `vpn_servers.json` | the module | Cache of the parsed server list. |
+| `vpn_settings.json` | legacy import | Subscription URL, auto-connect flag, last server tag and home-server settings. The module imports it when the redb record is absent and removes the file after commit. |
+| `vpn_servers.json` | legacy import | Cache of the parsed server list. An explicit empty redb list supersedes this file after a subscription change. |
 | `singbox_config.json` | the module | The configuration sing-box runs with. |
 | `singbox.log` | sing-box | Log file of the running core. |
 | `vpn_core.pid` | the helper | PID of the running `sing-box.exe`. |
