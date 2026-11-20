@@ -3,7 +3,7 @@ title: UniDTK Sessions Journal (Engineering Session Log)
 type: journal
 project: unidtk
 version: "0.1.0"
-updated_at: "2026-10-28"
+updated_at: "2026-11-20"
 status: active
 format: "Chronological MOC / GitHub Markdown"
 ---
@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
+| **146** | 2026-11-20 | `12864d6` | G2 module-owned settings in Rune, VPN port validation and acknowledged switches | [Native settings contract](../core/desktop/settings.rs), [VPN settings](../modules/vpn/native/settings.rs) |
 | **145** | 2026-11-19 | `0fe3091` | G1: the wheel reaches the native desk (`wheel` control message, `Widget::wheel`), the Glyph Bar's volume steps | `core/kernel/input.rs`, `core/desktop/shell.rs`, `core/desktop/widget.rs`, `modules/glyph-bar/native/` |
 | **144** | 2026-11-19 | `340a81e` | G1: the Glyph Bar on the native desk (`modules/glyph-bar/native`), `flatChrome: none`, sticky kernel events | `modules/glyph-bar/native/`, `core/desktop/card.rs`, `core/desktop/shell.rs` |
 | **143** | 2026-11-16..19 | `a73fde1` | G2: the widget contract (`modules/<id>/native/`), one morph, the clock's freeze on a close from fully open (`surface::keep_frames`), the first-press and flat-material fixes | `core/desktop/surface.rs`, `core/desktop/shell.rs`, `core/desktop/menu.rs`, `modules/clock/native/`, `docs/reference/shell.md` |
@@ -5690,3 +5691,25 @@ The native window is a child of the desktop and never receives a real wheel (`in
 - Live, native host, Desktop 1 (synthetic `mouse_event` wheel over the bar at (1224, 351) pt): muted at 44 % -> up gives 10 % unmuted; up 20 %; down 10 %; a wheel at (100, 100), off the bar, changes nothing. These are the page's rules in `logic::nudge`. The volume was then put back to 44 %, muted, through the endpoint API (the write door is not open to `udtk invoke`).
 - **Touchpad, found on the user's hand: the volume went the wrong way.** `touchpad.rs` follows the system's scroll direction (here `PrecisionTouchPad\ScrollDirection` = 0, natural: fingers down is wheel up), which is right for scrolling and wrong for a vertical slider. The `wheel` message now says whether the travel is a touchpad's (`own_only`, the only path that sees a pad over the desk) and the Glyph Bar turns it back (`logic::step`: fingers up is louder). A mouse wheel is unchanged.
 - Not covered: the wheel over a card with a surface open (nothing routes); the player's volume and the Explorer's scrolling (their ports); a touchpad's small deltas are summed by `take_notches` (tested), not tried on a pad.
+
+## 146. Session 2026-11-20 — G2 module settings in Rune
+
+### 146.1 Context and symptoms
+
+The next G2 task was moving module settings out of the native shell. VPN was the first settings pane in Rune, reached from the Desk menu through the module sheet. Its home server switch could show a change that the kernel refused.
+
+### 146.2 Root cause
+
+`View::Vpn`, the module sheet's `settingsView` check and the settings state all lived in the shell. The home server switch changed that state before dispatch, and the failure handler left it as drawn. The native form serialized the port as `u64` while the kernel expects `u16`, so 65536 could produce that failure. An old settings reply could also reach the same state after the pane reopened.
+
+### 146.3 Architecture decision
+
+The widget registration can provide a settings factory. The menu opens one pane for the selected module even when the desk has no tile for it. The shell supplies navigation, shared controls and the existing UI command door. Presses, text edits and replies belong to the generation that opened the pane. The VPN module owns its form and confirms one write at a time. Its home switch sends the last acknowledged configuration with a new `enabled` value, and the form validates port edits before sending. Saving a subscription confirms the command. Cache invalidation and concurrent storage writes are tracked in [Ideas and Technical Debt](dev/ideas-and-debt.md). Rules kept include `r[shell.widget-contract]`, `r[shell.widget-identity]`, `r[kernel.menu-in-core]`, `r[modules.vertical-slice]` and `r[ipc.one-contract]`.
+
+### 146.4 Changed files
+
+[core/desktop/settings.rs](../core/desktop/settings.rs), [core/desktop/menu.rs](../core/desktop/menu.rs), [core/desktop/menu_desk.rs](../core/desktop/menu_desk.rs), [core/desktop/controls.rs](../core/desktop/controls.rs), [core/desktop/widget.rs](../core/desktop/widget.rs), [core/desktop/shell.rs](../core/desktop/shell.rs), [core/desktop/lib.rs](../core/desktop/lib.rs), [modules/vpn/native/settings.rs](../modules/vpn/native/settings.rs), [modules/vpn/native/lib.rs](../modules/vpn/native/lib.rs), [modules/clock/native/lib.rs](../modules/clock/native/lib.rs), [modules/glyph-bar/native/lib.rs](../modules/glyph-bar/native/lib.rs), [docs/reference/shell.md](reference/shell.md), [docs/reference/modules.md](reference/modules.md), [docs/modules/vpn.md](modules/vpn.md), [docs/book/ch04-modules.md](book/ch04-modules.md), [docs/dev/ideas-and-debt.md](dev/ideas-and-debt.md), [docs/status.md](status.md) and [this journal](sessions.md). The former `core/desktop/menu_vpn.rs` was removed.
+
+### 146.5 Verification and metrics
+
+`udtk build -j 1` installed the release, checked the hashes and restarted the app directly after Task Scheduler declined the start request. The installed Rune desk loaded the VPN form, returned to Desk, reopened the form and restored Desk after closing the menu. The live test read the existing settings. All 477 UniDTK unit tests passed in their release test binaries (299 library tests and 178 binary tests), including port boundaries, rejected writes and stale panel bindings. The full workspace build produced the binary harnesses before finding a lifetime error in the settings test fixture. The fixture uses a static registry in the successful library run. Cargo's explicit `--lib` selection also tried to build the disabled test targets in the vendored `rune` and `procwatch` crates, so the UniDTK targets ran separately. The `ort-sys` test build needed `target/release/build/examples` and `target/release/build/deps` for its DLL staging. The player harness used the installed model via its process-local `AI_DJ_MODEL_PATH`. `udtk doctor -check`, `udtk doctor --simulate`, `udtk doctor --host --simulate`, `udtk doctor -kernel -modules -ping` and `udtk doc --check` passed. `doctor -quick` passed from the installation directory. A source-checkout run reports the Rune worktree's missing `.env`. Kernel IPC took 1–2 ms around the menu check and 6 ms at the final check. The native inspector took 6 ms. After menu navigation the host used 101.60 MB Working Set and 123.14 MB private, with 4.76 ms frame CPU p95. The kernel used 62.20 MB Working Set. The ERROR query returned zero records and the latest 30 frontend records contained zero errors. The `udtk shot --host` capture was reviewed with form values covered at `C:\Users\admin\Pictures\Screenshots\unidtk_host_2026-11-20_18-48-03_vpn_redacted.png`.

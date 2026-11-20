@@ -188,6 +188,7 @@ mod tests {
         make: |_: &Init<'_>| Box::new(ExampleWidget),
         settings: Some(|| Box::<ExampleSettings>::default()),
     };
+    static WIDGET_TYPES: &[&WidgetType] = &[&EXAMPLE];
 
     #[test]
     fn a_pane_can_open_without_a_desk_widget_and_old_bindings_expire() {
@@ -197,7 +198,7 @@ mod tests {
             (800.0, 600.0),
             1.0,
             Default::default(),
-            &[&EXAMPLE],
+            WIDGET_TYPES,
         );
         let mut tx = Tx::default();
         host.menu.open = true;
