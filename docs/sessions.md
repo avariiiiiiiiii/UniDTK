@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
+| **147** | 2026-11-20 | `b1b860d` | Serialized VPN settings writes, atomic subscription cache reset and verified the Rune save path | [VPN store](../modules/vpn/rust/settings.rs), [redb adapter](../core/kernel/module_db.rs) |
 | **146** | 2026-11-20 | `12864d6` | G2 module-owned settings in Rune, VPN port validation and acknowledged switches | [Native settings contract](../core/desktop/settings.rs), [VPN settings](../modules/vpn/native/settings.rs) |
 | **145** | 2026-11-19 | `0fe3091` | G1: the wheel reaches the native desk (`wheel` control message, `Widget::wheel`), the Glyph Bar's volume steps | `core/kernel/input.rs`, `core/desktop/shell.rs`, `core/desktop/widget.rs`, `modules/glyph-bar/native/` |
 | **144** | 2026-11-19 | `340a81e` | G1: the Glyph Bar on the native desk (`modules/glyph-bar/native`), `flatChrome: none`, sticky kernel events | `modules/glyph-bar/native/`, `core/desktop/card.rs`, `core/desktop/shell.rs` |
@@ -5713,3 +5714,25 @@ The widget registration can provide a settings factory. The menu opens one pane 
 ### 146.5 Verification and metrics
 
 `udtk build -j 1` installed the release, checked the hashes and restarted the app directly after Task Scheduler declined the start request. The installed Rune desk loaded the VPN form, returned to Desk, reopened the form and restored Desk after closing the menu. The live test read the existing settings. All 477 UniDTK unit tests passed in their release test binaries (299 library tests and 178 binary tests), including port boundaries, rejected writes and stale panel bindings. The full workspace build produced the binary harnesses before finding a lifetime error in the settings test fixture. The fixture uses a static registry in the successful library run. Cargo's explicit `--lib` selection also tried to build the disabled test targets in the vendored `rune` and `procwatch` crates, so the UniDTK targets ran separately. The `ort-sys` test build needed `target/release/build/examples` and `target/release/build/deps` for its DLL staging. The player harness used the installed model via its process-local `AI_DJ_MODEL_PATH`. `udtk doctor -check`, `udtk doctor --simulate`, `udtk doctor --host --simulate`, `udtk doctor -kernel -modules -ping` and `udtk doc --check` passed. `doctor -quick` passed from the installation directory. A source-checkout run reports the Rune worktree's missing `.env`. Kernel IPC took 1–2 ms around the menu check and 6 ms at the final check. The native inspector took 6 ms. After menu navigation the host used 101.60 MB Working Set and 123.14 MB private, with 4.76 ms frame CPU p95. The kernel used 62.20 MB Working Set. The ERROR query returned zero records and the latest 30 frontend records contained zero errors. The `udtk shot --host` capture was reviewed with form values covered at `C:\Users\admin\Pictures\Screenshots\unidtk_host_2026-11-20_18-48-03_vpn_redacted.png`.
+
+## 147. Session 2026-11-20 — VPN settings and the subscription cache
+
+### 147.1 Context and symptoms
+
+The Rune settings pane in session 146 waits for a kernel reply before confirming edits. The next check traced what that reply meant when a settings command, server selection or a connection could write at the same time.
+
+### 147.2 Root cause
+
+Each writer loaded the full JSON record, edited a field and replaced the record with its own snapshot. A later write could erase fields saved between the read and the commit. The setter also acknowledged writes even when `kv_set` failed, and legacy import deleted its input before saving. Subscription changes marked the cache stale before writing the new URL. An earlier refresh could repopulate the old cache after the change.
+
+### 147.3 Architecture decision
+
+The VPN store serializes reads and commits for updates under one module lock. It returns storage failures to explicit setters and preserves the legacy settings until import commits. The redb adapter reports a missing module table as an absent setting on a fresh database. A changed URL and an empty server cache commit together. The store increments the subscription revision after success, and results from older fetches or pings are rejected. Selection and the saved tag are ordered under the runtime lock. The connection uses a snapshot from before the first Win32 side effect. A failure to save the remembered tag is logged once the healthy tunnel has been published. Manual disconnect sets the retry latch beside the connection epoch. The new settings lock stays outside network calls and event delivery. Rules kept include `r[storage.no-raw-db]`, `r[modules.idempotent]`, `r[modules.command-table]`, `r[kernel.no-blocking-main-thread]` and `r[ipc.one-contract]`.
+
+### 147.4 Changed files
+
+[VPN store](../modules/vpn/rust/settings.rs), [settings tests](../modules/vpn/rust/settings_tests.rs), [VPN commands and runtime](../modules/vpn/rust/vpn.rs), [redb module adapter](../core/kernel/module_db.rs), [VPN chapter](modules/vpn.md), [technical debt](dev/ideas-and-debt.md), [status](status.md) and [this journal](sessions.md).
+
+### 147.5 Verification and metrics
+
+All 11 VPN tests passed. An isolated Cargo harness importing `module_db.rs` ran its five tests against redb, including the empty database case. `udtk doctor -check` and `udtk doc --check` passed. `udtk build -j 2` built, installed and verified the release. The CLI restarted the installed process directly after Task Scheduler declined its start request. The installed Rune menu saved the unchanged subscription, showed the confirmation and returned an identical settings snapshot. `udtk doctor --simulate` and `udtk doctor -kernel -modules -ping` passed. Kernel IPC measured 1–2 ms. The host used 101.36 MB Working Set and 119.06 MB private memory with 4.38 ms frame CPU p95. The kernel used 84.31 MB Working Set. The ERROR query and the latest 30 frontend records contained zero errors. The reviewed `udtk shot --host` capture shows the save confirmation with the form closed at `C:\Users\admin\Pictures\Screenshots\unidtk_host_2026-11-20_20-36-39_27272.png`.
