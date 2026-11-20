@@ -19,10 +19,13 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 | [modules/vpn/rust/vpn.rs](../../modules/vpn/rust/vpn.rs) | The module: subscription, configuration, connect, disconnect, status, shutdown (2,240 lines). |
 | [modules/vpn/helper/main.rs](../../modules/vpn/helper/main.rs) | `vpn-helper.exe`: starts and stops `sing-box.exe` with the rights of its scheduled task (207 lines). |
 | [modules/vpn/native/lib.rs](../../modules/vpn/native/lib.rs) | The native half: the VPN panel on the Rune desk, in its own card and compact in a host's nesting zone ([shell.widget-contract](../reference/shell.md#r-shell.widget-contract)). |
+| [modules/vpn/native/settings.rs](../../modules/vpn/native/settings.rs) | The native menu pane for the subscription, auto-connect, and the home server. |
 | [scheduler-tasks/UniDTKSingboxTask.xml](../../scheduler-tasks/UniDTKSingboxTask.xml) | Task `UniDTKSingbox`, which runs `vpn-helper.exe start`. |
 | [scheduler-tasks/UniDTKVpnStopTask.xml](../../scheduler-tasks/UniDTKVpnStopTask.xml) | Task `UniDTKVpnStop`, which runs `vpn-helper.exe stop`. |
 | [core/api/src/paths.rs](../../core/api/src/paths.rs) | Where binaries and state files live. |
 | [core/kernel/main.rs](../../core/kernel/main.rs) and [core/kernel/shutdown.rs](../../core/kernel/shutdown.rs) | App shutdown and the Windows session-end listener. |
+
+On the Rune desk, open Settings → Desk → VPN → Configure VPN. The pane loads the stored values before showing the form. It sends one write at a time and changes the switches when the kernel acknowledges the command. The home server switch sends the last confirmed configuration with the new `enabled` value. Save Server sends the form's edits. A blank port means 443 and a filled port must be in 1–65535.
 
 Binaries live next to the program (`sing-box.exe`, `vpn-helper.exe`), in the install directory returned by `paths::install_dir()`. Mutable state lives in the data directory, `%LOCALAPPDATA%\UniDTK`:
 

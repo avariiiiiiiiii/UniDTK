@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use unidtk_shell::theme::{derived, oklch_in_gamut, oklch_of};
 use unidtk_shell::widget::{Act, Init, Material, Theme, View, Widget, WidgetType};
 
-pub static WIDGET: WidgetType = WidgetType { id: "glyph-bar", events: &["system-volume"], make };
+pub static WIDGET: WidgetType = WidgetType { id: "glyph-bar", events: &["system-volume"], make, settings: None };
 
 fn make(_: &Init<'_>) -> Box<dyn Widget> {
     // Before the first read the page shows `{ level: 0, muted: false }`: an empty bar.

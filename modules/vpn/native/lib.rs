@@ -14,7 +14,9 @@ use rune::{Color, TextStyle};
 use serde_json::{json, Value};
 use unidtk_shell::widget::{Act, Init, LocalTime, Surface, SurfaceSize, Theme, View, Widget, WidgetType};
 
-pub static WIDGET: WidgetType = WidgetType { id: "vpn", events: &[], make };
+mod settings;
+
+pub static WIDGET: WidgetType = WidgetType { id: "vpn", events: &[], make, settings: Some(settings::make) };
 
 fn make(_: &Init<'_>) -> Box<dyn Widget> {
     Box::new(Vpn::default())

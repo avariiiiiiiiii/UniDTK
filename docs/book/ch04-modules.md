@@ -20,7 +20,9 @@ modules/glyph-bar/
     icon.svg          the icon shown in the menu
 ```
 
-The two halves change together, so they share one folder, as the rule [modules.vertical-slice](../reference/modules.md#r-modules.vertical-slice) requires. A module without a backend has no `rust/`, as `clock` does. A module the native desk draws has a third half, `native/`, the crate `unidtk-native-<id>` that implements the shell's widget contract ([shell.widget-contract](../reference/shell.md#r-shell.widget-contract)); today `clock` and `vpn` have one. The backend is a separate crate whose `Cargo.toml` depends on `unidtk-api` and not on the kernel, the rule [modules.contract-only](../reference/modules.md#r-modules.contract-only). The contract crate is `core/api`.
+The two halves change together, so they share one folder, as the rule [modules.vertical-slice](../reference/modules.md#r-modules.vertical-slice) requires. Clock has no `rust/` directory because it needs only an interface. A module the native desk draws also has `native/`, the crate `unidtk-native-<id>`. Its `WidgetType` registers how to make the tile and can register a settings pane for the shell menu. Clock, Glyph Bar and VPN have native crates. [Shell widget contract](../reference/shell.md#r-shell.widget-contract)
+
+The backend is a separate crate whose `Cargo.toml` depends on the contract crate `unidtk-api` in `core/api`. [Module dependencies](../reference/modules.md#r-modules.contract-only)
 
 ## 4.2 The Module trait
 

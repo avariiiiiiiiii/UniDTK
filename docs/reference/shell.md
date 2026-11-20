@@ -22,6 +22,8 @@ What a module declares as data lives in its `metadata.json` ([modules.metadata](
 
 A widget reads through a `View` (the theme, the motion tokens, the local time, its tile and box, the morph's progress) and writes through an `Act` (kernel commands whose answers come back to it, its own record through `desk_apply`, toasts, the debug line, its surface). It never holds the shell's state.
 
+A `WidgetType` can register a `settings` factory. The shell uses the registration to offer "Configure…" on its module sheet even when the tile is hidden or the module is off. The shell owns the menu navigation and mounts one pane per opening. `Settings::load` reads from the kernel and `Settings::pane` draws the module's controls with the menu's `Look`. `settings::View` binds presses and text edits to that pane, and `settings::Act` sends commands through the existing UI door and reports results through menu toasts.
+
 ## Identity
 
 r[shell.widget-identity]
@@ -29,6 +31,8 @@ r[shell.widget-identity]
 A widget lives under its desk id (the module id, or an instance's id) with a generation. The shell makes, keeps and drops widgets so they are the ones the layout shows, and tells each its record when the layout changes. A handler a widget binds (`View::on`, `View::on_drag`, `View::edit`) finds the widget again by its id when the press arrives; a widget gone meanwhile is not found and nothing happens. An answer to a command (`Act::call`) reaches the widget only if it is the same generation; a widget made later under the same id never receives the old one's answer.
 
 Every element a widget keys carries its desk id, so two instances of one module never share a key.
+
+Each settings opening has a generation of its own. The shell accepts its input and command replies while that generation is open. The menu can still draw the pane as it slides out.
 
 ## The morph
 

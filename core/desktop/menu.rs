@@ -1,12 +1,11 @@
 //! The settings menu (`r[kernel.menu-in-core]`), as `core/ui/menu.js` and `menu.css` build
 //! it: the side panel on the right of the desk with "Настройки", the "Стол" and "Вид" tabs,
-//! the VPN view reached from the VPN widget, and the footer's "Выйти из UniDTK"; the
+//! the module settings views and the footer's "Выйти из UniDTK"; the
 //! three-line button at the top right that opens it; the sheets that open over it for one
-//! widget or one folder. The panes live in `menu_desk.rs`, `menu_look.rs` and `menu_vpn.rs`.
+//! widget or one folder. The module's own native crate draws its settings.
 //!
 //! The menu talks to the kernel through [`MenuHost`]: writes to the desk go as `desk_apply`
-//! operations (`r[desk.position-merge]`), other commands (`set_module_enabled`, folders, the
-//! Start menu, VPN) as requests whose answers come back to the UI thread.
+//! operations (`r[desk.position-merge]`). The kernel sends command replies back to the UI thread.
 
 use std::collections::HashSet;
 
@@ -17,6 +16,7 @@ use serde_json::Value;
 use crate::controls::{self, ButtonKind, Look};
 use crate::desk::Layout;
 use crate::motion::{Token, EXPO_OUT, STANDARD, SURFACE_EXIT};
+use crate::settings;
 use crate::theme::{mix_oklch, scaled, Material, Theme};
 use crate::toast::{Action, Toasts};
 
@@ -41,6 +41,7 @@ pub trait MenuHost: Sized + 'static {
     /// The desk draws module `id` (its native half is registered): the menu offers only what
     /// changes something on screen.
     fn draws(&self, id: &str) -> bool;
+    fn settings_factory(&self, id: &str) -> Option<settings::Factory>;
     /// The jelly grain the desk's cards wear, and the size it covers in points.
     fn grain(&self) -> (&rune::Pixels, (f32, f32));
     /// The Windows icon of a shortcut target, once the kernel has sent it; asking for one
@@ -54,11 +55,10 @@ pub trait MenuHost: Sized + 'static {
     fn arranging(&self) -> bool;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum View {
+pub(crate) enum View {
     Desk,
     Look,
-    Vpn,
+    ModuleSettings(settings::Session),
 }
 
 /// A value the menu asked the kernel for.
@@ -89,7 +89,8 @@ pub struct Menu {
     /// When the slide-out ends and the panel leaves the tree (the page's 700 ms fallback is
     /// the transition's own end here).
     pub closing_until: Option<std::time::Instant>,
-    pub view: View,
+    pub(crate) view: View,
+    settings_generation: u64,
     /// The sheet open, or `None` while it folds back into its row.
     pub sheet: Option<Sheet>,
     /// The sheet drawn: the open one, or the one folding, with its morph out of the row that
@@ -115,7 +116,6 @@ pub struct Menu {
     pub start_search: TextEdit,
     pub folder_names: std::collections::HashMap<String, TextEdit>,
     pub item_names: std::collections::HashMap<String, TextEdit>,
-    pub vpn: crate::menu_vpn::VpnPane,
     /// The widget row the pointer is over: its card is highlighted on the desk.
     pub highlight: Option<String>,
     /// The body is taller than the panel: it keeps room for the scrollbar
@@ -131,6 +131,7 @@ impl Default for Menu {
             open: false,
             closing_until: None,
             view: View::Desk,
+            settings_generation: 0,
             sheet: None,
             sheet_shown: None,
             rects: std::collections::HashMap::new(),
@@ -149,9 +150,19 @@ impl Default for Menu {
             start_search: TextEdit::new(""),
             folder_names: Default::default(),
             item_names: Default::default(),
-            vpn: Default::default(),
             highlight: None,
             overflow: Default::default(),
+        }
+    }
+}
+
+impl Menu {
+    pub(crate) fn active_settings(&mut self, generation: u64) -> Option<&mut dyn settings::Settings> {
+        match &mut self.view {
+            View::ModuleSettings(session) if self.open && session.generation == generation => {
+                Some(session.settings.as_mut())
+            }
+            _ => None,
         }
     }
 }
@@ -165,14 +176,18 @@ pub fn toggle<S: MenuHost>(state: &mut S, tx: &mut Tx) {
         close(state, tx);
         return;
     }
-    let view = if state.menu_ref().view == View::Vpn { View::Desk } else { state.menu_ref().view };
+    let (view, tab) = if matches!(state.menu_ref().view, View::Look) {
+        (View::Look, "hit:tab:look")
+    } else {
+        (View::Desk, "hit:tab:desk")
+    };
     let menu = state.menu();
     menu.shown = true;
     menu.open = true;
     menu.closing_until = None;
     show_view(state, view, tx);
     // `panel.querySelector(#tab-…).focus()`.
-    tx.focus(format!("hit:tab:{}", if view == View::Look { "look" } else { "desk" }), false);
+    tx.focus(tab, false);
 }
 
 /// `closeMenu`: slides out, then leaves the tree.
@@ -194,16 +209,16 @@ pub fn close<S: MenuHost>(state: &mut S, tx: &mut Tx) {
     tx.focus("hit:menu-button", false);
 }
 
-/// `handleMenuEscape`: an open sheet closes first, VPN steps back to "Стол", anything else
-/// closes the menu. False when the menu is closed.
+/// `handleMenuEscape`: close the sheet first, then step back from module settings to "Стол"
+/// or close the menu. Return false when the menu is already closed.
 pub fn escape<S: MenuHost>(state: &mut S, tx: &mut Tx) -> bool {
     if !state.menu_ref().open {
         return false;
     }
     if state.menu_ref().sheet.is_some() {
         close_sheet(state, tx);
-    } else if state.menu_ref().view == View::Vpn {
-        show_view(state, View::Desk, tx);
+    } else if matches!(state.menu_ref().view, View::ModuleSettings(_)) {
+        back_to_desk(state, tx, true);
     } else {
         close(state, tx);
         // From the keyboard, so the opener shows its ring (`:focus-visible`).
@@ -221,6 +236,9 @@ pub fn settle<S: MenuHost>(state: &mut S, now: std::time::Instant) -> Option<std
         menu.closing_until = None;
         // The sheet slid out with the panel.
         menu.sheet_shown = None;
+        if matches!(menu.view, View::ModuleSettings(_)) {
+            menu.view = View::Desk;
+        }
         return None;
     }
     Some(until)
@@ -284,14 +302,54 @@ pub fn sheet_frame_due<S: MenuHost>(state: &mut S, now: std::time::Instant) -> b
     !pose.done
 }
 
-/// `showView`: a pane reads what it shows from the kernel each time it is shown.
+/// `showView`: the desk reads its lists again each time it is shown.
 pub fn show_view<S: MenuHost>(state: &mut S, view: View, tx: &mut Tx) {
+    let desk = matches!(view, View::Desk);
     state.menu().view = view;
-    match view {
-        View::Desk => crate::menu_desk::load(state, tx),
-        View::Look => {}
-        View::Vpn => crate::menu_vpn::load(state, tx),
+    if desk {
+        crate::menu_desk::load(state, tx);
     }
+}
+
+pub fn open_module_settings<S: MenuHost>(state: &mut S, id: &str, tx: &mut Tx) {
+    let menu = state.menu_ref();
+    if !menu.open || !matches!(&menu.sheet, Some(Sheet::Widget(shown)) if shown == id) {
+        return;
+    }
+    let Some(make) = state.settings_factory(id) else { return };
+    close_sheet(state, tx);
+    let menu = state.menu();
+    menu.settings_generation += 1;
+    let generation = menu.settings_generation;
+    menu.view = View::ModuleSettings(settings::Session { generation, settings: make() });
+    settings::run(state, generation, tx, |pane, act| pane.load(act));
+    tx.focus("hit:module-settings-back", false);
+}
+
+fn back_to_desk<S: MenuHost>(state: &mut S, tx: &mut Tx, keyboard: bool) {
+    if state.menu_ref().open && matches!(state.menu_ref().view, View::ModuleSettings(_)) {
+        show_view(state, View::Desk, tx);
+        tx.focus("hit:tab:desk", keyboard);
+    }
+}
+
+fn module_settings_pane<S: MenuHost>(session: &settings::Session, look: &Look) -> El {
+    let chevron = [([15.0, 18.0], [9.0, 12.0]), ([9.0, 12.0], [15.0, 6.0])];
+    let back = row().key("hit:module-settings-back").label("Стол").focusable(true)
+        .min_h(32.0).mt(4.0).pl(4.0).pr(8.0).py(4.0).gap(4.0).radius(9.0).items_center()
+        .hover(look.elev.alpha(0.1))
+        .child(el().size(14.0, 14.0).shape(controls::glyph(&chevron, look.fg.alpha(0.85), 2.0)))
+        .child(text("Стол").font(look.font(13.0, 400.0)).color(look.fg.alpha(0.85)).single_line())
+        .on_key(|state: &mut S, event: &rune::KeyEvent, tx: &mut Tx| {
+            if event.key == rune::Key::Enter {
+                back_to_desk(state, tx, true);
+                return true;
+            }
+            false
+        })
+        .on_press_tx(|state: &mut S, tx: &mut Tx| back_to_desk(state, tx, false));
+    let view = settings::View::new(look, session.generation);
+    col().w_full().child(row().child(back)).child(session.settings.pane(&view))
 }
 
 /// `runOnce`: the control stays disabled while its command is in flight; an error becomes the
@@ -425,30 +483,33 @@ pub fn panel<S: MenuHost>(state: &S, theme: &Theme, canvas: (f32, f32)) -> Optio
     let motion = theme.motion();
     let slide = motion.tween(motion.duration(Token::Motion), if open { EXPO_OUT } else { SURFACE_EXIT });
     let fade = motion.tween(motion.duration(Token::Transient), STANDARD);
-    let view = state.menu_ref().view;
+    let view = &state.menu_ref().view;
+    let module_settings = matches!(view, View::ModuleSettings(_));
 
     let close_cross = [([18.0, 6.0], [6.0, 18.0]), ([6.0, 6.0], [18.0, 18.0])];
     let header = row().w_full().justify_between().items_center().pl(20.0).pr(16.0).pt(16.0).pb(8.0)
         .child(text("Настройки").font(look.font(17.0, 600.0)).color(look.fg).single_line())
         .child(controls::icon_button(&look, "hit:menu-close".into(), "Закрыть (Esc)", &close_cross, 16.0, |state: &mut S, tx: &mut Tx| close(state, tx)));
-    let tabs = (view != View::Vpn).then(|| {
+    let tabs = (!module_settings).then(|| {
         el().w_full().px(16.0).pb(8.0).child(controls::tabs(
             &look,
             &[("desk", "Стол"), ("look", "Вид")],
-            if view == View::Look { "look" } else { "desk" },
+            if matches!(view, View::Look) { "look" } else { "desk" },
             |state: &mut S, id: &str, tx: &mut Tx| show_view(state, if id == "look" { View::Look } else { View::Desk }, tx),
         ))
     });
     let pane = match view {
         View::Desk => crate::menu_desk::pane(state, &look),
         View::Look => crate::menu_look::pane(state, &look),
-        View::Vpn => crate::menu_vpn::pane(state, &look),
+        View::ModuleSettings(session) => module_settings_pane::<S>(session, &look),
     };
     let overflow = state.menu_ref().overflow.clone();
     let gutter = if overflow.get() { 11.0 } else { 0.0 };
-    let body = col().key("menu-body").w_full().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).pl(16.0).pr(16.0 + gutter).pt(4.0).pb(16.0)
+    let body_key = if module_settings { "module-settings-body" } else { "menu-body" };
+    let body = col().key(body_key).w_full().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).pl(16.0).pr(16.0 + gutter).pt(4.0).pb(16.0)
         .on_scroll_offset(move |at: rune::ScrollPos| overflow.set(at.max[1] > 0.5))
         .child(pane);
+    let body = if module_settings && !open { body.inert() } else { body };
     let quit = controls::button(&look, "hit:menu-quit".into(), "Выйти из UniDTK", ButtonKind::Quiet, |state: &mut S, _tx: &mut Tx| {
         run_once(state, "menu-quit", "quit_app", serde_json::json!({}), |_, _, _| {});
     });

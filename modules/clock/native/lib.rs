@@ -15,7 +15,7 @@ use unidtk_shell::widget::{online, Act, Init, LocalTime, Material, Placement, Su
 
 pub use faces::Face;
 
-pub static WIDGET: WidgetType = WidgetType { id: "clock", events: &[], make };
+pub static WIDGET: WidgetType = WidgetType { id: "clock", events: &[], make, settings: None };
 
 fn make(init: &Init<'_>) -> Box<dyn Widget> {
     Box::new(Clock { face: face_of(init.record), online: true })

@@ -10,7 +10,7 @@ use rune::{Color, Tx};
 use serde_json::{json, Value};
 
 use crate::controls::{self, ButtonKind, Look};
-use crate::menu::{self, Loaded, MenuHost, Sheet, View};
+use crate::menu::{self, Loaded, MenuHost, Sheet};
 use crate::theme::Theme;
 
 /// `FOLDER_ICONS` of `folders.js`, with their labels (`ICON_LABELS`).
@@ -37,7 +37,6 @@ struct Module {
     description: String,
     icon: String,
     backend: bool,
-    settings_view: Option<String>,
 }
 
 fn modules() -> Vec<Module> {
@@ -48,7 +47,6 @@ fn modules() -> Vec<Module> {
             description: m.meta["description"].as_str().unwrap_or_default().to_string(),
             icon: m.icon.clone(),
             backend: m.meta["backend"].as_bool().unwrap_or(false),
-            settings_view: m.meta["settingsView"].as_str().map(str::to_string),
         })
         .collect()
 }
@@ -316,10 +314,10 @@ fn widget_sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, wi
             state.apply(vec![json!({ "op": "eject", "id": id })], tx);
         }));
     }
-    if module.settings_view.as_deref() == Some("vpn") {
-        actions = actions.child(controls::button(look, "hit:module-settings".into(), &format!("Настроить {}…", module.name), ButtonKind::Normal, |state: &mut S, tx: &mut Tx| {
-            menu::close_sheet(state, tx);
-            menu::show_view(state, View::Vpn, tx);
+    if state.settings_factory(id).is_some() {
+        let id = id.to_string();
+        actions = actions.child(controls::button(look, "hit:module-settings".into(), &format!("Настроить {}…", module.name), ButtonKind::Normal, move |state: &mut S, tx: &mut Tx| {
+            menu::open_module_settings(state, &id, tx);
         }));
     }
     body = body.child(actions);
@@ -332,14 +330,14 @@ mod tests {
 
     #[test]
     fn module_states_follow_the_page() {
-        let backend = Module { id: "vpn".into(), name: "VPN".into(), description: String::new(), icon: String::new(), backend: true, settings_view: None };
-        let plain = Module { backend: false, id: "clock".into(), ..Module { id: String::new(), name: "Часы".into(), description: String::new(), icon: String::new(), backend: false, settings_view: None } };
+        let backend = Module { id: "example-backend".into(), name: String::new(), description: String::new(), icon: String::new(), backend: true };
+        let plain = Module { id: "example".into(), name: String::new(), description: String::new(), icon: String::new(), backend: false };
         let none = HashSet::new();
-        let off: HashSet<String> = ["vpn".to_string()].into();
+        let off: HashSet<String> = [backend.id.clone()].into();
         assert_eq!(module_state(&backend, &[], &none), ModuleState::Desk);
-        assert_eq!(module_state(&backend, &["vpn".into()], &none), ModuleState::Background);
+        assert_eq!(module_state(&backend, &[backend.id.clone()], &none), ModuleState::Background);
         assert_eq!(module_state(&backend, &[], &off), ModuleState::Off);
-        assert_eq!(module_state(&plain, &["clock".into()], &none), ModuleState::Off);
+        assert_eq!(module_state(&plain, &[plain.id.clone()], &none), ModuleState::Off);
         assert_eq!(state_noun(&plain, ModuleState::Off), "скрыт");
         assert_eq!(state_noun(&backend, ModuleState::Off), "выключен");
     }

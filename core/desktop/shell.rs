@@ -109,8 +109,8 @@ pub struct Host {
     pub(crate) debug: Option<(String, Instant)>,
     /// The host under a card dragged in arrange mode, and whether it would take it.
     pub(crate) nest_mark: Option<(String, bool)>,
-    /// What a text field of a widget gone meanwhile edits.
-    scratch: TextEdit,
+    /// What a text field of a dismissed widget or settings pane edits.
+    pub(crate) scratch: TextEdit,
     /// The blurred wallpaper a flat card wears under its glass (`wallpaper.rs`), what it was
     /// made from, and whether a worker is making it.
     pub(crate) backdrop: Pixels,
@@ -855,7 +855,11 @@ impl MenuHost for Host {
     }
 
     fn draws(&self, id: &str) -> bool {
-        self.types.iter().any(|kind| kind.id == id)
+        self.type_of(id).is_some()
+    }
+
+    fn settings_factory(&self, id: &str) -> Option<crate::settings::Factory> {
+        self.type_of(id)?.settings
     }
 
     fn svg(&self, markup: &str, size: f32, colour: Color) -> Option<Pixels> {

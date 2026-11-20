@@ -178,7 +178,8 @@ pub fn switch<S: 'static>(look: &Look, key: String, on: bool, toggle: impl Fn(&m
     // The track's and the knob's colours ease over the same token (`background` in the
     // transition list); Rune moves a paint change on a spring, here one without bounce.
     let paint = rune::Spring::new(look.motion.duration(Token::Transient), 0.0);
-    el().key(key).size(40.0, 24.0).radius(12.0)
+    let busy = key.strip_prefix("hit:").is_some_and(|action| look.busy.contains(action));
+    let switch = el().key(key).size(40.0, 24.0).radius(12.0)
         .fill(if on { look.accent } else { look.fg.alpha(0.22) })
         .token_motion(paint)
         .child(
@@ -187,8 +188,8 @@ pub fn switch<S: 'static>(look: &Look, key: String, on: bool, toggle: impl Fn(&m
                 .token_motion(paint)
                 .offset(if on { 16.0 } else { 0.0 }, 0.0)
                 .offset_motion(slide),
-        )
-        .on_press_tx(toggle)
+        );
+    if busy { switch.opacity(0.5).disabled(true) } else { switch.on_press_tx(toggle) }
 }
 
 /// `<input type="range" class="menu-range">` with `accent-color`: Chromium's slider, a 4 px

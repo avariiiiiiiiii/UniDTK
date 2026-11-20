@@ -37,6 +37,8 @@ pub struct WidgetType {
     /// of every registered type's events once, at connect.
     pub events: &'static [&'static str],
     pub make: fn(&Init<'_>) -> Box<dyn Widget>,
+    /// Optional menu pane, available even when this module has no tile (r[shell.widget-contract]).
+    pub settings: Option<crate::settings::Factory>,
 }
 
 /// What a new widget is made from.
