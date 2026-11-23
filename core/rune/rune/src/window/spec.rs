@@ -76,6 +76,8 @@ pub struct WindowOptions {
     pub click_through: bool,
     pub always_on_top: bool,
     pub visible: bool,
+    /// Windows only: omit this window from the taskbar.
+    pub skip_taskbar: bool,
     /// Physical desktop coordinates, not points. Use a display's position unchanged.
     pub position: Option<(i32, i32)>,
     /// Physical content size; overrides AppSpec's logical size when set.
@@ -98,7 +100,7 @@ impl Default for WindowOptions {
     fn default() -> Self {
         Self {
             transparent: false, borderless: false, click_through: false,
-            always_on_top: false, visible: true, position: None, physical_size: None,
+            always_on_top: false, visible: true, skip_taskbar: false, position: None, physical_size: None,
             min_size: None, max_size: None, resizable: true, no_redirection_bitmap: false,
         }
     }
@@ -123,7 +125,7 @@ impl WindowOptions {
     pub fn overlay(display: &Display) -> Self {
         Self {
             transparent: true, borderless: true, click_through: true, always_on_top: true,
-            visible: true, position: Some(display.position), physical_size: Some(display.size),
+            visible: true, skip_taskbar: false, position: Some(display.position), physical_size: Some(display.size),
             min_size: Some((0.0, 0.0)), max_size: None, resizable: true, no_redirection_bitmap: false,
         }
     }
@@ -161,9 +163,9 @@ impl WindowOptions {
         if let Some((x, y)) = self.position { attrs = attrs.with_position(PhysicalPosition::new(x, y)); }
         if let Some((w, h)) = self.physical_size { attrs = attrs.with_inner_size(PhysicalSize::new(w, h)); }
         #[cfg(target_os = "windows")]
-        if self.no_redirection_bitmap {
+        {
             use winit::platform::windows::WindowAttributesExtWindows;
-            attrs = attrs.with_no_redirection_bitmap(true);
+            attrs = attrs.with_no_redirection_bitmap(self.no_redirection_bitmap).with_skip_taskbar(self.skip_taskbar);
         }
         attrs
     }

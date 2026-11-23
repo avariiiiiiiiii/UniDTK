@@ -107,6 +107,7 @@ fn sample_points() -> Vec<(&'static str, i32, i32)> {
 fn probe_transparency(report: std::path::PathBuf) {
     let points = sample_points();
     let before = desktop_host::read_pixels(&points, "before");
+    let target = desktop_host::discover_with_attempt(60);
     let attached = Arc::new(AtomicBool::new(false));
     desktop_host::ensure_dpi_awareness();
     let (width, height) = desktop_host::primary_size();
@@ -115,6 +116,8 @@ fn probe_transparency(report: std::path::PathBuf) {
     let mut app = App::new(spec).window_options(WindowOptions {
         transparent: true,
         borderless: true,
+        visible: false,
+        skip_taskbar: true,
         click_through: true,
         resizable: false,
         no_redirection_bitmap: true,
@@ -133,10 +136,11 @@ fn probe_transparency(report: std::path::PathBuf) {
             _ => None,
         });
         let outcome = match hwnd {
-            Ok(Some(hwnd)) => desktop_host::attach(hwnd),
+            Ok(Some(hwnd)) => target.clone().and_then(|target| desktop_host::attach_to(hwnd, target)),
             Ok(None) => Err("not a Win32 window".into()),
             Err(error) => Err(error),
         };
+        if outcome.is_ok() { window.show(); }
         desktop_host::note(&format!("attach: {outcome:?}"));
         on_ready_attached.store(outcome.is_ok(), Ordering::SeqCst);
     });

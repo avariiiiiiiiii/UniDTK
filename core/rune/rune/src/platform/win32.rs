@@ -30,6 +30,20 @@ pub(crate) use frame::has_window_menu;
 pub(crate) use frame::request_inner_size;
 pub(crate) use frame::window_menu;
 
+/// Winit still caches the top-level style of a window reparented by its owner.
+/// Its visibility setter would rewrite that style after showing the child.
+pub(crate) fn show_child_without_activation(window: &winit::window::Window) -> bool {
+    let Some(hwnd) = hwnd(window) else { return false };
+    unsafe {
+        if GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CHILD == 0 {
+            return false;
+        }
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    occlusion::recheck();
+    true
+}
+
 pub(crate) fn hwnd(window: &winit::window::Window) -> Option<HWND> {
     let RawWindowHandle::Win32(h) = window.window_handle().ok()?.as_raw() else { return None };
     Some(h.hwnd.get() as HWND)

@@ -59,6 +59,12 @@ r[shell.wake-schedule]
 
 The desk wakes at the earliest of what is due: each widget's own wake (`Widget::wake`, the seconds until it has something new to show), the toast's end, the menu's slide-out, the debug line, the end of the settle after arrange mode (one motion step in which the desk takes no press, `body.arrange-settling`). A widget's wake is never sooner than a frame, so a widget that asks for "now" does not spin the desk. While a morph runs the desk draws every frame and then stops. An idle desk wakes only when a widget asks: the clock once a second or once a minute by its face, a VPN panel every 3 s while it is on screen.
 
+## Startup
+
+The native window starts hidden and outside the taskbar. Explorer discovery stays on a worker under [kernel.no-blocking-main-thread](kernel.md#r-kernel.no-blocking-main-thread). The UI thread validates and parents the window as `WS_CHILD`, then Rune orders it in with `SW_SHOWNOACTIVATE`.
+
+The first desk tree waits for the layout, disabled modules, and folders. The deadline is 750 ms from window creation. On timeout the shell uses the data already received and seeds the default layout if the kernel has supplied none. Later replies update the desk normally. Optional shortcut-target checks run independently of the first tree.
+
 ## The window region
 
 r[shell.window-region]

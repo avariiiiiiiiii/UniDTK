@@ -527,13 +527,12 @@ fn a_wheel_line_from_the_kernel_parses() {
 fn desktop_discovery_budget_and_progman_fallback_gate() {
     assert_eq!(crate::host::DISCOVERY_ATTEMPTS, 120);
     assert_eq!(crate::host::DISCOVERY_INTERVAL, std::time::Duration::from_millis(250));
-    // Early cold boot before Shell_TrayWnd exists must not grab immature Progman.
-    assert!(!crate::desktop_host::allow_progman_fallback(false, 2));
-    assert!(!crate::desktop_host::allow_progman_fallback(true, 2));
-    // Once Shell_TrayWnd is up and WorkerW split attempt window passed, allow fallback.
-    assert!(crate::desktop_host::allow_progman_fallback(true, 4));
-    // At 15s (60 * 250ms), allow fallback even if tray heuristic isn't present.
-    assert!(crate::desktop_host::allow_progman_fallback(false, 60));
+    use crate::desktop_host::allow_progman_fallback;
+    assert!(allow_progman_fallback(true, true, 0));
+    assert!(!allow_progman_fallback(true, false, 2));
+    assert!(!allow_progman_fallback(false, true, 2));
+    assert!(allow_progman_fallback(false, true, 4));
+    assert!(allow_progman_fallback(false, false, 60));
 }
 
 #[test]

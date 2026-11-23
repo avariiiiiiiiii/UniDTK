@@ -219,6 +219,7 @@ impl Win {
         {
             self.native.cloak.hold(&self.window, Instant::now() + READY_FALLBACK, false);
             self.request_redraw();
+            if crate::platform::win32::show_child_without_activation(&self.window) { return; }
         }
         self.window.set_visible(true);
         if focus { self.window.focus_window(); }

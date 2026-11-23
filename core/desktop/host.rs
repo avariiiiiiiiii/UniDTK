@@ -38,7 +38,8 @@ const RING: f32 = 8.0;
 /// catch-up frame after a (re)connect, and from the answer to a `desk_layout_get`; and every
 /// event a registered widget type asked for, to the widgets of that type.
 fn layout_link(ui: rune::AppHandle<Host>, outbox: Arc<Outbox>, widgets: &'static [&'static crate::widget::WidgetType]) -> LinkConfig {
-    let ui = Mutex::new(ui);
+    let ui = Arc::new(Mutex::new(ui));
+    let connected_ui = ui.clone();
     let refetch = outbox.clone();
     let deliver = move |message: Delivery| {
         let Ok(ui) = ui.lock() else { return };
@@ -65,7 +66,12 @@ fn layout_link(ui: rune::AppHandle<Host>, outbox: Arc<Outbox>, widgets: &'static
     }
     LinkConfig {
         subscriptions,
-        on_connected: Box::new(ask),
+        on_connected: Box::new(move || {
+            ask();
+            if let Ok(ui) = connected_ui.lock() {
+                ui.update(|state, _| crate::menu_desk::retry_failed_lists(state));
+            }
+        }),
         on_inbound: Box::new(move |inbound| match inbound {
             Inbound::Event { event, payload, .. } if event == "desk-layout-changed" => {
                 if let Some(layout) = Layout::from_event(&payload) {
@@ -94,7 +100,7 @@ const SAMPLES: usize = 512;
 pub(crate) const DISCOVERY_ATTEMPTS: usize = 120;
 pub(crate) const DISCOVERY_INTERVAL: Duration = Duration::from_millis(250);
 
-static REATTACH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static ATTACH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 fn spawn_attach_worker(
     name: &'static str,
@@ -105,63 +111,71 @@ fn spawn_attach_worker(
     fail_on_exhaust: bool,
     ws_slot: Arc<Mutex<Option<WsClientHandle>>>,
 ) {
+    if ATTACH_IN_PROGRESS.swap(true, Ordering::AcqRel) { return; }
+    let worker_inspector = inspector.clone();
     let spawn = std::thread::Builder::new().name(name.into()).spawn(move || {
-        let mut error = "desktop unavailable".to_string();
+        let mut result = Err("desktop unavailable".to_string());
         for attempt in 0..max_attempts {
-            if inspector.stopping.load(Ordering::Acquire) {
-                if !fail_on_exhaust {
-                    REATTACH_IN_PROGRESS.store(false, Ordering::Release);
-                }
-                return;
-            }
-            match crate::desktop_host::discover_with_attempt(attempt) {
+            if worker_inspector.stopping.load(Ordering::Acquire) { break; }
+            result = match crate::desktop_host::discover_with_attempt(attempt) {
                 Ok(parent) => {
                     let attached_ws = ws_slot.clone();
+                    let (done, outcome) = std::sync::mpsc::channel();
                     ui.update(move |state, _| {
-                        if state.inspector.stopping.load(Ordering::Acquire) {
-                            return;
-                        }
-                        match crate::desktop_host::attach_to(hwnd, parent) {
-                            Ok(()) => {
+                        let result = if state.inspector.stopping.load(Ordering::Acquire) {
+                            Err("desktop stopping".into())
+                        } else {
+                            crate::desktop_host::attach_to(hwnd, parent).map(|()| {
                                 state.inspector.hwnd.store(hwnd, Ordering::Release);
                                 if let Err(error) = publish_region(&state.inspector) {
                                     state.inspector.fail(error);
-                                    return;
                                 }
-                                let window = state.inspector.window.lock().ok().and_then(|g| g.clone());
-                                if let Some(w) = window {
+                                if let Some(w) = state.inspector.window.lock().ok().and_then(|g| g.clone()) {
                                     w.recheck_occlusion();
                                 }
                                 sync_registration(&state.inspector, &attached_ws);
                                 crate::desktop_host::note(&format!(
-                                    "host attached under {}",
-                                    crate::desktop_host::host_description()
+                                    "host attached under {}", crate::desktop_host::host_description()
                                 ));
-                            }
-                            Err(error) => state.inspector.fail(error),
-                        }
+                            })
+                        };
+                        let _ = done.send(result);
                     });
-                    if !fail_on_exhaust {
-                        REATTACH_IN_PROGRESS.store(false, Ordering::Release);
+                    // Keep discovery single-flight until the UI has validated the HWND. If
+                    // Explorer changed meanwhile, try the new topology on the same worker.
+                    loop {
+                        match outcome.recv_timeout(DISCOVERY_INTERVAL) {
+                            Ok(result) => break result,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                                if !worker_inspector.stopping.load(Ordering::Acquire) => {}
+                            Err(_) => break Err("desktop UI stopped".into()),
+                        }
                     }
-                    return;
                 }
-                Err(next) => error = next,
+                Err(error) => Err(error),
+            };
+            if result.is_ok() || worker_inspector.stopping.load(Ordering::Acquire) { break; }
+            if !crate::desktop_host::owns_window(hwnd) {
+                worker_inspector.fail("Explorer destroyed the desktop child".into());
+                break;
             }
             std::thread::sleep(DISCOVERY_INTERVAL);
         }
-        if fail_on_exhaust {
-            inspector.fail(format!("desktop discovery exhausted: {error}"));
-        } else {
-            crate::desktop_host::note(&format!("reattach exhausted: {error}"));
-            REATTACH_IN_PROGRESS.store(false, Ordering::Release);
+        ATTACH_IN_PROGRESS.store(false, Ordering::Release);
+        if let Err(error) = result {
+            if worker_inspector.stopping.load(Ordering::Acquire) { return; }
+            if fail_on_exhaust {
+                worker_inspector.fail(format!("desktop discovery exhausted: {error}"));
+            } else {
+                crate::desktop_host::note(&format!("reattach exhausted: {error}"));
+            }
         }
     });
     if let Err(error) = spawn {
-        if !fail_on_exhaust {
-            REATTACH_IN_PROGRESS.store(false, Ordering::Release);
+        ATTACH_IN_PROGRESS.store(false, Ordering::Release);
+        if fail_on_exhaust {
+            inspector.fail(format!("desktop worker failed: {error}"));
         } else {
-            // Best-effort log; caller holds inspector.
             crate::desktop_host::note(&format!("desktop worker failed: {error}"));
         }
     }
@@ -189,7 +203,7 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
     let app = App::new(spec).init(move || Host::new(state_inspector, (!supervised).then(Layout::empty), canvas, scale, state_ui, widgets))
         .open_inactive()
         .window_options(WindowOptions {
-            transparent: true, borderless: true,
+            transparent: true, borderless: true, visible: false, skip_taskbar: true,
             // Safe even if a covered launch never draws. Enable input only once a
             // successful attach and an actual widget region have both been published.
             click_through: true, resizable: false,
@@ -262,12 +276,13 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
             }
 
             fn on_taskbar_created(&mut self) {
+                crate::desktop_host::taskbar_created();
                 let hwnd = self.inspector.hwnd.load(Ordering::Acquire);
-                if hwnd != 0
-                    && REATTACH_IN_PROGRESS
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                {
+                if hwnd != 0 {
+                    if !crate::desktop_host::owns_window(hwnd) {
+                        self.inspector.fail("Explorer destroyed the desktop child".into());
+                        return;
+                    }
                     crate::desktop_host::note("supervisor: TaskbarCreated -> re-attaching desktop");
                     spawn_attach_worker(
                         "desktop-reattach",
@@ -283,12 +298,7 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
 
             fn on_show(&mut self) {
                 let hwnd = self.inspector.hwnd.load(Ordering::Acquire);
-                if hwnd != 0
-                    && !crate::desktop_host::window_is_attached(hwnd)
-                    && REATTACH_IN_PROGRESS
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                {
+                if hwnd != 0 && !crate::desktop_host::window_is_attached(hwnd) {
                     spawn_attach_worker(
                         "desktop-show",
                         hwnd,
@@ -392,6 +402,8 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
         };
         let inspector = on_window.clone();
         let ui = handle.clone();
+        // Start the deadline after window creation, so GPU initialization cannot spend it.
+        ui.update(|state, _| state.start_snapshot_deadline());
         // r[kernel.no-blocking-main-thread], r[kernel.main-thread-once]: shell
         // discovery and retries stay on a worker; only the final attach is on UI.
         spawn_attach_worker(

@@ -2,6 +2,7 @@
 //! `core/kernel/wallpaper.rs` for the WebView window until G5) and the reads of the
 //! desktop host the transparency probe compares.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use windows::core::w;
@@ -13,10 +14,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetWindowLongW, GetWindowRect, SendMessageTimeoutW,
-    SetLayeredWindowAttributes, SetParent, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
-    HWND_TOP, LWA_ALPHA, SMTO_ABORTIFHUNG, SMTO_NORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SW_SHOWNOACTIVATE, WS_CAPTION, WS_CHILD, WS_EX_LAYERED, WS_POPUP, WS_THICKFRAME, WS_VISIBLE,
+    EnumWindows, FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetWindowLongW, GetWindowRect,
+    GetWindowThreadProcessId, IsWindow, SendMessageTimeoutW, SetLayeredWindowAttributes, SetParent,
+    SetWindowLongW, SetWindowPos, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, HWND_TOP, LWA_ALPHA, SMTO_ABORTIFHUNG,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, WS_CAPTION, WS_CHILD, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP,
+    WS_POPUP, WS_THICKFRAME,
 };
 
 static HOST: Mutex<Option<String>> = Mutex::new(None);
@@ -231,95 +233,111 @@ fn class_of(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..len.max(0) as usize])
 }
 
-extern "system" fn find_sibling_worker(window: HWND, found: LPARAM) -> BOOL {
-    unsafe {
-        let def_view = FindWindowExW(window, HWND::default(), w!("SHELLDLL_DefView"), None).unwrap_or_default();
-        if !def_view.0.is_null() {
-            let worker = FindWindowExW(HWND::default(), window, w!("WorkerW"), None).unwrap_or_default();
-            // The kernel's rule (`core/kernel/wallpaper.rs`): a WorkerW smaller than 640x480 is
-            // not the wallpaper's. Without it the host took a stray WorkerW after Win+D and
-            // sat behind the kernel's window, which stayed on Progman.
-            let mut rect = RECT::default();
-            let _ = GetWindowRect(worker, &mut rect);
-            if !worker.0.is_null() && rect.right - rect.left >= 640 && rect.bottom - rect.top >= 480 {
-                *(found.0 as *mut HWND) = worker;
-                return BOOL(0);
+#[derive(Clone, Copy)]
+pub(crate) struct DesktopHost {
+    hwnd: isize,
+    pid: u32,
+    epoch: usize,
+}
+
+static SHELL_EPOCH: AtomicUsize = AtomicUsize::new(0);
+static WORKER_REQUEST: Mutex<Option<(isize, u32, usize)>> = Mutex::new(None);
+
+pub(crate) fn taskbar_created() {
+    SHELL_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
+
+fn window_pid(hwnd: HWND) -> u32 {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
+    pid
+}
+
+fn has_def_view(window: HWND) -> bool {
+    unsafe { FindWindowExW(window, HWND::default(), w!("SHELLDLL_DefView"), None).is_ok() }
+}
+
+fn is_wallpaper_worker(window: HWND, pid: u32) -> bool {
+    if window_pid(window) != pid || has_def_view(window) { return false; }
+    let mut rect = RECT::default();
+    (unsafe { GetWindowRect(window, &mut rect).is_ok() })
+        && rect.right - rect.left >= 640 && rect.bottom - rect.top >= 480
+}
+
+struct WorkerSearch {
+    pid: u32,
+    found: HWND,
+}
+
+extern "system" fn find_sibling_worker(window: HWND, search: LPARAM) -> BOOL {
+    // The WorkerW behind the icon owner is the classic wallpaper layer. Reject small
+    // helper windows, such as the stray WorkerW Explorer creates during Win+D.
+    let search = unsafe { &mut *(search.0 as *mut WorkerSearch) };
+    if window_pid(window) == search.pid && has_def_view(window) {
+        let worker = unsafe { FindWindowExW(HWND::default(), window, w!("WorkerW"), None) }.unwrap_or_default();
+        if is_wallpaper_worker(worker, search.pid) {
+            search.found = worker;
+            return BOOL(0);
+        }
+    }
+    BOOL(1)
+}
+
+fn sibling_worker(pid: u32) -> HWND {
+    let mut search = WorkerSearch { pid, found: HWND::default() };
+    let _ = unsafe { EnumWindows(Some(find_sibling_worker), LPARAM(&mut search as *mut WorkerSearch as isize)) };
+    search.found
+}
+
+pub(crate) fn allow_progman_fallback(raised_desktop: bool, shell_tray_present: bool, attempt: usize) -> bool {
+    (shell_tray_present && (raised_desktop || attempt >= 4)) || attempt >= 60
+}
+
+/// r[kernel.no-blocking-main-thread]: the shell search and at most one split request per
+/// Progman lifetime or TaskbarCreated belong on the discovery worker.
+pub(crate) fn discover_with_attempt(attempt: usize) -> Result<DesktopHost, String> {
+    let epoch = SHELL_EPOCH.load(Ordering::Acquire);
+    let progman = unsafe { FindWindowW(w!("Progman"), None) }.map_err(|e| format!("Progman: {e}"))?;
+    let pid = window_pid(progman);
+    if pid == 0 { return Err("Progman disappeared".into()); }
+    let target = |hwnd: HWND| DesktopHost { hwnd: hwnd.0 as isize, pid, epoch };
+    let tray = unsafe { FindWindowW(w!("Shell_TrayWnd"), None) }.unwrap_or_default();
+    let has_tray = window_pid(tray) == pid;
+    let progman_has_icons = has_def_view(progman);
+    // Recent Explorer composes the wallpaper inside Progman (the raised desktop).
+    // Classic Explorer can also put icons there before it has split off WorkerW.
+    let raised = unsafe { GetWindowLongW(progman, GWL_EXSTYLE) } as u32 & WS_EX_NOREDIRECTIONBITMAP.0 != 0;
+    if raised && progman_has_icons && has_tray { return Ok(target(progman)); }
+
+    let worker = sibling_worker(pid);
+    if !worker.0.is_null() { return Ok(target(worker)); }
+
+    if !raised {
+        let key = (progman.0 as isize, pid, epoch);
+        let request = {
+            let mut last = WORKER_REQUEST.lock().map_err(|e| e.to_string())?;
+            last.replace(key) != Some(key)
+        };
+        if request {
+            // Explorer processes this undocumented message synchronously. Read the new
+            // sibling immediately if it exists; later attempts only search the topology.
+            let _ = unsafe { SendMessageTimeoutW(progman, 0x052C, WPARAM(0xD), LPARAM(1), SMTO_ABORTIFHUNG, 100, None) };
+            let worker = sibling_worker(pid);
+            if !worker.0.is_null() { return Ok(target(worker)); }
+        }
+    }
+
+    if allow_progman_fallback(raised, has_tray, attempt) {
+        if !raised {
+            let mut after = HWND::default();
+            while let Ok(worker) = unsafe { FindWindowExW(HWND::default(), after, w!("WorkerW"), None) } {
+                if is_wallpaper_worker(worker, pid) { return Ok(target(worker)); }
+                after = worker;
             }
         }
-        BOOL(1)
+        if progman_has_icons { return Ok(target(progman)); }
     }
-}
-
-/// The desktop host: the WorkerW behind the icons on the classic layout, Progman itself
-/// on the newer Windows 11 one, where `SHELLDLL_DefView` and the wallpaper's WorkerW are
-/// both children of Progman.
-fn desktop_host() -> Result<HWND, String> {
-    desktop_host_for_attempt(60)
-}
-
-pub fn allow_progman_fallback(shell_tray_present: bool, attempt: usize) -> bool {
-    (shell_tray_present && attempt >= 4) || attempt >= 60
-}
-
-fn has_shell_tray() -> bool {
-    unsafe {
-        FindWindowW(w!("Shell_TrayWnd"), None)
-            .map(|hwnd| !hwnd.0.is_null())
-            .unwrap_or(false)
-    }
-}
-
-fn desktop_host_for_attempt(attempt: usize) -> Result<HWND, String> {
-    unsafe {
-        let progman = FindWindowW(w!("Progman"), None).map_err(|e| format!("Progman: {e}"))?;
-        let mut result = 0usize;
-        let flags = SMTO_NORMAL | SMTO_ABORTIFHUNG;
-        // Asks Explorer to split the wallpaper into its own WorkerW, as the kernel does.
-        let _ = SendMessageTimeoutW(progman, 0x052C, WPARAM(0xD), LPARAM(1), flags, 100, Some(&mut result));
-        let mut worker = HWND::default();
-        let _ = EnumWindows(Some(find_sibling_worker), LPARAM(&mut worker as *mut HWND as isize));
-        if !worker.0.is_null() {
-            return Ok(worker);
-        }
-
-        // Fallback messages used by newer/restarted Explorer builds before creating sibling WorkerW.
-        let _ = SendMessageTimeoutW(progman, 0x052C, WPARAM(0xD), LPARAM(0), flags, 100, Some(&mut result));
-        let _ = SendMessageTimeoutW(progman, 0x052C, WPARAM(0), LPARAM(0), flags, 100, Some(&mut result));
-        let _ = EnumWindows(Some(find_sibling_worker), LPARAM(&mut worker as *mut HWND as isize));
-        if !worker.0.is_null() {
-            return Ok(worker);
-        }
-
-        if allow_progman_fallback(has_shell_tray(), attempt) {
-            // Top-level WorkerW without SHELLDLL_DefView (>= 640x480), matching kernel fallback.
-            let mut top_worker = FindWindowExW(HWND::default(), HWND::default(), w!("WorkerW"), None).unwrap_or_default();
-            while !top_worker.0.is_null() {
-                let inner_def = FindWindowExW(top_worker, HWND::default(), w!("SHELLDLL_DefView"), None).unwrap_or_default();
-                if inner_def.0.is_null() {
-                    let mut rect = RECT::default();
-                    let _ = GetWindowRect(top_worker, &mut rect);
-                    if rect.right - rect.left >= 640 && rect.bottom - rect.top >= 480 {
-                        return Ok(top_worker);
-                    }
-                }
-                top_worker = FindWindowExW(HWND::default(), top_worker, w!("WorkerW"), None).unwrap_or_default();
-            }
-
-            let def_view = FindWindowExW(progman, HWND::default(), w!("SHELLDLL_DefView"), None).unwrap_or_default();
-            if !def_view.0.is_null() {
-                return Ok(progman);
-            }
-        }
-        Err("no desktop host".into())
-    }
-}
-
-#[allow(dead_code)]
-/// Worker-side discovery: no HWND on Rune's UI thread is blocked by the shell search.
-pub fn discover() -> Result<isize, String> { desktop_host().map(|host| host.0 as isize) }
-
-pub fn discover_with_attempt(attempt: usize) -> Result<isize, String> {
-    desktop_host_for_attempt(attempt).map(|host| host.0 as isize)
+    Err("no desktop host".into())
 }
 
 /// `<input type="color">` in WebView2 opens the system colour dialog; so does the host. It runs
@@ -362,8 +380,12 @@ pub fn window_scale(hwnd: isize) -> f64 {
 
 /// HWND values can survive in our snapshot after Explorer destroys its children,
 /// and Windows may reuse them. Never inspect or post input to a foreign window.
+pub(crate) fn owns_window(hwnd: isize) -> bool {
+    window_pid(HWND(hwnd as _)) == std::process::id()
+}
+
 pub fn window_is_attached(hwnd: isize) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{GetParent, GetWindowThreadProcessId, IsWindow};
+    use windows::Win32::UI::WindowsAndMessaging::GetParent;
     if hwnd == 0 { return false; }
     let window = HWND(hwnd as _);
     unsafe {
@@ -392,42 +414,36 @@ pub fn enable_widget_input(hwnd: isize) -> Result<(), String> {
     Ok(())
 }
 
-/// Makes `hwnd` a full-screen child of the desktop host, above its other children.
-/// With `UNIDTK_PROBE_LAYERED=1` it also becomes a layered window at full alpha, as the
-/// kernel makes the WebView window.
-pub fn attach(hwnd: isize) -> Result<(), String> {
-    let host = desktop_host()?;
-    attach_to(hwnd, host.0 as isize)
-}
-
-/// UI-thread step only: validate the worker's result, then change parent and geometry.
-pub fn attach_to(hwnd: isize, host: isize) -> Result<(), String> {
-    let (hwnd, host) = (HWND(hwnd as _), HWND(host as _));
-    unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::IsWindow;
-        if !IsWindow(hwnd).as_bool() || !IsWindow(host).as_bool() {
-            return Err("a desktop window disappeared before attachment".into());
-        }
+/// UI-thread step only: validate the worker's result and attach the child without ordering it in.
+pub(crate) fn attach_to(hwnd: isize, target: DesktopHost) -> Result<(), String> {
+    let (hwnd, host) = (HWND(hwnd as _), HWND(target.hwnd as _));
+    if window_pid(hwnd) != std::process::id() { return Err("desktop child disappeared".into()); }
+    if target.epoch != SHELL_EPOCH.load(Ordering::Acquire) || window_pid(host) != target.pid {
+        return Err("Explorer changed during desktop discovery".into());
     }
-    if !matches!(class_of(host).as_str(), "Progman" | "WorkerW") {
+    let class = class_of(host);
+    if !matches!(class.as_str(), "Progman" | "WorkerW") {
         return Err("the discovered desktop handle was reused".into());
     }
     let layered = std::env::var("UNIDTK_PROBE_LAYERED").is_ok_and(|value| value == "1");
-    if let Ok(mut slot) = HOST.lock() {
-        *slot = Some(format!("{} 0x{:X}{}", class_of(host), host.0 as usize, if layered { " layered" } else { "" }));
-    }
     unsafe {
-        SetParent(hwnd, host).map_err(|e| format!("SetParent: {e}"))?;
-        let style = GetWindowLongW(hwnd, GWL_STYLE);
-        let style = (style & !((WS_POPUP.0 | WS_CAPTION.0 | WS_THICKFRAME.0) as i32)) | (WS_CHILD.0 | WS_VISIBLE.0) as i32;
+        let old_style = GetWindowLongW(hwnd, GWL_STYLE);
+        let style = (old_style & !((WS_POPUP.0 | WS_CAPTION.0 | WS_THICKFRAME.0) as i32)) | WS_CHILD.0 as i32;
         SetWindowLongW(hwnd, GWL_STYLE, style);
+        if GetWindowLongW(hwnd, GWL_STYLE) != style { return Err("could not set the desktop child style".into()); }
+        let parent_result = SetParent(hwnd, host);
+        // A successful SetParent can return a NULL previous parent for a top-level HWND.
+        if GetAncestor(hwnd, GA_PARENT) != host {
+            SetWindowLongW(hwnd, GWL_STYLE, old_style);
+            return Err(format!("SetParent did not attach the desktop: {parent_result:?}"));
+        }
         if layered {
             let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED.0 as i32);
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF::default(), 255, LWA_ALPHA);
         }
         let mut host_rect = RECT::default();
-        let _ = GetWindowRect(host, &mut host_rect);
+        GetWindowRect(host, &mut host_rect).map_err(|e| format!("desktop rectangle: {e}"))?;
         let primary = primary_rect();
         SetWindowPos(
             hwnd,
@@ -436,10 +452,12 @@ pub fn attach_to(hwnd: isize, host: isize) -> Result<(), String> {
             primary.top - host_rect.top,
             primary.right - primary.left,
             primary.bottom - primary.top,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE,
         )
         .map_err(|e| format!("SetWindowPos: {e}"))?;
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    if let Ok(mut slot) = HOST.lock() {
+        *slot = Some(format!("{class} 0x{:X}{}", target.hwnd as usize, if layered { " layered" } else { "" }));
     }
     Ok(())
 }
@@ -449,9 +467,10 @@ pub fn attach_to(hwnd: isize, host: isize) -> Result<(), String> {
 /// other windows cover it, which a screen copy cannot. With `UNIDTK_PROBE_DUMP=<dir>` the
 /// whole image is also written there as `<label>.bmp`.
 pub fn read_pixels(points: &[(&'static str, i32, i32)], label: &str) -> Vec<[u8; 3]> {
-    let Ok(host) = desktop_host() else {
+    let Ok(host) = discover_with_attempt(60) else {
         return vec![[0, 0, 0]; points.len()];
     };
+    let host = HWND(host.hwnd as _);
     unsafe {
         let mut rect = RECT::default();
         let _ = GetWindowRect(host, &mut rect);

@@ -98,13 +98,28 @@ pub fn load<S: MenuHost>(state: &mut S, _tx: &mut Tx) {
 
 /// The switched-off modules and the folders: the pane shows them, the desk draws from them.
 pub fn load_lists<S: MenuHost>(state: &mut S) {
+    load_disabled_modules(state);
+    load_folders(state);
+}
+
+/// A disconnected request completes with an error. A new link can fill in that list
+/// even when it reconnects to the same kernel and the layout revision is unchanged.
+pub(crate) fn retry_failed_lists<S: MenuHost>(state: &mut S) {
+    if matches!(state.menu_ref().disabled_modules, Loaded::Failed(_)) {
+        load_disabled_modules(state);
+    }
+    if matches!(state.menu_ref().folders, Loaded::Failed(_)) {
+        load_folders(state);
+    }
+}
+
+fn load_disabled_modules<S: MenuHost>(state: &mut S) {
     state.call("get_disabled_modules", json!({}), Box::new(|state: &mut S, result, _tx: &mut Tx| {
         state.menu().disabled_modules = match result {
             Ok(list) => Loaded::Ready(list.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()),
             Err(error) => Loaded::Failed(error),
         };
     }));
-    load_folders(state);
 }
 
 pub fn load_folders<S: MenuHost>(state: &mut S) {

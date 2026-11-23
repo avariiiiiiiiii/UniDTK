@@ -52,12 +52,20 @@ pub(crate) struct Slot {
     due: Option<Instant>,
 }
 
+enum StartupData {
+    AwaitingWindow,
+    Waiting(Instant),
+    Released,
+}
+
 /// The desk: the app state Rune's handlers receive.
 pub struct Host {
     pub(crate) inspector: Arc<Inspector>,
-    /// `None` until the kernel has described the desk: a supervised host draws nothing
-    /// rather than defaults that would jump to the stored positions a moment later.
+    /// The latest desk received from the kernel, or the startup fallback.
     pub(crate) layout: Option<Layout>,
+    /// Until the layout and both lists are available, or the one startup deadline passes.
+    startup_data: StartupData,
+    show_requested: bool,
     pub(crate) time: LocalTime,
     pub(crate) canvas: (f32, f32),
     /// Physical pixels per point; images are made in device pixels.
@@ -130,6 +138,8 @@ impl Host {
         let motion = layout.as_ref().map_or_else(|| crate::motion::Motion::new(crate::motion::Profile::Balanced, 1.0), |l| l.theme.motion());
         let mut host = Host {
             inspector,
+            startup_data: if layout.is_none() { StartupData::AwaitingWindow } else { StartupData::Released },
+            show_requested: false,
             layout,
             time: LocalTime::now(),
             canvas,
@@ -171,6 +181,12 @@ impl Host {
         host
     }
 
+    pub(crate) fn start_snapshot_deadline(&mut self) {
+        if matches!(self.startup_data, StartupData::AwaitingWindow) {
+            self.startup_data = StartupData::Waiting(Instant::now() + Duration::from_millis(750));
+        }
+    }
+
     /// The theme the desk shows: the draft while one is being edited, else the stored one.
     pub fn theme(&self) -> Theme {
         match (&self.draft, &self.layout) {
@@ -204,7 +220,11 @@ impl Host {
             // every motion, the morph's as the hover's.
             self.motion = self.theme().motion();
             if new_run {
-                // Folders and switched-off modules decide which cards the desk draws.
+                // Only lists from this kernel run may complete the startup snapshot.
+                if !matches!(self.startup_data, StartupData::Released) {
+                    self.menu.disabled_modules = crate::menu::Loaded::Loading;
+                    self.menu.folders = crate::menu::Loaded::Loading;
+                }
                 crate::menu_desk::load_lists(self);
             }
             self.refresh_grain();
@@ -1154,7 +1174,7 @@ fn body_region(body: El, frame: Placement, opening: Option<String>) -> El {
 
 pub(crate) fn view(state: &Host, cx: &mut rune::runtime::Cx<Host>) -> El {
     let mut root = el().w_full().h_full();
-    if state.layout.is_none() {
+    if !matches!(state.startup_data, StartupData::Released) || state.layout.is_none() {
         return root;
     }
     let theme = state.theme();
@@ -1424,6 +1444,37 @@ pub(crate) fn on_key(state: &mut Host, event: &rune::KeyEvent, tx: &mut Tx) -> b
 /// runs, then none), the toast's end, the menu's slide-out and the arrange settle. An idle
 /// desk wakes only when a widget asks (the clock once a second or once a minute).
 pub(crate) fn poll(state: &mut Host, _: f64, tx: &mut Tx) -> bool {
+    if matches!(state.startup_data, StartupData::AwaitingWindow) { return false; }
+    if let StartupData::Waiting(deadline) = state.startup_data {
+        let complete = state.layout.is_some()
+            && state.menu.disabled_modules.ready().is_some()
+            && state.menu.folders.ready().is_some();
+        if !complete {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                tx.wake_after(remaining);
+                return false;
+            }
+            crate::desktop_host::note("startup snapshot timed out; using available desk data");
+            if state.layout.is_none() {
+                state.layout = Some(Layout::empty());
+                state.refresh_grain();
+                state.refresh_backdrop();
+            }
+        }
+        state.startup_data = StartupData::Released;
+        tx.instant();
+    }
+    if !state.show_requested {
+        let hwnd = state.inspector.hwnd.load(Ordering::Acquire);
+        if crate::desktop_host::window_is_attached(hwnd) {
+            if let Some(ui) = state.ui.get() {
+                state.show_requested = true;
+                ui.show();
+                crate::desktop_host::note("desktop reveal requested after attachment and startup data");
+            }
+        }
+    }
     let Some(layout) = &state.layout else { return false };
     let mut changed = false;
     // The widgets follow the desk: made, synced or dropped when the layout or the
