@@ -3,7 +3,7 @@ title: UniDTK Sessions Journal (Engineering Session Log)
 type: journal
 project: unidtk
 version: "0.1.0"
-updated_at: "2026-11-20"
+updated_at: "2026-11-22"
 status: active
 format: "Chronological MOC / GitHub Markdown"
 ---
@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
+| **149** | 2026-11-22 | `bb2534f` | Rune desktop startup and Explorer attachment | [Host](../core/desktop/host.rs), [desktop attachment](../core/desktop/desktop_host.rs), [startup snapshot](../core/desktop/shell.rs) |
 | **148** | 2026-11-20 | `0425c33` | G2 Rune VPN picker refreshes by subscription revision and rejects stale actions | [Rune panel](../modules/vpn/native/lib.rs), [VPN commands](../modules/vpn/rust/vpn.rs) |
 | **147** | 2026-11-20 | `b1b860d` | Serialized VPN settings writes, atomic subscription cache reset and verified the Rune save path | [VPN store](../modules/vpn/rust/settings.rs), [redb adapter](../core/kernel/module_db.rs) |
 | **146** | 2026-11-20 | `12864d6` | G2 module-owned settings in Rune, VPN port validation and acknowledged switches | [Native settings contract](../core/desktop/settings.rs), [VPN settings](../modules/vpn/native/settings.rs) |
@@ -5759,3 +5760,26 @@ The settings snapshot supplies the revision in `vpn_status`. The widget uses its
 ### 148.5 Verification and metrics
 
 All 20 targeted release tests passed (12 backend and 8 native). Isolated fixtures exercised URL changes, stale replies and connection reservation with repeated tags. `udtk doctor -check` and `udtk doc --check` passed. `udtk build -j 2` built and verified the installation. The CLI started the app directly after Task Scheduler declined its start request. The installed kernel returned revision 0 and rejected a mismatched list request. The nested VPN picker loaded its servers, opened and closed the menu, and displayed the list after the Clock card was reopened. The VPN settings snapshots before and after matched. `udtk doctor --simulate`, `udtk doctor -kernel -modules -ping` and the installed `udtk doctor -quick` passed. Kernel IPC RTT was 1 ms and the native inspector RTT was 4 ms. The Rune host used 109.42 MB Working Set and 127.50 MB private memory with 4.71 ms frame CPU p95. The kernel used 45.77 MB Working Set. The ERROR query returned zero records, and the latest 30 frontend records contained zero errors. The reviewed `udtk shot --host` capture shows the loaded picker at `C:\Users\admin\Pictures\Screenshots\unidtk_host_2026-11-20_21-25-27_11424.png`.
+
+
+## 149. Session 2026-11-22 — Rune desktop startup and Explorer attachment
+
+### 149.1 Context and symptoms
+
+The native desk flashed or changed position during startup, then the first layout settled in waves. The reported 15-minute terminal launch was associated with `\swarm-watch-15min`. The exact task was already absent from Windows Task Scheduler when queried as the interactive user.
+
+### 149.2 Root cause
+
+Rune used its normal top-level show before the Explorer discovery worker returned a parent. The attach code set visibility again as it applied geometry, and discovery repeatedly sent Explorer `0x052C` while waiting for the legacy fallback. The shell committed the layout while the disabled-module and folder reads were still outstanding, so cards could appear or disappear on later commits.
+
+### 149.3 Architecture decision
+
+The host keeps the HWND hidden until the UI thread attaches it as a desktop child and the shell has a complete startup snapshot or reaches its 750 ms deadline. Windows 11 raised desktop detection checks Progman, its icon view and the same Explorer process's tray. The classic path finds the sibling WorkerW and requests the split at most once per Progman HWND and shell generation. Discovery stays on the worker and confirms the candidate on the UI thread under `r[kernel.no-blocking-main-thread]` and `r[kernel.main-thread-once]`. Rune orders in the child without activation and retains the first-frame cloak and region management under `r[shell.window-region]`.
+
+### 149.4 Changed files
+
+[Desktop attachment](../core/desktop/desktop_host.rs), [host lifecycle](../core/desktop/host.rs), [snapshot gate](../core/desktop/shell.rs), [list retry](../core/desktop/menu_desk.rs), [transparency probe](../core/desktop/lib.rs), [discovery tests](../core/desktop/tests.rs), [Rune window options](../core/rune/rune/src/window/spec.rs), [Rune reveal](../core/rune/rune/src/window/win.rs), [Win32 show](../core/rune/rune/src/platform/win32.rs), [Rune changes](../core/rune/UPSTREAM.md), [shell contract](reference/shell.md), [host plan](dev/plan-rune-host.md), and [status](status.md).
+
+### 149.5 Verification and metrics
+
+Task Scheduler query as the interactive user found no `\swarm-watch-15min` task, so no change was needed there. `udtk build -j 1` (16 min 36 s) installed the new `unidtk-desktop.exe` (36,320,768 bytes) into Program Files; `cargo test --release -p unidtk-shell --lib -j 1`: 80 passed, 0 failed; `udtk doc --check`: ok. **Not verified:** the first show, the 750 ms snapshot deadline and the `TaskbarCreated` relay. The agent shell runs on a sandbox desktop (`exebox-*`), where `FindWindow("Progman")` returns 0, so a started host stays in `state: starting` and `schtasks /run /tn UniDTK` is denied. `scratch/rune-startup/verify.ps1` and `fallback.py` must run on `WinSta0\Default`. The application was stopped with `udtk stop` after diagnosis.
