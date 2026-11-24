@@ -26,6 +26,7 @@ const PANEL_HTML = `
       <span class="vpn-toggle-slider"></span>
     </label>
   </div>
+  <div class="vpn-error" hidden></div>
   <select class="vpn-server-select" disabled>
     <option>Загрузка…</option>
   </select>
@@ -316,6 +317,12 @@ async function refreshVpnStatus() {
         : "VPN: выключен";
     }
     if (serverName) serverName.textContent = formatSelectedVpnServer(status);
+    const errorLine = panel.querySelector(".vpn-error");
+    if (errorLine) {
+      const reason = typeof status.error === "string" ? status.error.trim() : "";
+      errorLine.textContent = reason;
+      errorLine.hidden = !reason;
+    }
     if (toggleInput && !vpnBusy) toggleInput.checked = status.connected;
     if (select && status.selected_tag && select.value !== status.selected_tag && !vpnBusy) {
       select.value = status.selected_tag;
@@ -373,10 +380,17 @@ function renderVpnServerPicker(select, button, menu) {
 }
 
 function formatSelectedVpnServer(status) {
+  // The refusal comes first (`#538`): `vpn_status.error` carries the reason a
+  // connect was refused, and without it the switch just flips back and the panel
+  // never says why. It also gets its own line below (`.vpn-error`), where the
+  // whole message fits; this short form keeps the server line truthful.
+  const reason = typeof status?.error === "string" ? status.error.trim() : "";
   const tag = status?.selected_tag;
-  if (!tag) return "—";
-  const name = displayText(tag);
-  let line = name;
+  const name = tag ? displayText(tag) : "";
+  let line = name || "—";
+  if (reason) {
+    return name ? `${name} · ошибка` : reason;
+  }
   if (Number.isFinite(status.proxyLatencyMs)) {
     line = `${name} · прокси: ${status.proxyLatencyMs} мс`;
   } else if (status.proxyError) {

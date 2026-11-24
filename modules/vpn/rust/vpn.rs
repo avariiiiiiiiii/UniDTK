@@ -532,12 +532,285 @@ fn pick_server(
 /// - `xhttp`/`splithttp` → the extended fork's `xhttp` transport. Upstream
 ///   sing-box has no such transport, and the fork requires an explicit padding
 ///   range (padding cannot be disabled).
-fn build_singbox_outbound(server: &VpnServer, tag: &str) -> serde_json::Value {
+/// The name a server presents in TLS and in the `Host` header: the sni when the
+/// link names one, else the host itself. Once the dial address is an IP literal,
+/// this is the only domain left in the outbound.
+fn tls_name(server: &VpnServer) -> &str {
+    if server.sni.is_empty() {
+        &server.host
+    } else {
+        &server.sni
+    }
+}
+
+// ─── Addresses: the dial literal and a free TUN subnet ───
+//
+// #538: the generated config asked sing-box to resolve the proxy's own hostname
+// through a DNS server whose `detour` is that very proxy. sing-box detects the
+// cycle and every dial fails with "DNS resolution loop detected", so the TUN and
+// the SOCKS port came up while no traffic ever left the machine. The dial
+// address is therefore resolved here, at config-build time, and written as a
+// literal; the domain stays in `server_name` (and in the ws `Host` header), so
+// TLS/Reality and SNI still see the name the link asked for.
+//
+// The TUN address used to be the literal `172.19.0.1/30`, which Happ's
+// `happ-xray` adapter holds while it runs: an elevated sing-box then died at
+// `set ipv4 address: The object already exists`. A free /30 is picked per
+// connect instead, and any /30 that overlaps an adapter's or a route's range is
+// skipped.
+
+/// How long a system DNS lookup may take before the connect reports an honest
+/// failure instead of hanging.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How many /30 candidates are tried in each range before the next range is
+/// scanned; a full range is millions of subnets, and a scan must stay cheap.
+const TUN_CANDIDATES_PER_RANGE: u32 = 2048;
+
+/// A /30 range the TUN must not claim, as a network address and a prefix length.
+type V4Range = (u32, u8);
+
+fn parse_v4(text: &str) -> Option<u32> {
+    let mut parts = text.split('.');
+    let mut value = 0u32;
+    for _ in 0..4 {
+        let part: u32 = parts.next()?.parse().ok()?;
+        if part > 255 {
+            return None;
+        }
+        value = (value << 8) | part;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(value)
+}
+
+fn show_v4(value: u32) -> String {
+    format!(
+        "{}.{}.{}.{}",
+        (value >> 24) & 0xff,
+        (value >> 16) & 0xff,
+        (value >> 8) & 0xff,
+        value & 0xff
+    )
+}
+
+/// A subnet's first and last address, both inclusive.
+fn range_bounds((net, prefix): V4Range) -> (u32, u32) {
+    let prefix = prefix.min(32);
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    let start = net & mask;
+    (start, start | !mask)
+}
+
+/// Whether two ranges share an address.
+fn ranges_overlap(a: V4Range, b: V4Range) -> bool {
+    let (a_start, a_end) = range_bounds(a);
+    let (b_start, b_end) = range_bounds(b);
+    a_start <= b_end && b_start <= a_end
+}
+
+/// The IPv4 `/30` subnets this machine already reaches: every adapter's own
+/// subnet (on-link) and every route's destination. A TUN address inside one of
+/// them would either fail to be set or shadow a LAN under `strict_route`.
+#[cfg(windows)]
+fn occupied_v4_ranges() -> Vec<V4Range> {
+    use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetAdaptersAddresses, GetIpForwardTable2, GAA_FLAG_INCLUDE_PREFIX,
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
+        IP_ADAPTER_ADDRESSES_LH, MIB_IPFORWARD_TABLE2,
+    };
+    use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+
+    let mut ranges: Vec<V4Range> = Vec::new();
+
+    // Adapters: their unicast addresses with the on-link prefix length.
+    let flags = GAA_FLAG_INCLUDE_PREFIX
+        | GAA_FLAG_SKIP_ANYCAST
+        | GAA_FLAG_SKIP_MULTICAST
+        | GAA_FLAG_SKIP_DNS_SERVER;
+    let mut size: u32 = 16 * 1024;
+    // `u64` backing so the header is 8-byte aligned; `size` is the byte count.
+    let mut buffer: Vec<u64> = Vec::new();
+    for _ in 0..4 {
+        buffer.resize((size as usize).div_ceil(8).max(1), 0);
+        let adapter = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        let result = unsafe {
+            GetAdaptersAddresses(AF_INET.0 as u32, flags, None, Some(adapter), &mut size)
+        };
+        // GetAdaptersAddresses reports its errors as plain Win32 codes (`u32`).
+        if result == ERROR_BUFFER_OVERFLOW.0 {
+            continue;
+        }
+        if result != NO_ERROR.0 {
+            unidtk_api::log(format!("vpn: GetAdaptersAddresses failed: {result}"));
+            break;
+        }
+        let mut current = adapter;
+        while !current.is_null() {
+            let entry = unsafe { &*current };
+            let mut unicast = entry.FirstUnicastAddress;
+            while !unicast.is_null() {
+                let address = unsafe { &(*unicast).Address };
+                if address.iSockaddrLength >= std::mem::size_of::<SOCKADDR_IN>() as i32
+                    && !address.lpSockaddr.is_null()
+                {
+                    let sockaddr = unsafe { &*(address.lpSockaddr as *const SOCKADDR_IN) };
+                    if sockaddr.sin_family == AF_INET {
+                        let ip = u32::from_be(unsafe { sockaddr.sin_addr.S_un.S_addr });
+                        let prefix = unsafe { (*unicast).OnLinkPrefixLength }.min(32);
+                        ranges.push((ip, prefix));
+                    }
+                }
+                unicast = unsafe { (*unicast).Next };
+            }
+            current = entry.Next;
+        }
+        break;
+    }
+
+    // Routes: destination prefixes, so a /30 inside a routed (not on-link) subnet
+    // cannot take the TUN over a corporate or VPN range.
+    unsafe {
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+        if GetIpForwardTable2(AF_INET, &mut table) == NO_ERROR && !table.is_null() {
+            let count = (*table).NumEntries as usize;
+            let rows = (*table).Table.as_ptr();
+            for index in 0..count {
+                let row = &*rows.add(index);
+                let destination = row.DestinationPrefix.Prefix;
+                if destination.si_family == AF_INET {
+                    let ip = u32::from_be(destination.Ipv4.sin_addr.S_un.S_addr);
+                    // The default route covers everything and says nothing about a
+                    // LAN; an aggregate shorter than /8 is a carrier or tunnel
+                    // advertisement, not an on-link subnet. Only a real subnet can
+                    // collide with the TUN, and only a real subnet is worth the scan.
+                    let prefix = row.DestinationPrefix.PrefixLength;
+                    if (8..=30).contains(&prefix) {
+                        ranges.push((ip, prefix));
+                    }
+                }
+            }
+            FreeMibTable(table.cast());
+        }
+    }
+
+    // Ranges no TUN may ever use, whatever the adapters say.
+    ranges.push((parse_v4("0.0.0.0").unwrap_or(0), 8));
+    ranges.push((parse_v4("127.0.0.0").unwrap_or(0), 8));
+    ranges.push((parse_v4("169.254.0.0").unwrap_or(0), 16));
+    ranges.push((parse_v4("224.0.0.0").unwrap_or(0), 4));
+    ranges.push((parse_v4("240.0.0.0").unwrap_or(0), 4));
+    ranges.push((parse_v4("100.64.0.0").unwrap_or(0), 10));
+    ranges
+}
+
+#[cfg(not(windows))]
+fn occupied_v4_ranges() -> Vec<V4Range> {
+    vec![(parse_v4("0.0.0.0").unwrap_or(0), 8), (parse_v4("127.0.0.0").unwrap_or(0), 8)]
+}
+
+/// The `/30` the TUN takes: the address written into sing-box, and the literal
+/// the readiness check expects on the adapter. `172.19.0.0/30` stays first, so a
+/// machine without a conflicting client keeps the address it always had.
+fn pick_tun_address(occupied: &[V4Range]) -> (String, String) {
+    let scans: [V4Range; 5] = [
+        // The address every earlier connect used, tried first so an ordinary
+        // machine keeps it.
+        (parse_v4("172.19.0.0").unwrap_or(0), 30),
+        // Its own /16 next: one subnet over from the old address keeps logs and
+        // packet captures comparable to the ones support already has.
+        (parse_v4("172.19.0.0").unwrap_or(0), 16),
+        (parse_v4("172.16.0.0").unwrap_or(0), 12),
+        (parse_v4("10.0.0.0").unwrap_or(0), 8),
+        (parse_v4("192.168.0.0").unwrap_or(0), 16),
+    ];
+    for scan in scans {
+        let (start, end) = range_bounds(scan);
+        let mut base = start;
+        let mut tried = 0u32;
+        while base <= end && tried < TUN_CANDIDATES_PER_RANGE {
+            let candidate = (base, 30);
+            if !occupied.iter().any(|held| ranges_overlap(candidate, *held)) {
+                return (format!("{}/30", show_v4(base + 1)), show_v4(base + 1));
+            }
+            base = base.saturating_add(4);
+            tried += 1;
+        }
+    }
+    // Every scan was exhausted (a machine with a subnet over most of the private
+    // space). The old fixed address is still the best guess; the connect reports
+    // its own failure if it is taken.
+    unidtk_api::log("vpn: no free TUN /30 found; falling back to 172.19.0.1/30");
+    let fallback = parse_v4("172.19.0.1").unwrap_or(0);
+    (format!("{}/30", show_v4(fallback)), show_v4(fallback))
+}
+
+/// The IPv4 literal sing-box dials: the server's host when it already is one, else
+/// the system resolver's first IPv4 answer, bounded by [`RESOLVE_TIMEOUT`].
+/// `getaddrinfo` cannot be cancelled, so the lookup runs on a thread that is
+/// abandoned when the deadline passes; the result is read through a channel.
+fn resolve_ipv4(host: &str) -> Result<String, String> {
+    let host = host.trim();
+    if parse_v4(host).is_some() {
+        return Ok(host.to_string());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target = host.to_string();
+    std::thread::spawn(move || {
+        use std::net::ToSocketAddrs;
+        let answer = (target.as_str(), 0)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addresses| addresses.find_map(|address| match address.ip() {
+                std::net::IpAddr::V4(v4) => Some(v4.to_string()),
+                std::net::IpAddr::V6(_) => None,
+            }));
+        let _ = tx.send(answer);
+    });
+    match rx.recv_timeout(RESOLVE_TIMEOUT) {
+        Ok(Some(address)) => Ok(address),
+        Ok(None) => Err(format!(
+            "the VPN server '{host}' has no IPv4 address; a tunnel over IPv6 only is not supported"
+        )),
+        Err(_) => Err(format!(
+            "could not resolve the VPN server '{host}' within {} s; check the network or the subscription",
+            RESOLVE_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// Every server's dial literal for one ping run: one lookup per distinct host, so
+/// `vpn_ping_all` does not pay the timeout once per server. A host that does not
+/// resolve keeps its name, and the ping then reports it as dead on its own.
+fn resolve_dials(servers: &[VpnServer]) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    let mut dials = HashMap::new();
+    for server in servers {
+        if dials.contains_key(&server.host) {
+            continue;
+        }
+        let dial = resolve_ipv4(&server.host).unwrap_or_else(|error| {
+            unidtk_api::log(format!("vpn: ping uses the hostname for '{}': {error}", server.host));
+            server.host.clone()
+        });
+        dials.insert(server.host.clone(), dial);
+    }
+    dials
+}
+
+fn build_singbox_outbound(server: &VpnServer, tag: &str, dial: &str) -> serde_json::Value {
     let mut outbound = if server.protocol == "trojan" {
         json!({
             "type": "trojan",
             "tag": tag,
-            "server": server.host,
+            "server": dial,
             "server_port": server.port,
             "password": server.uuid,
         })
@@ -545,7 +818,7 @@ fn build_singbox_outbound(server: &VpnServer, tag: &str) -> serde_json::Value {
         let mut obj = json!({
             "type": "vless",
             "tag": tag,
-            "server": server.host,
+            "server": dial,
             "server_port": server.port,
             "uuid": server.uuid,
         });
@@ -560,10 +833,11 @@ fn build_singbox_outbound(server: &VpnServer, tag: &str) -> serde_json::Value {
     } else {
         server.fp.as_str()
     };
+    let name = tls_name(server);
     if server.security == "reality" {
         outbound["tls"] = json!({
             "enabled": true,
-            "server_name": server.sni,
+            "server_name": name,
             "utls": { "enabled": true, "fingerprint": fingerprint },
             "reality": {
                 "enabled": true,
@@ -574,7 +848,7 @@ fn build_singbox_outbound(server: &VpnServer, tag: &str) -> serde_json::Value {
     } else if server.security == "tls" {
         outbound["tls"] = json!({
             "enabled": true,
-            "server_name": server.sni,
+            "server_name": name,
             "insecure": true,
             "utls": { "enabled": true, "fingerprint": fingerprint },
             "alpn": ["h2", "http/1.1"]
@@ -586,7 +860,7 @@ fn build_singbox_outbound(server: &VpnServer, tag: &str) -> serde_json::Value {
             outbound["transport"] = json!({
                 "type": "ws",
                 "path": server.path,
-                "headers": { "Host": server.sni }
+                "headers": { "Host": name }
             });
         }
         "grpc" => {
@@ -611,11 +885,20 @@ fn build_singbox_outbound(server: &VpnServer, tag: &str) -> serde_json::Value {
 /// Full client config for the selected `server`: TUN in, local SOCKS in
 /// (readiness probe + watchdog), proxy out, and optional split-tunnel outbound
 /// for the home server's LAN if the home_server submodule is enabled.
-fn build_singbox_config(server: &VpnServer, settings: &VpnSettings) -> serde_json::Value {
+///
+/// `dial` is the IPv4 literal sing-box connects to (see [`resolve_ipv4`]: the
+/// proxy's own hostname must never be resolved through the proxy, `#538`), and
+/// `tun` the TUN address chosen for this connect ([`pick_tun_address`]).
+fn build_singbox_config(
+    server: &VpnServer,
+    settings: &VpnSettings,
+    dial: &str,
+    tun: &str,
+) -> serde_json::Value {
     let singbox_log = singbox_log_path().to_string_lossy().into_owned();
 
     let mut outbounds = vec![
-        build_singbox_outbound(server, "proxy"),
+        build_singbox_outbound(server, "proxy", dial),
     ];
 
     let mut rules = vec![
@@ -682,6 +965,10 @@ fn build_singbox_config(server: &VpnServer, settings: &VpnSettings) -> serde_jso
             // `type`/`server` is the post-1.12 DNS server form; the legacy
             // `address: "tcp://…"` shape was removed in sing-box 1.14 (and
             // `sing-box check` rejects it outright).
+            //
+            // Only the user's traffic resolves here. The proxy's own address is
+            // already the literal `dial`, so the cycle sing-box used to detect
+            // (`dns-proxy` -> `proxy` -> needs the proxy's hostname) cannot form.
             "servers": [{ "type": "tcp", "tag": "dns-proxy", "server": "8.8.8.8", "detour": "proxy" }]
         },
         "inbounds": [
@@ -689,7 +976,7 @@ fn build_singbox_config(server: &VpnServer, settings: &VpnSettings) -> serde_jso
                 "type": "tun",
                 "tag": "tun-in",
                 "interface_name": TUN_NAME,
-                "address": ["172.19.0.1/30"],
+                "address": [tun],
                 // Keep the TUN MTU conservative: Reality-over-TCP plus TUN
                 // overhead can otherwise make page loads stall while large TLS
                 // packets are retried.
@@ -813,6 +1100,36 @@ fn interface_is_connected(name: &str) -> Result<bool, String> {
 // approach as server.ps1's Get-PreferredPublicGatewayRoute.
 fn active_happ_tun_present() -> Result<bool, String> {
     interface_is_connected("happ")
+}
+
+/// Whether the adapter `name` actually carries `address` (the literal chosen for
+/// this connect). A stale adapter from a dead core still reports "connected",
+/// and a TUN sing-box failed to address would otherwise read as ready.
+fn interface_has_address(name: &str, address: &str) -> bool {
+    let output = Command::new("cmd.exe")
+        .args(["/C", "chcp 65001 >NUL & netsh interface ipv4 show addresses"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let Ok(output) = output else { return false };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let target = name.to_ascii_lowercase();
+    // `netsh` prints one block per adapter, its header at column 0 and the fields
+    // indented; the header is localized, so a block is recognised by indentation
+    // rather than by its wording.
+    let mut in_adapter = false;
+    for line in stdout.lines() {
+        if !line.starts_with(' ') && !line.starts_with('\t') && !line.trim().is_empty() {
+            in_adapter = line.to_ascii_lowercase().contains(&target);
+            continue;
+        }
+        if in_adapter && line.contains(address) {
+            return true;
+        }
+    }
+    false
 }
 
 fn run_diagnostic_command(label: &str, program: &str, args: &[&str]) {
@@ -1162,7 +1479,12 @@ fn wait_until_stopped(timeout: Duration, stop_nonce: Option<&str>) -> bool {
 /// Bring the tunnel up for `server`. Runs entirely WITHOUT holding the runtime
 /// mutex — the long port/TUN waits and HTTP probe (tens of seconds worst case)
 /// must not block `status()`/`select_server()` polling on the same lock.
-fn bring_up(server: &VpnServer, settings: &VpnSettings) -> Result<BringUpResult, String> {
+fn bring_up(
+    server: &VpnServer,
+    settings: &VpnSettings,
+    epoch: u64,
+    dial: Result<String, String>,
+) -> Result<BringUpResult, String> {
     ensure_binaries_present()?;
     unidtk_api::log(format!("vpn: bring_up tag={}", server.tag));
     unidtk_api::log(format!(
@@ -1205,7 +1527,31 @@ fn bring_up(server: &VpnServer, settings: &VpnSettings) -> Result<BringUpResult,
         ));
     }
 
-    let singbox_cfg = build_singbox_config(server, settings);
+    // The proxy's own hostname cannot be resolved through the proxy (`#538`):
+    // the literal was resolved by the caller, in parallel with the stop above.
+    // A missed deadline here is a cancellation, not a failure to report.
+    if CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+        return Err("VPN was disconnected while connecting".into());
+    }
+    let dial = dial?;
+
+    // The TUN is chosen now, after the old adapter is gone (its address must not
+    // block the candidate) and before the config is written. The home-server
+    // subnet is excluded too: `strict_route` would take it away from its own
+    // split-tunnel outbound.
+    let mut occupied = occupied_v4_ranges();
+    if settings.home_server.enabled {
+        let subnet = settings.home_server.subnet.trim();
+        if let Some((network, prefix)) = subnet.split_once('/') {
+            if let (Some(network), Ok(prefix)) = (parse_v4(network), prefix.parse::<u8>()) {
+                occupied.push((network, prefix.min(32)));
+            }
+        }
+    }
+    let (tun, tun_literal) = pick_tun_address(&occupied);
+    unidtk_api::log(format!("vpn: tun address {tun} ({} held ranges)", occupied.len()));
+
+    let singbox_cfg = build_singbox_config(server, settings, &dial, &tun);
     std::fs::write(
         singbox_config_path(),
         serde_json::to_string_pretty(&singbox_cfg).unwrap_or_default(),
@@ -1228,6 +1574,13 @@ fn bring_up(server: &VpnServer, settings: &VpnSettings) -> Result<BringUpResult,
         );
     }
 
+    // A disconnect that landed during the stop/validation above already owns the
+    // state; starting the core now would fight it (`#538` widened this window).
+    if CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+        unidtk_api::log("vpn: connect superseded before the core started; aborting");
+        return Err("VPN was disconnected while connecting".into());
+    }
+
     if let Err(e) = task_start(SINGBOX_TASK) {
         let _ = perform_stop();
         return Err(e);
@@ -1236,13 +1589,18 @@ fn bring_up(server: &VpnServer, settings: &VpnSettings) -> Result<BringUpResult,
 
     let mut tun_ready = false;
     for attempt in 1..=20 {
-        if interface_is_connected(TUN_NAME).unwrap_or(false) {
-            unidtk_api::log(format!("vpn: {TUN_NAME} connected after {attempt} checks"));
+        // The adapter must carry the address chosen for this connect: a leftover
+        // `wallpaper-tun` from a dead core answers "connected" too, and the
+        // config then could not have set its address.
+        if interface_is_connected(TUN_NAME).unwrap_or(false)
+            && interface_has_address(TUN_NAME, &tun_literal)
+        {
+            unidtk_api::log(format!("vpn: {TUN_NAME} connected at {tun_literal} after {attempt} checks"));
             tun_ready = true;
             break;
         }
         if attempt == 1 || attempt == 10 || attempt == 20 {
-            unidtk_api::log(format!("vpn: waiting for {TUN_NAME}, check {attempt}/20"));
+            unidtk_api::log(format!("vpn: waiting for {TUN_NAME} at {tun_literal}, check {attempt}/20"));
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -1368,7 +1726,11 @@ fn find_free_port_range(count: usize) -> u16 {
 /// One throwaway sing-box with N SOCKS inbounds, each routed to its own server
 /// outbound via `route.rules` — so every server is dialed through its own
 /// inbound and probed in parallel.
-fn build_multi_ping_config(servers: &[VpnServer], start_port: u16) -> serde_json::Value {
+fn build_multi_ping_config(
+    servers: &[VpnServer],
+    start_port: u16,
+    dials: &std::collections::HashMap<String, String>,
+) -> serde_json::Value {
     let mut inbounds = Vec::new();
     let mut outbounds = Vec::new();
     let mut rules = Vec::new();
@@ -1385,7 +1747,11 @@ fn build_multi_ping_config(servers: &[VpnServer], start_port: u16) -> serde_json
             "listen_port": port
         }));
 
-        outbounds.push(build_singbox_outbound(server, &out_tag));
+        // Same literal as a connect uses: the throwaway config has no DNS block,
+        // so a hostname here would be resolved by the system and could disagree
+        // with what the real tunnel dials.
+        let dial = dials.get(&server.host).map_or(server.host.as_str(), String::as_str);
+        outbounds.push(build_singbox_outbound(server, &out_tag, dial));
 
         rules.push(json!({
             "inbound": [in_tag],
@@ -1502,7 +1868,8 @@ pub fn ping_all(
     unidtk_api::log(format!("vpn: ping_all start (via proxy GET), {} servers", servers.len()));
 
     let base_port = find_free_port_range(servers.len());
-    let cfg = build_multi_ping_config(&servers, base_port);
+    let dials = resolve_dials(&servers);
+    let cfg = build_multi_ping_config(&servers, base_port, &dials);
     let cfg_path = ping_dir().join(format!("singbox_ping_{base_port}.json"));
     if let Err(e) = std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap_or_default()) {
         return Err(format!("write multi ping config failed: {e}"));
@@ -1814,7 +2181,16 @@ pub fn connect(
         (server, epoch, snapshot)
     };
 
-    let result = bring_up(&server, &snapshot.settings);
+    // The dial literal is resolved here, before bring_up's long stop/start: the
+    // lookup then overlaps the stop instead of extending the wait, and it runs
+    // unlocked (r[kernel.no-blocking-main-thread]). A failure is a real error:
+    // a config that cannot dial must never be written (`#538`).
+    let lookup_host = server.host.clone();
+    let dial = std::thread::spawn(move || resolve_ipv4(&lookup_host))
+        .join()
+        .unwrap_or_else(|_| Err("the resolver thread panicked".into()));
+
+    let result = bring_up(&server, &snapshot.settings, epoch, dial);
 
     let mut inner = runtime.inner.lock().unwrap();
     if CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch {
@@ -2196,8 +2572,97 @@ impl unidtk_api::Module for VpnModule {
 
 #[cfg(test)]
 mod subscription_tests {
-    use super::{decode_subscription, parse_subscription, parse_vless_line, pick_server, VpnServer};
+    use super::{
+        build_singbox_config, build_singbox_outbound, decode_subscription, parse_subscription,
+        parse_vless_line, pick_server, pick_tun_address, resolve_ipv4, VpnServer, VpnSettings,
+    };
     use base64::Engine;
+
+    #[test]
+    fn the_dial_address_is_a_literal_and_the_name_stays_the_domain() {
+        // #538: a config whose outbound server is the hostname asks sing-box to
+        // resolve it through the proxy's own DNS detour, which sing-box refuses
+        // ("DNS resolution loop detected"). The literal is dialed; the domain
+        // stays in server_name and in the ws Host header.
+        let server = parse_vless_line(
+            "vless://id@ess.example:443?security=reality&sni=ess.example&pbk=k&sid=s#ess",
+        )
+        .unwrap();
+        let outbound = build_singbox_outbound(&server, "proxy", "64.188.82.140");
+        assert_eq!(outbound["server"], "64.188.82.140");
+        assert_eq!(outbound["tls"]["server_name"], "ess.example");
+        assert!(parse_vless_line("vless://id@ess.example:443?security=tls#ess").is_some());
+    }
+
+    #[test]
+    fn a_tls_link_without_an_sni_names_the_host() {
+        let server = parse_vless_line("vless://id@h.example:443?security=tls&type=ws#ws").unwrap();
+        let outbound = build_singbox_outbound(&server, "proxy", "10.9.8.7");
+        assert_eq!(outbound["tls"]["server_name"], "h.example");
+        assert_eq!(outbound["transport"]["headers"]["Host"], "h.example");
+    }
+
+    #[test]
+    fn an_ip_host_needs_no_lookup_and_a_bad_name_reports_itself() {
+        assert_eq!(resolve_ipv4("158.160.199.68").unwrap(), "158.160.199.68");
+        assert_eq!(resolve_ipv4(" 1.1.1.1 ").unwrap(), "1.1.1.1");
+        let error = resolve_ipv4("no-such-host.invalid").unwrap_err();
+        assert!(error.contains("no-such-host.invalid"), "{error}");
+    }
+
+    #[test]
+    fn the_tun_skips_a_held_range_and_never_overlaps_it() {
+        // Happ's adapter holds exactly 172.19.0.1/30 — the address the config used
+        // to hardcode. The picker has to move on, and the address it returns must
+        // not land inside any held range.
+        let occupied = [(super::parse_v4("172.19.0.0").unwrap(), 30), (super::parse_v4("192.168.31.0").unwrap(), 24)];
+        let (address, literal) = pick_tun_address(&occupied);
+        assert_ne!(literal, "172.19.0.1", "the held /30 must not be chosen");
+        let chosen = (super::parse_v4(&literal).unwrap(), 30);
+        assert!(
+            !occupied.iter().any(|held| super::ranges_overlap(chosen, *held)),
+            "{address} overlaps a held range"
+        );
+        assert_eq!(address, format!("{literal}/30"));
+        // Nothing held: the address every earlier connect used stays.
+        assert_eq!(pick_tun_address(&[]).1, "172.19.0.1");
+    }
+
+    #[test]
+    fn the_machines_own_adapters_never_overlap_the_chosen_tun() {
+        // Environment-tolerant by design: on any machine, whatever adapters and
+        // routes exist right now, the chosen /30 must be outside every range the
+        // machine reports. On this machine Happ holds 172.19.0.1/30, which is the
+        // address the config used to hardcode (`#538`).
+        let occupied = super::occupied_v4_ranges();
+        assert!(!occupied.is_empty(), "every machine has at least the reserved ranges");
+        let (address, literal) = pick_tun_address(&occupied);
+        assert!(literal.ends_with(|c: char| c.is_ascii_digit()), "{literal}");
+        let chosen = (super::parse_v4(&literal).unwrap(), 30);
+        assert!(
+            !occupied.iter().any(|held| super::ranges_overlap(chosen, *held)),
+            "{address} overlaps a range this machine holds: {occupied:?}"
+        );
+        println!("tun={address} held={} ranges", occupied.len());
+    }
+
+    #[test]
+    fn the_built_config_dials_the_literal_and_uses_the_chosen_tun() {
+        let server = parse_vless_line(
+            "vless://id@ess.example:443?security=reality&sni=ess.example&pbk=k&sid=s#ess",
+        )
+        .unwrap();
+        let settings = VpnSettings::default();
+        let config = build_singbox_config(&server, &settings, "64.188.82.140", "172.31.0.1/30");
+        let outbounds = config["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds[0]["server"], "64.188.82.140");
+        assert_eq!(outbounds[0]["tls"]["server_name"], "ess.example");
+        let tun = &config["inbounds"][0];
+        assert_eq!(tun["type"], "tun");
+        assert_eq!(tun["address"][0], "172.31.0.1/30");
+        // The user's own traffic still resolves through the tunnel.
+        assert_eq!(config["dns"]["servers"][0]["detour"], "proxy");
+    }
 
     #[test]
     fn plain_text_subscription_is_taken_as_is() {

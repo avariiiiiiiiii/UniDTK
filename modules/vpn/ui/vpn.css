@@ -49,6 +49,21 @@
   text-overflow: ellipsis;
 }
 
+/* The reason a connect gave (`vpn_status.error`, #538). Wrapped, never cut: the
+   message names an adapter or a server, and the tail is the part that says what
+   to do ("disconnect Happ before starting wallpaper VPN"). */
+.vpn-error {
+  margin: 0;
+  font-size: 0.65rem;
+  line-height: 1.35;
+  color: var(--status-error);
+  overflow-wrap: anywhere;
+}
+
+.vpn-error[hidden] {
+  display: none;
+}
+
 .vpn-toggle {
   position: relative;
   display: inline-block;

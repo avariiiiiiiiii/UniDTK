@@ -79,6 +79,15 @@ pub fn display_text(raw: &str) -> String {
 
 /// `formatSelectedVpnServer`.
 fn server_line(status: &Value) -> String {
+    // The refusal comes first: without it the switch just flips back and the
+    // panel gives no reason (`#538`). A connect that failed has no selected tag
+    // to name, so the bare reason is the whole line.
+    if let Some(error) = status_error(status) {
+        return match status["selected_tag"].as_str().filter(|t| !t.is_empty()) {
+            Some(tag) => format!("{} · {error}", display_text(tag)),
+            None => error,
+        };
+    }
     let Some(tag) = status["selected_tag"].as_str().filter(|t| !t.is_empty()) else { return "—".into() };
     let name = display_text(tag);
     let mut line = if let Some(ms) = status["proxyLatencyMs"].as_f64() {
@@ -97,6 +106,20 @@ fn server_line(status: &Value) -> String {
         line.push_str(&format!(" · пропущено в подписке: {skipped}"));
     }
     line
+}
+
+/// The reason the last connect or disconnect gave, when it gave one.
+///
+/// The kernel has carried this in `vpn_status.error` all along, and nothing drew
+/// it: a refused connect (Happ's TUN holding the address, a dead server, a
+/// subscription that would not resolve) flipped the switch back and said nothing,
+/// so "the VPN does not work" was the only thing the panel showed (`#538`).
+fn status_error(status: &Value) -> Option<String> {
+    status["error"]
+        .as_str()
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+        .map(str::to_string)
 }
 
 fn listed_tag<'a>(status: &'a Value, servers: &[String]) -> Option<&'a str> {
@@ -376,6 +399,28 @@ impl Vpn {
             picker = picker.child(self.server_menu(v, inner, revision));
         }
 
+        // The reason a connect or a disconnect gave, when it gave one (`#538`): the
+        // kernel has carried `vpn_status.error` all along and no panel drew it, so a
+        // refused connect flipped the switch back in silence. Two lines at most,
+        // broken anywhere (the message names an adapter as often as a server), so
+        // the row can never grow past the space the panel reserved for it.
+        let error = status.and_then(status_error);
+        let error_style = body(theme, 10.4);
+        let error_width = width - if nested { 0.0 } else { 28.0 };
+        let error_height = error.as_deref().map_or(0.0, |message| {
+            let (_, measured) = rune::text::measure(message, &[], error_style, Some(error_width.max(1.0)));
+            measured.min(2.0 * 12.6)
+        });
+        let notice = error.as_ref().map(|message| {
+            el().w_full().child(
+                text(message)
+                    .font(error_style)
+                    .color(theme.status_error)
+                    .max_lines(2)
+                    .wrap_anywhere(),
+            )
+        });
+
         let auto = row().w_full().pt(2.0).h(22.0).items_center().justify_between()
             .child(text("АВТО").font(accent(theme, 9.6).tracking(0.48)).color(ink.alpha(0.5)))
             .child(switch(v, format!("hit:vpn-auto:{key}"), self.auto_on(), self.auto_pending.is_some(), |vpn: &mut Vpn, act| {
@@ -386,8 +431,15 @@ impl Vpn {
         // `vpnPanel.addEventListener("click", e => e.stopPropagation())`: a press on the panel
         // does not fold the card it is in.
         let mut dash = v.swallow(col().key(format!("vpn-panel:{key}")).w(width).gap(8.0).radius(14.0).border(1.0, theme.bg_elevated.alpha(0.05)).border_layout()
-            .child(top).child(picker).child(auto));
+            .child(top).child(picker));
+        if let Some(notice) = notice {
+            dash = dash.child(notice);
+        }
+        dash = dash.child(auto);
         let mut height = 2.0 + 28.0 + 8.0 + 28.0 + 8.0 + 22.0;
+        if error.is_some() {
+            height += 8.0 + error_height;
+        }
         if !nested {
             dash = dash.px(14.0).py(10.0).fill(theme.bg_elevated.alpha(0.03)).mt(14.0);
             height += 20.0 + 14.0;
@@ -553,6 +605,19 @@ mod tests {
         assert_eq!(server_line(&json!({ "selected_tag": "de", "proxyLatencyMs": 120 })), "de · прокси: 120 мс");
         assert_eq!(server_line(&json!({ "selected_tag": "de", "connecting": true })), "de · прокси: …");
         assert_eq!(server_line(&json!({ "selected_tag": "de", "connected": true, "ipUnverified": true, "skippedServers": 2 })), "de · IP: ? · пропущено в подписке: 2");
+    }
+
+    #[test]
+    fn a_refused_connect_says_why_on_the_line() {
+        // #538: the reason `vpn_status.error` carries used to reach no panel.
+        let reason = "Happ VPN/TUN is active; disconnect Happ before starting wallpaper VPN";
+        assert_eq!(server_line(&json!({ "error": reason })), reason);
+        assert_eq!(server_line(&json!({ "selected_tag": "de", "error": reason })), format!("de · {reason}"));
+        assert_eq!(status_error(&json!({ "error": "   " })), None);
+        assert_eq!(status_error(&json!({ "error": null })), None);
+        assert_eq!(status_error(&json!({})), None);
+        // A live tunnel reports no error, so nothing is drawn.
+        assert_eq!(status_error(&json!({ "connected": true, "error": null })), None);
     }
 
     #[test]

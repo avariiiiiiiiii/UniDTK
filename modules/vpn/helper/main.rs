@@ -138,6 +138,14 @@ fn stop() -> i32 {
     } else {
         helper_log("stop: no recorded pid (nothing to kill)");
     }
+    // A core can outlive its PID file: the helper may die between `spawn` and the
+    // write, or the app is killed first. Its TUN then black-holes the network with
+    // no record left to kill, so the sweep is the only recovery. Matched by the
+    // exact image path, so nothing else is ever touched.
+    let swept = sweep_orphaned_cores();
+    if swept > 0 {
+        helper_log(&format!("stop: swept {swept} orphaned sing-box process(es)"));
+    }
 
     // Plain UTF-8, no BOM: the app compares the trimmed contents to the nonce.
     match std::fs::write(dir.join("vpn_stop.done"), &nonce) {
@@ -153,6 +161,67 @@ fn read_pid(dir: &Path) -> Option<u32> {
     std::fs::read_to_string(dir.join("vpn_core.pid"))
         .ok()
         .and_then(|text| text.trim().parse::<u32>().ok())
+}
+
+/// Every running process whose image is our bundled `sing-box.exe`, terminated.
+/// The PID file covers the normal case; this covers a core that outlived it.
+#[cfg(windows)]
+fn sweep_orphaned_cores() -> usize {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    let exe = singbox_exe();
+    let wanted = exe.to_string_lossy().to_ascii_lowercase();
+    let mut swept = 0;
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return 0;
+        };
+        let mut entry = PROCESSENTRY32W::default();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = Process32FirstW(snapshot, &mut entry).is_ok();
+        while found {
+            let pid = entry.th32ProcessID;
+            if pid != 0 && pid != std::process::id() && process_image_is(pid, &wanted) {
+                terminate(pid);
+                swept += 1;
+            }
+            found = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    swept
+}
+
+#[cfg(not(windows))]
+fn sweep_orphaned_cores() -> usize {
+    0
+}
+
+/// Whether `pid`'s image is exactly the path `wanted` names.
+#[cfg(windows)]
+fn process_image_is(pid: u32, wanted: &str) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut buffer = [0u16; 1024];
+        let mut size = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(handle);
+        result.is_ok() && String::from_utf16_lossy(&buffer[..size as usize]).to_ascii_lowercase() == wanted
+    }
 }
 
 #[cfg(windows)]

@@ -19,3 +19,16 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ureq = { version = "2", features = ["socks-proxy"] }
 base64 = "0.22"
 tauri = { version = "2" }
+
+# `GetAdaptersAddresses`: which IPv4 ranges an adapter already holds, so the TUN
+# never asks for an address another client (Happ, Tailscale, ZeroTier) owns.
+# Same `windows` version as the rest of the workspace, so the feature union adds
+# no crate (and no build time).
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock"
+]
