@@ -24,7 +24,7 @@ This is the first file an agent reads. It says what is true today and where to r
 | **Module: MP3 Player** | 🟢 Stable | libmpv FFI raw-dylib, WASAPI loopback, AI DJ, arcs; model weights in `%LOCALAPPDATA%\UniDTK\models` (downloaded, session 116; default source: the published ONNX export on Hugging Face, pinned to a commit, session 134) | [mp3-player](modules/mp3-player.md) |
 | **Module: Micrographics** | 🟢 Stable | WinRT geolocation, adaptive precipitation/weather grid; place name via BDC→Nominatim chain (session 116, `b08fbae`) | [micrographics](modules/micrographics.md) |
 | **Module: Telegram** | 🟢 Stable | TDLib C FFI, ByeDPI socks5, reactions, forum threads; pinned messages in groups — 15 s budget + cooldown (session 115, `5ab1e7a`) | [telegram](modules/telegram.md) |
-| **Module: VPN** | 🟢 Settings writes and cache invalidation share the subscription revision. Stale picker requests are rejected before starting a connection (sessions 147–148). | Sing-box TUN, native `vpn-helper.exe` (GUI subsystem) | [vpn](modules/vpn.md) |
+| **Module: VPN** | 🟡 The tunnel dials a resolved IPv4 literal (no DNS loop), the TUN takes a free /30 (Happ's own is skipped), and a refusal renders `vpn_status.error` in both panels (#538). Settings writes and cache invalidation share the subscription revision; stale picker requests are rejected before starting a connection (sessions 147-148, 150). | Sing-box TUN, native `vpn-helper.exe` (GUI subsystem) | [vpn](modules/vpn.md) |
 | **Module: Explorer** | 🟢 Stable | Tabs, Win32 Shell API, cross-view sorting | [explorer](modules/explorer.md) |
 
 ## Where to read

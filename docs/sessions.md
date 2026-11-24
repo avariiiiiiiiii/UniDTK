@@ -20,6 +20,7 @@ format: "Chronological MOC / GitHub Markdown"
 
 | Session | Date | Git Commit | Key task / Subsystem | Main affected files |
 | :---: | :---: | :---: | :--- | :--- |
+| **150** | 2026-11-24 | `7fe8248` | VPN #538: dials a resolved literal (no DNS loop), the TUN takes a free /30, a refusal renders; the field blur work completed | [VPN config](../modules/vpn/rust/vpn.rs), [helper](../modules/vpn/helper/main.rs), [Rune panel](../modules/vpn/native/lib.rs), [WebView panel](../modules/vpn/ui/vpn-panel.js) |
 | **149** | 2026-11-22 | `bb2534f` | Rune desktop startup and Explorer attachment | [Host](../core/desktop/host.rs), [desktop attachment](../core/desktop/desktop_host.rs), [startup snapshot](../core/desktop/shell.rs) |
 | **148** | 2026-11-20 | `0425c33` | G2 Rune VPN picker refreshes by subscription revision and rejects stale actions | [Rune panel](../modules/vpn/native/lib.rs), [VPN commands](../modules/vpn/rust/vpn.rs) |
 | **147** | 2026-11-20 | `b1b860d` | Serialized VPN settings writes, atomic subscription cache reset and verified the Rune save path | [VPN store](../modules/vpn/rust/settings.rs), [redb adapter](../core/kernel/module_db.rs) |
@@ -5783,3 +5784,25 @@ The host keeps the HWND hidden until the UI thread attaches it as a desktop chil
 ### 149.5 Verification and metrics
 
 Task Scheduler query as the interactive user found no `\swarm-watch-15min` task, so no change was needed there. `udtk build -j 1` (16 min 36 s) installed the new `unidtk-desktop.exe` (36,320,768 bytes) into Program Files; `cargo test --release -p unidtk-shell --lib -j 1`: 80 passed, 0 failed; `udtk doc --check`: ok. **Not verified:** the first show, the 750 ms snapshot deadline and the `TaskbarCreated` relay. The agent shell runs on a sandbox desktop (`exebox-*`), where `FindWindow("Progman")` returns 0, so a started host stays in `state: starting` and `schtasks /run /tn UniDTK` is denied. `scratch/rune-startup/verify.ps1` and `fallback.py` must run on `WinSta0\Default`. The application was stopped with `udtk stop` after diagnosis.
+
+## 150. Session 2026-11-24 - VPN: the tunnel dials, the TUN moves, a refusal speaks (#538)
+
+### 150.1 Context and symptoms
+
+The user reported "the VPN does not work" on the installed rune-transition build. Pressing the switch either refused to start or reported "connected" while no traffic flowed; with Happ running it flipped back with no explanation.
+
+### 150.2 Root cause
+
+Three independent defects, each proven live. (1) `build_singbox_config` wrote the proxy's own hostname into the outbound while the only DNS server detoured through that proxy, so sing-box refused every dial with `DNS resolution loop detected: dns-proxy -> dns-proxy` while the TUN and SOCKS port came up and `bring_up` logged `connected OK`; the same outbound with an IP literal answered `generate_204` with 204 in 59 ms. (2) The TUN address was the constant `172.19.0.1/30`, which Happ's `happ-xray` adapter holds on this machine, so an elevated sing-box died at `set ipv4 address: The object already exists`. (3) `vpn_status.error` carried the refusal and no panel drew it.
+
+### 150.3 Architecture decision
+
+The dial target is resolved once per connect (`resolve_ipv4`, 4 s bound, on its own thread beside the stop) and written as a literal; the domain stays in `tls.server_name` and the ws `Host` header, and a lookup failure is an honest error with no config written. The TUN /30 is picked after the stop from ranges the machine does not hold (`GetAdaptersAddresses` and `GetIpForwardTable2`, capped scan, home subnet excluded), and the readiness loop requires the chosen address on the adapter so a stale adapter cannot answer. The helper sweeps orphaned cores by exact image path. Both panels render `vpn_status.error`; the Rune row is two measured lines, so the surface height is reserved rather than guessed. Two epoch checks abort a connect that a disconnect superseded. Rules kept: `r[modules.vertical-slice]`, `r[modules.contract-only]`, `r[kernel.no-blocking-main-thread]`, `r[ipc.one-contract]`, `r[ipc.socket-read-only]`, `r[desk.no-blocking-dialogs]`, `r[motion.widget-integrity]`.
+
+### 150.4 Changed files
+
+[VPN commands and config](../modules/vpn/rust/vpn.rs), [VPN module manifest](../modules/vpn/rust/Cargo.toml), [elevated helper](../modules/vpn/helper/main.rs), [Rune panel](../modules/vpn/native/lib.rs), [WebView panel](../modules/vpn/ui/vpn-panel.js), [panel styles](../modules/vpn/ui/vpn.css), [toolchain manifest](../toolchain/Cargo.toml), [VPN chapter](modules/vpn.md), [host blur routing](../core/desktop/host.rs), [supervisor link](../core/desktop/supervisor.rs), [kernel control enum](../core/kernel/host_supervisor.rs), [hotkeys](../core/kernel/hotkeys.rs), [kernel IPC](../core/kernel/ipc.rs), [Rune frame](../core/rune/rune/src/runtime/frame.rs), [Rune focus](../core/rune/rune/src/runtime/input/focus.rs), [Rune input element](../core/rune/rune/src/el/input.rs), [Rune changes](../core/rune/UPSTREAM.md), [desk tests](../core/desktop/tests.rs), [status](status.md) and [this journal](sessions.md).
+
+### 150.5 Verification and metrics
+
+`cargo test --release -p unidtk-mod-vpn`: 18 passed (5 new: the literal dial, the SNI fallback, the resolver, the held-range skip, the built config); `-p unidtk-native-vpn`: 9 passed (1 new: the refusal on the line). The workspace ran 425 tests green with `unidtk-mod-mp3-player` excluded, whose two AI DJ tests need a 331 MB model outside the repo. `cargo check --release --workspace` is clean and `udtk doctor -check` passed. Reproduced by hand: a throwaway sing-box config with the literal answered `generate_204` in 59 ms through SOCKS, the hostname form reproduced the loop, and the hardware reported `172.19.0.1/30` held by `happ-xray`. Live check against the installed build: **pending** - `udtk build -j 1` was still running (thin LTO) when this session closed, so the install, the live connect with Happ stopped, `udtk shot` and `udtk doctor -ping` are not measured yet.
