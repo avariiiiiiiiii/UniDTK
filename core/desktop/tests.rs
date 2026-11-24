@@ -656,9 +656,57 @@ fn rune_tree_committed_fires_after_covered_boot_and_dedups_unchanged_commits() {
     assert_eq!(seen.borrow().as_slice(), ["Presses: 0", "Presses: 1"]);
 }
 
-// Rune's own tests are not built (core/rune/UPSTREAM.md item 3), so the `maxlength` it learned
-// for the menu's fields is pinned here.
+// Rune's own tests are not built (core/rune/UPSTREAM.md item 3), so the field blur the desk
+// relies on is pinned here: a focused field hears why it lost focus once, and a key queued
+// before that loss never reaches it (`BlurCause`, `El::on_blur`).
 #[test]
+fn a_focused_field_hears_its_blur_once_and_a_stale_key_is_dropped() {
+    use rune::BlurCause;
+    #[derive(Default)]
+    struct Field {
+        edit: rune::TextEdit,
+        blurs: Vec<BlurCause>,
+        lines: Vec<String>,
+    }
+    let mut field = Field { edit: rune::TextEdit::new("draft"), ..Field::default() };
+    field.edit.focused = true;
+    let mut rt = rune::Runtime::new(
+        field,
+        |s: &Field, _: &mut rune::Cx<Field>| {
+            rune::el().size(400.0, 200.0).child(
+                rune::text_input(&s.edit, rune::TextStyle::new(14.0, 400.0))
+                    .key("field")
+                    .on_blur(|s: &mut Field, cause, _| {
+                        // An app's handler decides what the loss means; the field itself keeps
+                        // requesting focus until its state says otherwise.
+                        s.edit.focused = false;
+                        s.blurs.push(cause);
+                        s.lines.push(format!("{cause:?}"));
+                    }),
+            )
+        },
+        (400.0, 200.0),
+        rune::Env::default(),
+    );
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(rt.has_focus(), "a field focused in its state takes focus on mount");
+
+    // The window loses the keyboard: the field hears it once, with its cause.
+    rt.window_focus(false);
+    rt.frame(0.0);
+    assert_eq!(rt.state.blurs, vec![BlurCause::WindowLost], "one blur, with its cause");
+    assert!(!rt.has_focus(), "the loss left no field focused");
+    // Back to the field: the blur is not repeated by the refocus or the next frame.
+    rt.window_focus(true);
+    rt.update(|_, tx| tx.focus("field", false));
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.blurs.len(), 1, "{:?}", rt.state.blurs);
+}
+
+#[test]
+
 fn a_text_edit_keeps_only_what_fits_and_code_is_not_cut() {
     let mut edit = rune::TextEdit::new("ab").max_chars(4);
     edit.insert("cdef");

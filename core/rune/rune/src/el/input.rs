@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// Why a focused text field lost focus, given to [`El::on_blur`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlurCause {
+    /// Escape left the field: cancel the edit, as a sheet's Cancel does.
+    Escape,
+    /// Focus moved to another element (Tab, a focus request, a modal).
+    FocusMove,
+    /// A pointer press landed outside the field.
+    Pointer,
+    /// The window or host lost the keyboard without a pointer press.
+    WindowLost,
+    /// The field left the tree while focused (its view closed or unmounted).
+    Unmount,
+}
+
 /// A text field bound to a [`TextEdit`] in app state.
 #[derive(Clone)]
 pub struct InputSpec {
@@ -28,6 +43,8 @@ pub struct InputSpec {
     pub(crate) key: Option<InputKeyFn>,
     pub(crate) change: Option<PressFn>,
     pub(crate) paste: Option<InputPasteFn>,
+    /// [`El::on_blur`]: hears the field lose focus, with the cause, once the tree has settled.
+    pub(crate) blur: Option<BlurFn>,
     /// `El::spellcheck`: the platform's checker marks misspelled words.
     pub(crate) spellcheck: bool,
     /// [`El::selection_style`]: the selection's highlight and ink, by window focus, over `selection`.
@@ -88,6 +105,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         key: None,
         change: None,
         paste: None,
+        blur: None,
         spellcheck: false,
         selection_style: None,
     }));
@@ -213,6 +231,17 @@ impl El {
     pub fn on_input_key<S: 'static>(mut self, f: impl Fn(&mut S, &crate::KeyEvent, &mut Tx) -> bool + 'static) -> Self {
         if let Some(input) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
             input.key = Some(Rc::new(move |s, key, tx| f(downcast::<S>(s), key, tx)));
+        }
+        self
+    }
+    /// Called once when this focused field loses focus, with [`BlurCause`] saying why: commit
+    /// or discard the draft as the app's policy chooses. The handler runs after the tree has
+    /// settled, never inside the focus sync, and may move focus again with [`Tx::focus`].
+    /// Escape reaches it as [`BlurCause::Escape`] (cancel); a host keyboard loss that keeps
+    /// the field focused in the model hears nothing until focus actually leaves.
+    pub fn on_blur<S: 'static>(mut self, f: impl Fn(&mut S, BlurCause, &mut Tx) + 'static) -> Self {
+        if let Some(input) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) {
+            input.blur = Some(Rc::new(move |s, cause, tx| f(downcast::<S>(s), cause, tx)));
         }
         self
     }

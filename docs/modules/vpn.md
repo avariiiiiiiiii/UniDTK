@@ -139,7 +139,7 @@ The parsed list is kept in `vpn_servers.json`, so a restart does not need the ne
         "type": "tun",
         "tag": "tun-in",
         "interface_name": TUN_NAME,          // "wallpaper-tun"
-        "address": ["172.19.0.1/30"],
+        "address": [<a free /30>],          // 172.19.0.1/30 unless another client holds it
         "mtu": 1280,
         "auto_route": true,
         "strict_route": true,
@@ -157,9 +157,13 @@ The parsed list is kept in `vpn_servers.json`, so a restart does not need the ne
 - The TUN inbound takes over the system's routes (`auto_route`) and blocks traffic that would bypass it (`strict_route`). The MTU is 1280, a deliberately small value; the comment says large TLS packets otherwise stall page loads.
 - The SOCKS inbound on `127.0.0.1:12908` is the signal the app uses to know the tunnel is alive. The readiness check, the status watchdog, and the transport probe all talk to it.
 
+The TUN address is not a constant any more (#538). `172.19.0.1/30` was the address for every connect, and Happ's `happ-xray` adapter holds exactly that subnet while it runs: an elevated sing-box then died with `set ipv4 address: The object already exists`. `pick_tun_address` now runs per connect, after the previous adapter is gone, and takes the first /30 that overlaps nothing the machine already reaches: every adapter's on-link prefix and every route's real subnet (longer than /8 and shorter than /31), from `occupied_v4_ranges` (`GetAdaptersAddresses` and `GetIpForwardTable2`). The scan starts at `172.19.0.0/30`, then the rest of its /16, then `172.16/12`, `10/8` and `192.168/16`, and stops after 2,048 candidates in each range. The home server's own subnet is excluded too, because `strict_route` would take it from its split-tunnel outbound. The readiness loop reads the address back from the adapter (`netsh interface ipv4 show addresses`): a leftover `wallpaper-tun` from a dead core answers "connected", and only the chosen address on it proves that this run is up.
+
 ### 3.2 Outbounds
 
 The `proxy` outbound comes from `build_singbox_outbound`. It maps the subscription's transport to sing-box's transport: `tcp` means no transport, `ws` and `grpc` map directly, and `xhttp` or `splithttp` map to the `xhttp` transport of the bundled sing-box fork, which requires a padding range.
+
+Its `server` is an IPv4 literal, resolved once per connect by `resolve_ipv4` (a 4-second bound on a thread of its own, alongside the stop). The domain stays in `tls.server_name` and in the ws `Host` header, so REALITY and SNI still see the name the link asked for. The reason is in 3.3. A host that does not resolve is an honest error, and no configuration is written.
 
 `direct` is a plain outbound. If the home-server option is enabled, a third outbound `lan-home` is added: a VLESS connection with REALITY to the user's own server.
 
@@ -172,6 +176,8 @@ DNS goes through the proxy, over TCP:
 ```
 
 The comment explains both choices. Plain UDP DNS to 8.8.8.8 is often blocked or hijacked, so names stop resolving and the tunnel looks broken. Routing DNS through the proxy also avoids a DNS leak. TCP is used because UDP over VLESS is slow to warm up.
+
+This server now serves only the user's traffic. As long as the outbound's `server` was the proxy's own hostname, sing-box had to resolve that hostname through this very server, whose detour is the outbound waiting for it. It detected the cycle and every dial failed with `DNS resolution loop detected: dns-proxy -> dns-proxy`, while the TUN and the SOCKS port came up and the connect reported success (#538). The literal removes the cycle; the entry is still needed for everything the user's own traffic looks up.
 
 ### 3.4 Route rules
 
@@ -256,16 +262,19 @@ If the epoch is unchanged, `connect()`:
 `bring_up()` runs these steps in order:
 
 1. `ensure_binaries_present()` checks that `sing-box.exe` and `vpn-helper.exe` exist.
-2. A thread reads the current public IP without the tunnel. This is the baseline for later comparison. It runs in parallel with everything below.
+2. A thread reads the current public IP without the tunnel. This is the baseline for later comparison. It runs in parallel with everything below. The proxy's own hostname is resolved on a second thread beside it (`resolve_ipv4`, 4-second bound); its failure is the connect's error, and no configuration is written.
 3. `perform_stop()` fires the stop protocol, and `wait_until_stopped(10 s)` waits for it. If the wait times out, the connect fails with `previous VPN processes did not shut down in time`.
 4. `active_happ_tun_present()` refuses to continue if a Happ tunnel is active (Step 7).
 5. If port 12908 is still open, the connect is refused.
-6. The configuration is built, written, and validated (Step 3).
-7. Happ is checked a second time, because the steps above can take several seconds.
-8. `task_start("UniDTKSingbox")` starts sing-box through the helper.
-9. The module polls for the `wallpaper-tun` interface: 20 checks, 250 ms apart. That is at most about 5 seconds. If the interface never appears, it logs the last lines of `singbox.log`, runs `perform_stop()`, and returns an error. The error says whether Happ is the likely cause.
-10. The module polls for port 12908 the same way, 20 checks, 250 ms apart.
-11. `probe_vpn_transport()` sends an HTTPS request through the SOCKS port to `https://1.1.1.1/`, then to `https://8.8.8.8/` if the first fails (4-second timeout each). It uses IP literals on purpose, because DNS over the tunnel may not be warm yet. Any HTTP response, even a 4xx, counts as proof that the transport works. A failure is recorded as a warning, not as a failed connect. The comment says the tunnel counts as up once the TUN interface exists.
+6. A disconnect or shutdown that ran during the wait above ends the connect here: the epoch in `CONNECT_EPOCH` no longer matches, so nothing is started.
+7. The TUN address is picked for this run (3.1), the configuration is built, written, and validated (Step 3).
+8. Happ is checked a second time, because the steps above can take several seconds.
+9. `task_start("UniDTKSingbox")` starts sing-box through the helper.
+10. The module polls for the `wallpaper-tun` interface: 20 checks, 250 ms apart. That is at most about 5 seconds. Each check also reads the adapter's address and accepts only the /30 chosen in step 7. If the interface never appears, it logs the last lines of `singbox.log`, runs `perform_stop()`, and returns an error. The error says whether Happ is the likely cause.
+11. The module polls for port 12908 the same way, 20 checks, 250 ms apart.
+12. `probe_vpn_transport()` sends an HTTPS request through the SOCKS port to `https://1.1.1.1/`, then to `https://8.8.8.8/` if the first fails (4-second timeout each). It uses IP literals on purpose, because DNS over the tunnel may not be warm yet. Any HTTP response, even a 4xx, counts as proof that the transport works. A failure is recorded as a warning, not as a failed connect. The comment says the tunnel counts as up once the TUN interface exists.
+
+The reason a connect gave travels to both panels: `vpn_status.error` carries it, the Rune panel draws it under the switch, and the WebView panel writes it into `.vpn-error`. Before #538 nothing drew that field, so a refused connect flipped the switch back without a word.
 
 ### 5.3 The egress check
 
@@ -309,6 +318,8 @@ Before it spawns, `start` checks whether the recorded PID is still a sing-box pr
 ### 6.2 `stop`
 
 As described in Step 4. The helper always writes the done marker, because a hung kill would otherwise stall every connect and disconnect for its full timeout.
+
+After the recorded kill it sweeps for orphaned cores: every running process whose image is exactly our bundled `sing-box.exe` is terminated (`sweep_orphaned_cores`). A core can outlive its PID file when the helper dies between the spawn and the write, or when the app is killed first; its TUN then stays up with no record left to kill, and every later connect would fail on `previous VPN processes did not shut down in time`. The image path is compared in full, so another program called `sing-box` is never touched.
 
 ### 6.3 `probe`
 

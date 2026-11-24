@@ -33,8 +33,13 @@ pub(super) fn navigates(ev: &KeyEvent) -> bool {
 }
 
 /// Pushes focus (and a secure flag) into an input's app-owned editor and mirrors it back.
-fn sync_input_focus(input: &mut crate::el::InputSpec, states: crate::states::States<'_>, focused: bool) -> bool {
+/// A true→false flip collects the field's `on_blur` handler for the frame's settled drain;
+/// a composition-only clear with the focus flag unchanged is not a blur.
+fn sync_input_focus(input: &mut crate::el::InputSpec, states: crate::states::States<'_>, focused: bool, blurs: &mut Vec<crate::el::BlurFn>) -> bool {
     let Some(access) = &input.access else {
+        if input.edit.focused && !focused && let Some(handler) = &input.blur {
+            blurs.push(handler.clone());
+        }
         input.edit.focused = focused;
         return false;
     };
@@ -52,6 +57,9 @@ fn sync_input_focus(input: &mut crate::el::InputSpec, states: crate::states::Sta
         changed = true;
     }
     if edit.focused != focused || (!focused && edit.is_composing()) {
+        if edit.focused && !focused && let Some(handler) = &input.blur {
+            blurs.push(handler.clone());
+        }
         edit.focused = focused;
         if !focused { edit.cancel_composition(); }
         edit.break_history_group();
@@ -238,6 +246,10 @@ impl<S: 'static> Runtime<S> {
             .unwrap_or(crate::el::Outline { width: 3.0, offset: 0.0, color: self.system_accent.focus(self.env.system_dark) })
     }
     pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) -> bool {
+        self.set_focus_cause(path, keyboard, crate::BlurCause::FocusMove)
+    }
+    /// [`Self::set_focus`] with the cause its blur handlers hear.
+    pub(super) fn set_focus_cause(&mut self, path: Option<String>, keyboard: bool, cause: crate::BlurCause) -> bool {
         self.input_click.on_focus_change(path.as_deref());
         let moved = self.focus.path() != path.as_deref();
         // Tabbing away or into a field takes the selection's keyboard; a hovered row doesn't.
@@ -249,14 +261,16 @@ impl<S: 'static> Runtime<S> {
             self.clear_text_selection();
         }
         let mut changed = moved && self.physical_focus_lost();
+        let mut blurs = Vec::new();
         for n in &mut self.nodes {
             if let Some(input) = &mut n.input {
-                changed |= sync_input_focus(input, states!(self), path.as_deref() == Some(n.path.as_str()));
+                changed |= sync_input_focus(input, states!(self), path.as_deref() == Some(n.path.as_str()), &mut blurs);
             }
         }
         for (p, input) in &mut self.virtual_inputs {
-            changed |= sync_input_focus(input, states!(self), path.as_deref() == Some(p.as_str()));
+            changed |= sync_input_focus(input, states!(self), path.as_deref() == Some(p.as_str()), &mut blurs);
         }
+        self.pending_blurs.extend(blurs.into_iter().map(|h| (h, cause)));
         for effect in self.focus.step(focus_machine::FocusEvent::Set { path, keyboard }) {
             match effect {
                 focus_machine::FocusEffect::Moved => {
@@ -273,6 +287,21 @@ impl<S: 'static> Runtime<S> {
         }
         changed
     }
+    /// Runs the `on_blur` handlers collected since the last drain, once each, in the order the
+    /// fields lost focus. Called after the frame's settled actions, so a handler sees the state
+    /// the blur left and may move focus again (`Tx::focus`). Returns whether any ran.
+    pub(super) fn drain_blurs(&mut self, tx: &mut Tx) -> bool {
+        let pending = std::mem::take(&mut self.pending_blurs);
+        let mut ran = false;
+        for (handler, cause) in pending {
+            let mut one = self.transaction();
+            handler(states!(self), cause, &mut one);
+            super::action::merge(tx, one);
+            ran = true;
+        }
+        ran
+    }
+
     pub(super) fn sync_requested_focus(&mut self, nodes: &mut Vec<Node>) -> bool {
         let asked = self.focus_request.take();
         for old in &self.nodes {
@@ -282,6 +311,11 @@ impl<S: 'static> Runtime<S> {
                 && !self.virtual_inputs.values().any(|i| i.edit.same_model(&input.edit))
                 && !self.unmounted_focused.iter().any(|w| input.edit.matches_history(w))
             {
+                // A focused field the new tree dropped hears its blur once, unless it moved
+                // (same model elsewhere) or stays virtual; a re-drop after that is not a blur.
+                if let Some(handler) = &input.blur {
+                    self.pending_blurs.push((handler.clone(), crate::BlurCause::Unmount));
+                }
                 self.unmounted_focused.push(input.edit.weak_history());
             }
         }

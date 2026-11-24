@@ -58,6 +58,11 @@ pub enum ControlMessage {
     Stop,
     InjectKey {
         generation: u64,
+        /// The kernel's input generation at the moment the key was sent: a key queued
+        /// before the user left the desk carries an older one than the `FocusLost` the
+        /// host receives first, and the host drops it.
+        #[serde(default)]
+        input_generation: u64,
         vk: u32,
         scan_code: u32,
         extended: bool,
@@ -72,6 +77,9 @@ pub enum ControlMessage {
     },
     FocusLost {
         generation: u64,
+        /// See `InjectKey::input_generation`: keys stamped below it never reach the desk.
+        #[serde(default)]
+        input_generation: u64,
     },
     /// A button went down on the desktop outside the host's region: the host closes its top
     /// surface, as the page closes one on an outside pointerdown. The host cannot see such a

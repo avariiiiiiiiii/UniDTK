@@ -9,7 +9,7 @@ use windows::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, GetKeyboardLayout,
-            GetKeyboardState, GetKeyState, ToUnicodeEx, VK_CONTROL, VK_D, VK_ESCAPE, VK_LWIN,
+            GetKeyboardState, ToUnicodeEx, HKL, VK_CONTROL, VK_D, VK_ESCAPE, VK_LWIN,
             VK_MENU, VK_R, VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
@@ -72,6 +72,10 @@ thread_local! {
     static ESC_TARGET: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
     static ESC_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static ESC_NATIVE_GEN: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    // The layout the user last typed with in a foreign app. The desktop's foreground is
+    // Explorer's, whose HKL is stale after a layout switch elsewhere; the hook thread is
+    // the only writer and reader.
+    static LAST_FOREIGN_HKL: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
 }
 
 pub fn set_host_pid(pid: u32) {
@@ -188,27 +192,46 @@ pub fn toggle_hotkey(id: &str, enabled: bool) -> Result<(), String> {
 }
 
 pub fn set_input_focus(_app: &AppHandle, focused: bool) -> Result<(), String> {
-    // A delayed DOM focus message cannot claim input after the user left us.
+    set_web_input_focus(focused)
+}
+
+/// The WebView/DOM report: a delayed DOM focus message cannot claim input after the
+/// user left us.
+fn set_web_input_focus(focused: bool) -> Result<(), String> {
     let focused = focused && !matches!(foreground_class(), ForegroundClass::Foreign);
+    apply_input_focus(focused);
+    Ok(())
+}
+
+/// The native host's report, stored raw: clicking a WorkerW child does not restore the
+/// Desktop foreground, so a Foreign filter here would latch input off forever. The hook
+/// already gates every key on the live foreground, which makes the filter redundant.
+pub fn set_native_input_focus(focused: bool) -> Result<(), String> {
+    apply_input_focus(focused);
+    Ok(())
+}
+
+fn apply_input_focus(focused: bool) {
     let was_focused = INPUT_FOCUSED.swap(focused, Ordering::SeqCst);
-    INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let input_generation = INPUT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if was_focused && !focused && crate::is_native_host() {
         if let Some(generation) = crate::host_supervisor::active_generation() {
             let _ = send_host_control(crate::host_supervisor::ControlMessage::FocusLost {
                 generation,
+                input_generation: input_generation as u64,
             });
         }
     }
-    Ok(())
 }
 
 pub fn reset_input_focus() {
     let was_focused = INPUT_FOCUSED.swap(false, Ordering::SeqCst);
-    INPUT_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let input_generation = INPUT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if was_focused && crate::is_native_host() {
         if let Some(generation) = crate::host_supervisor::active_generation() {
             let _ = send_host_control(crate::host_supervisor::ControlMessage::FocusLost {
                 generation,
+                input_generation: input_generation as u64,
             });
         }
     }
@@ -274,6 +297,7 @@ fn forward_escape_to_shell(vk: u32, msg: u32, scan_code: isize) {
                     ESC_NATIVE_GEN.with(|slot| slot.set(Some(generation)));
                     let _ = send_host_control(crate::host_supervisor::ControlMessage::InjectKey {
                         generation,
+                        input_generation: INPUT_GENERATION.load(Ordering::SeqCst) as u64,
                         vk,
                         scan_code: scan_code as u32,
                         extended: false,
@@ -293,20 +317,27 @@ fn forward_escape_to_shell(vk: u32, msg: u32, scan_code: isize) {
         } else {
             ESC_DOWN.with(|slot| slot.set(false));
             if let Some(generation) = ESC_NATIVE_GEN.with(|slot| slot.take()) {
-                let _ = send_host_control(crate::host_supervisor::ControlMessage::InjectKey {
-                    generation,
-                    vk,
-                    scan_code: scan_code as u32,
-                    extended: false,
-                    pressed: false,
-                    repeat: false,
-                    shift: false,
-                    ctrl: false,
-                    alt: false,
-                    win: false,
-                    text: None,
-                    key_base: None,
-                });
+                // ESC_NATIVE_GEN is thread-local, so a lifecycle reset on another thread
+                // cannot clear it; drop a stored generation the host's restart has stale'd.
+                // Focus loss alone does not drop it: the release must complete the down
+                // even after a blur, and the blur's input_generation stamps out stray keys.
+                if crate::host_supervisor::active_generation() == Some(generation) {
+                    let _ = send_host_control(crate::host_supervisor::ControlMessage::InjectKey {
+                        generation,
+                        input_generation: INPUT_GENERATION.load(Ordering::SeqCst) as u64,
+                        vk,
+                        scan_code: scan_code as u32,
+                        extended: false,
+                        pressed: false,
+                        repeat: false,
+                        shift: false,
+                        ctrl: false,
+                        alt: false,
+                        win: false,
+                        text: None,
+                        key_base: None,
+                    });
+                }
             }
         }
         return;
@@ -369,7 +400,14 @@ fn remember_key(vk: u32, owner: KeyOwner) {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Modifiers { win: bool, ctrl: bool, alt: bool, shift: bool }
+struct Modifiers { win: bool, ctrl: bool, lalt: bool, ralt: bool, shift: bool }
+
+impl Modifiers {
+    /// Any Alt held: what `InjectKey` reports to the host, AltGr included.
+    fn alt(self) -> bool { self.lalt || self.ralt }
+    /// AltGr: right Alt alone, a text modifier on many layouts (€, @, ą), not a menu chord.
+    fn altgr(self) -> bool { self.ralt && !self.lalt && !self.ctrl }
+}
 
 fn modifiers() -> Modifiers {
     #[cfg(test)]
@@ -378,7 +416,8 @@ fn modifiers() -> Modifiers {
     Modifiers {
         win: pressed(VK_LWIN.0 as i32) || pressed(VK_RWIN.0 as i32),
         ctrl: pressed(VK_CONTROL.0 as i32),
-        alt: pressed(VK_MENU.0 as i32),
+        lalt: pressed(0xA4),
+        ralt: pressed(0xA5),
         shift: pressed(VK_SHIFT.0 as i32),
     }
 }
@@ -404,21 +443,43 @@ fn vk_is_navigation(vk: u32) -> bool {
     matches!(vk, 0x08 | 0x09 | 0x0D | 0x1B | 0x2E | 0x23..=0x28)
 }
 
+/// Whether ordinary text translation runs: AltGr types, left Alt is a menu chord.
+fn text_translation_allowed(mods: Modifiers, vk: u32) -> bool {
+    !mods.ctrl && !mods.lalt && !mods.win && !vk_is_chord(mods.ctrl, vk) && !vk_is_navigation(vk)
+}
+
+/// The layout to translate with. Over the desktop the foreground is Explorer's, whose
+/// HKL is stale after the user switched layout in a foreign app; the last foreign HKL
+/// the hook saw is the layout the user actually types with.
+fn translation_hkl() -> HKL {
+    unsafe {
+        let fg = GetForegroundWindow();
+        let thread_id = if HWND::is_invalid(&fg) { 0 } else { GetWindowThreadProcessId(fg, None) };
+        let foreground = GetKeyboardLayout(thread_id);
+        if matches!(foreground_class(), ForegroundClass::Desktop) {
+            if let Some(cached) = LAST_FOREIGN_HKL.with(|slot| slot.get()) {
+                return HKL(cached as *mut _);
+            }
+        }
+        foreground
+    }
+}
+
+/// CapsLock's toggle bit from the async state: the hook thread's queue never processes
+/// key messages, so `GetKeyState` would read a stale toggle.
+fn caps_lock_on() -> bool {
+    unsafe { (GetAsyncKeyState(0x14) as u16 & 1) != 0 }
+}
+
 unsafe fn translate_key_strings(
     vk: u32,
     scan_code: u32,
     mods: Modifiers,
 ) -> (Option<String>, Option<char>) {
-    let chord = vk_is_chord(mods.ctrl, vk);
-    let nav = vk_is_navigation(vk);
-    let fg = GetForegroundWindow();
-    let thread_id = if HWND::is_invalid(&fg) {
-        0
-    } else {
-        GetWindowThreadProcessId(fg, None)
-    };
-    let hkl = GetKeyboardLayout(thread_id);
+    let hkl = translation_hkl();
 
+    // Flag 0x04 leaves the dead-key state untouched: accents never compose. Documented
+    // limitation (the Latin+Cyrillic decision); full dead-key state management is out of scope.
     let base_state = [0u8; 256];
     let mut base_chars = [0u16; 8];
     let base_count = ToUnicodeEx(vk, scan_code, &base_state, &mut base_chars, 0x04, hkl);
@@ -430,13 +491,14 @@ unsafe fn translate_key_strings(
         None
     };
 
-    let text = if !mods.ctrl && !mods.alt && !mods.win && !chord && !nav {
+    let text = if text_translation_allowed(mods, vk) {
         let mut key_state = [0u8; 256];
         let _ = GetKeyboardState(&mut key_state);
         key_state[VK_SHIFT.0 as usize] = if mods.shift { 0x80 } else { 0 };
-        key_state[VK_CONTROL.0 as usize] = 0;
-        key_state[VK_MENU.0 as usize] = 0;
-        key_state[0x14] = (GetKeyState(0x14) as u8) & 1;
+        // AltGr is Ctrl+Alt inside the layout tables: both states select its column.
+        key_state[VK_CONTROL.0 as usize] = if mods.altgr() { 0x80 } else { 0 };
+        key_state[VK_MENU.0 as usize] = if mods.altgr() { 0x80 } else { 0 };
+        key_state[0x14] = u8::from(caps_lock_on());
         let mut chars = [0u16; 8];
         let count = ToUnicodeEx(vk, scan_code, &key_state, &mut chars, 0x04, hkl);
         if count > 0 {
@@ -469,6 +531,9 @@ fn forward_host_key(
 ) -> bool {
     let sent = send_host_control(crate::host_supervisor::ControlMessage::InjectKey {
         generation,
+        // Stamped at send time: a key queued before a blur carries an older input
+        // generation than the FocusLost the host receives first, and the host drops it.
+        input_generation: INPUT_GENERATION.load(Ordering::SeqCst) as u64,
         vk,
         scan_code,
         extended,
@@ -476,7 +541,7 @@ fn forward_host_key(
         repeat,
         shift: mods.shift,
         ctrl: mods.ctrl,
-        alt: mods.alt,
+        alt: mods.alt(),
         win: mods.win,
         text,
         key_base,
@@ -499,7 +564,16 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         return CallNextHookEx(None, code, wparam, lparam);
     }
     let foreground = foreground_class();
-    if matches!(foreground, ForegroundClass::Foreign) { reset_input_focus(); }
+    if matches!(foreground, ForegroundClass::Foreign) {
+        // Remember the layout the user actually types with; Explorer's own HKL goes
+        // stale after a layout switch in a foreign app (see translation_hkl).
+        let fg = GetForegroundWindow();
+        if !HWND::is_invalid(&fg) {
+            let hkl = GetKeyboardLayout(GetWindowThreadProcessId(fg, None));
+            LAST_FOREIGN_HKL.with(|slot| slot.set(Some(hkl.0 as isize)));
+        }
+        reset_input_focus();
+    }
 
     // A release belongs to the original successful down, even after Alt+Tab.
     let owner = KEY_OWNERS.with(|keys| {
@@ -537,20 +611,25 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                 && owner.generation == INPUT_GENERATION.load(Ordering::SeqCst)
                 && INPUT_FOCUSED.load(Ordering::SeqCst)
             {
-                if let Some(gen_id) = crate::host_supervisor::active_generation() {
-                    let mods = modifiers();
-                    let (text, key_base) = translate_key_strings(vk, owner.scan, mods);
-                    let _ = forward_host_key(
-                        vk,
-                        owner.scan,
-                        owner.extended,
-                        true,
-                        true,
-                        mods,
-                        text,
-                        key_base,
-                        gen_id,
-                    );
+                // Same gate as the down path: after a host restart the repeats must not
+                // vanish silently while the focus flag stays on.
+                match crate::host_supervisor::active_generation() {
+                    Some(gen_id) => {
+                        let mods = modifiers();
+                        let (text, key_base) = translate_key_strings(vk, owner.scan, mods);
+                        let _ = forward_host_key(
+                            vk,
+                            owner.scan,
+                            owner.extended,
+                            true,
+                            true,
+                            mods,
+                            text,
+                            key_base,
+                            gen_id,
+                        );
+                    }
+                    None => reset_input_focus(),
                 }
             }
             return LRESULT(1);
@@ -579,13 +658,14 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         return CallNextHookEx(None, code, wparam, lparam);
     }
     if system_key(vk) { return CallNextHookEx(None, code, wparam, lparam); }
-    let Modifiers { win, ctrl, alt, shift } = modifiers();
+    let mods = modifiers();
 
     // Global shortcuts run before text routing; callbacks execute off the hook.
+    // A hotkey's Alt is the menu Alt (left); AltGr types text instead.
     let hotkey = get_registry().try_read().ok().and_then(|keys| keys.iter().find(|key|
-        key.enabled && key.vk_code == vk && key.win_required == win
-        && key.ctrl_required == ctrl && key.alt_required == alt
-        && key.shift_required == shift && key.scope.admits(foreground)).cloned());
+        key.enabled && key.vk_code == vk && key.win_required == mods.win
+        && key.ctrl_required == mods.ctrl && key.alt_required == mods.lalt
+        && key.shift_required == mods.shift && key.scope.admits(foreground)).cloned());
     if let Some(key) = hotkey {
         TRIGGER_FOREGROUND.store(GetForegroundWindow().0 as isize, Ordering::Relaxed);
         if ACTIONS.get().is_some_and(|tx| tx.try_send(key.id.clone()).is_ok()) {
@@ -600,8 +680,9 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         return CallNextHookEx(None, code, wparam, lparam);
     }
     // Foreign windows always receive native input; our own foreground does too.
+    // Only LEFT Alt blocks text routing (menu shortcuts); AltGr is a text modifier.
     if !matches!(foreground, ForegroundClass::Desktop)
-        || !INPUT_FOCUSED.load(Ordering::SeqCst) || win || alt
+        || !INPUT_FOCUSED.load(Ordering::SeqCst) || mods.win || mods.lalt
     { return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) }; }
 
     if crate::is_native_host() {
@@ -609,12 +690,11 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
             reset_input_focus();
             return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) };
         };
-        let chord = vk_is_chord(ctrl, vk);
+        let chord = vk_is_chord(mods.ctrl, vk);
         let navigation = vk_is_navigation(vk);
-        if ctrl && !chord && !navigation {
+        if mods.ctrl && !chord && !navigation {
             return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) };
         }
-        let mods = Modifiers { win, ctrl, alt, shift };
         let (text, key_base) = translate_key_strings(vk, kb.scanCode, mods);
         let extended = kb.flags.0 & 1 != 0;
         let repeat = owner.is_some();
@@ -644,8 +724,8 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     }
     // Unknown Ctrl chords remain with Windows. Supported editing chords are
     // delivered as key messages, while ordinary text is translated only once.
-    let chord = ctrl && matches!(vk, 0x41 | 0x43 | 0x56 | 0x58 | 0x5A);
-    if ctrl && !chord { return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) }; }
+    let chord = mods.ctrl && matches!(vk, 0x41 | 0x43 | 0x56 | 0x58 | 0x5A);
+    if mods.ctrl && !chord { return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) }; }
     let navigation = matches!(vk, 0x08 | 0x09 | 0x0D | 0x2E | 0x25..=0x28 | 0x24 | 0x23);
     let key_messages = chord || navigation;
     let delivered = if key_messages {
@@ -654,11 +734,12 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     } else {
         let mut key_state = [0u8; 256];
         let _ = GetKeyboardState(&mut key_state);
-        key_state[VK_SHIFT.0 as usize] = if shift { 0x80 } else { 0 };
-        key_state[VK_CONTROL.0 as usize] = if ctrl { 0x80 } else { 0 };
-        key_state[VK_MENU.0 as usize] = if alt { 0x80 } else { 0 };
-        key_state[0x14] = (GetKeyState(0x14) as u8) & 1;
-        let hkl = GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), None));
+        key_state[VK_SHIFT.0 as usize] = if mods.shift { 0x80 } else { 0 };
+        // AltGr is Ctrl+Alt inside the layout tables: both states select its column.
+        key_state[VK_CONTROL.0 as usize] = if mods.altgr() { 0x80 } else { 0 };
+        key_state[VK_MENU.0 as usize] = if mods.altgr() { 0x80 } else { 0 };
+        key_state[0x14] = u8::from(caps_lock_on());
+        let hkl = translation_hkl();
         let mut chars = [0u16; 8];
         let count = ToUnicodeEx(vk, kb.scanCode, &key_state, &mut chars, 0x04, hkl);
         count > 0 && chars[..(count as usize).min(chars.len())].iter().all(|ch|
@@ -926,5 +1007,67 @@ mod input_safety_tests {
         }
         assert!(saw_escape, "Escape must forward");
         assert!(!saw_focus_lost, "the host blurs its field itself; a FocusLost would close two layers with one press");
+    }
+
+    // K1: clicking a WorkerW child does not restore the Desktop foreground, so the
+    // native host's focus report must survive a Foreign foreground; the DOM report
+    // keeps its filter.
+    #[test]
+    fn native_focus_report_survives_a_foreign_foreground() {
+        let _guard = crate::host_supervisor::test_lock();
+        TEST_FOREGROUND.with(|slot| slot.set(Some(ForegroundClass::Foreign)));
+        set_web_input_focus(true).unwrap();
+        assert!(!INPUT_FOCUSED.load(Ordering::SeqCst), "the DOM report keeps its Foreign filter");
+        set_native_input_focus(true).unwrap();
+        assert!(INPUT_FOCUSED.load(Ordering::SeqCst), "the native report is stored raw; the hook gates keys on the live foreground");
+        reset_input_focus();
+        TEST_FOREGROUND.with(|slot| slot.set(None));
+    }
+
+    // K5c: AltGr (right Alt alone) types characters; left Alt stays a menu chord.
+    #[test]
+    fn altgr_types_while_left_alt_stays_a_menu_chord() {
+        let _guard = crate::host_supervisor::test_lock();
+        let altgr = Modifiers { ralt: true, ..Modifiers::default() };
+        let lalt = Modifiers { lalt: true, ..Modifiers::default() };
+        assert!(altgr.alt() && altgr.altgr(), "AltGr is reported as alt to the host");
+        assert!(text_translation_allowed(altgr, 0x41), "AltGr must reach ToUnicodeEx");
+        assert!(!text_translation_allowed(lalt, 0x41), "left Alt is a menu chord");
+        assert!(!text_translation_allowed(Modifiers { ctrl: true, ralt: true, ..Modifiers::default() }, 0x41), "Ctrl+Alt stays dropped");
+        unsafe {
+            assert!(translate_key_strings(0x41, 30, lalt).0.is_none(), "left Alt never produces text");
+        }
+
+        // The hook gate: left Alt leaves the key to Windows (focus untouched); AltGr
+        // alone enters text routing, which with no key target resets focus instead.
+        TEST_FOREGROUND.with(|slot| slot.set(Some(ForegroundClass::Desktop)));
+        let callback = |vk, msg| unsafe {
+            let record = KBDLLHOOKSTRUCT { vkCode: vk, scanCode: 30, ..Default::default() };
+            keyboard_hook_proc(0, WPARAM(msg as usize), LPARAM(&record as *const _ as isize)).0
+        };
+        INPUT_FOCUSED.store(true, Ordering::SeqCst);
+        TEST_MODIFIERS.with(|slot| slot.set(Some(lalt)));
+        assert_ne!(callback(0x41, WM_KEYDOWN), 1, "left Alt chord was swallowed");
+        assert!(INPUT_FOCUSED.load(Ordering::SeqCst), "left Alt must not enter text routing");
+        TEST_MODIFIERS.with(|slot| slot.set(Some(altgr)));
+        let _ = callback(0x41, WM_KEYDOWN);
+        assert!(!INPUT_FOCUSED.load(Ordering::SeqCst), "AltGr must pass the gate into text routing");
+        TEST_MODIFIERS.with(|slot| slot.set(None));
+        TEST_FOREGROUND.with(|slot| slot.set(None));
+
+        // InjectKey still carries alt=true for AltGr, with the translated text.
+        let (tx, rx) = sync_channel::<crate::host_supervisor::ControlMessage>(4);
+        let _sink = install_test_host_sink(tx);
+        assert!(translate_and_forward_test_key(
+            0x41, 30, false, true, false, altgr, Some("ą".into()), Some('a'), 9,
+        ));
+        match rx.try_recv().expect("AltGr key message") {
+            crate::host_supervisor::ControlMessage::InjectKey { alt, text, .. } => {
+                assert!(alt, "the host must see the AltGr modifier");
+                assert_eq!(text.as_deref(), Some("ą"));
+            }
+            other => panic!("expected InjectKey, got {other:?}"),
+        }
+        reset_input_focus();
     }
 }

@@ -101,6 +101,7 @@ pub use edit::RichStyle;
 pub use edit::TextEdit;
 pub use el::Align;
 pub use el::Anchor;
+pub use el::BlurCause;
 pub use el::Cursor;
 pub use el::CursorImage;
 pub use el::Cycle;

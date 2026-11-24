@@ -628,7 +628,14 @@ fn handle_set_desktop_input_focus(
         .get("focused")
         .and_then(|v| v.as_bool())
         .ok_or("set_desktop_input_focus requires {focused}")?;
-    crate::hotkeys::set_input_focus(&server.app, focused)?;
+    // Two reporters, two rules: the page's DOM focus can be stale and is filtered against
+    // the foreground, while the native host's click on a WorkerW child never restores the
+    // Desktop foreground, so its raw report would otherwise latch input off forever.
+    if crate::is_native_host() {
+        crate::hotkeys::set_native_input_focus(focused)?;
+    } else {
+        crate::hotkeys::set_input_focus(&server.app, focused)?;
+    }
     Ok(serde_json::Value::Null)
 }
 

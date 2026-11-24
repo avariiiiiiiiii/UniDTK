@@ -223,6 +223,8 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
 
     let active_generation = Arc::new(AtomicU64::new(0));
     let focused_input = Arc::new(AtomicBool::new(false));
+    // The kernel's last input generation the desk accepted (`ControlMessage::FocusLost`).
+    let input_generation = Arc::new(AtomicU64::new(0));
     if supervised {
         struct SupervisedSink {
             widgets: &'static [&'static crate::widget::WidgetType],
@@ -230,6 +232,8 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
             ui: rune::AppHandle<Host>,
             ws_slot: Arc<Mutex<Option<WsClientHandle>>>,
             active_generation: Arc<AtomicU64>,
+            /// The kernel's last input generation the desk accepted (`ControlMessage::FocusLost`).
+            input_generation: Arc<AtomicU64>,
         }
         impl ControlSink for SupervisedSink {
             fn on_start(&mut self, handshake: StartHandshake) {
@@ -313,10 +317,20 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
 
             fn on_inject_key(&mut self, cmd: ControlCommand) {
                 let current_gen = self.active_generation.load(Ordering::Acquire);
-                if let ControlCommand::InjectKey { generation, .. } = cmd {
-                    if generation != current_gen {
-                        return;
+                let input_generation = match &cmd {
+                    ControlCommand::InjectKey { generation, input_generation, .. } => {
+                        if *generation != current_gen {
+                            return;
+                        }
+                        *input_generation
                     }
+                    _ => return,
+                };
+                // A key the kernel queued before the desk lost the keyboard arrives after its
+                // `FocusLost`; delivering it would type into the app behind the user's back.
+                // The blur advanced the desk's generation, so an older key is dropped here.
+                if input_generation < self.input_generation.load(Ordering::Acquire) {
+                    return;
                 }
                 let Some(ev) = to_injected_key(&cmd) else { return };
                 let window = self.inspector.window.lock().ok().and_then(|g| g.clone());
@@ -344,10 +358,14 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
                 self.ui.update(move |state: &mut Host, tx| state.wheel(x as f32 / scale, y as f32 / scale, delta as f32, touchpad, tx));
             }
 
-            fn on_focus_lost(&mut self, generation: u64) {
+            fn on_focus_lost(&mut self, generation: u64, input_generation: u64) {
                 if generation != self.active_generation.load(Ordering::Acquire) {
                     return;
                 }
+                // Stamp the desk with the kernel's counter, then blur the focused field: its
+                // `on_blur` handler commits or discards the draft, and a key still in flight
+                // from before the loss is refused by `on_inject_key`.
+                self.input_generation.fetch_max(input_generation, Ordering::AcqRel);
                 let window = self.inspector.window.lock().ok().and_then(|g| g.clone());
                 if let Some(w) = window {
                     w.inject_focus_lost();
@@ -364,6 +382,7 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
         let sup_ui = handle.clone();
         let sup_ws = ws_slot.clone();
         let sup_gen = active_generation.clone();
+        let sup_input_gen = input_generation.clone();
         let _ = std::thread::Builder::new()
             .name("host-stdin".into())
             .spawn(move || {
@@ -373,6 +392,7 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
                     ui: sup_ui,
                     ws_slot: sup_ws,
                     active_generation: sup_gen,
+                    input_generation: sup_input_gen,
                 };
                 let stdin = std::io::stdin();
                 let _ = crate::supervisor::read_control_stream(stdin.lock(), &mut sink);
@@ -738,6 +758,7 @@ mod tests {
     fn inject_key_translation_handles_ctrl_a_enter_escape_and_russian_layout() {
         let ctrl_a = crate::supervisor::ControlCommand::InjectKey {
             generation: 1,
+            input_generation: 0,
             vk: 0x41,
             scan_code: 30,
             extended: false,
@@ -757,7 +778,7 @@ mod tests {
         assert!(mapped_a.logical.as_ref().is_some_and(|ev| ev.is_command('a')));
 
         let enter = crate::supervisor::ControlCommand::InjectKey {
-            generation: 1, vk: 0x0D, scan_code: 28, extended: false, pressed: true, repeat: false,
+            generation: 1, input_generation: 0, vk: 0x0D, scan_code: 28, extended: false, pressed: true, repeat: false,
             shift: false, ctrl: false, alt: false, win: false, text: None, key_base: None,
         };
         let mapped_enter = super::to_injected_key(&enter).expect("enter maps");
@@ -765,7 +786,7 @@ mod tests {
         assert_eq!(mapped_enter.logical.as_ref().map(|ev| &ev.key), Some(&rune::Key::Enter));
 
         let esc = crate::supervisor::ControlCommand::InjectKey {
-            generation: 1, vk: 0x1B, scan_code: 1, extended: false, pressed: true, repeat: false,
+            generation: 1, input_generation: 0, vk: 0x1B, scan_code: 1, extended: false, pressed: true, repeat: false,
             shift: false, ctrl: false, alt: false, win: false, text: None, key_base: None,
         };
         let mapped_esc = super::to_injected_key(&esc).expect("escape maps");
@@ -773,7 +794,7 @@ mod tests {
         assert_eq!(mapped_esc.logical.as_ref().map(|ev| &ev.key), Some(&rune::Key::Escape));
 
         let russian = crate::supervisor::ControlCommand::InjectKey {
-            generation: 1, vk: 0xDE, scan_code: 40, extended: false, pressed: true, repeat: false,
+            generation: 1, input_generation: 0, vk: 0xDE, scan_code: 40, extended: false, pressed: true, repeat: false,
             shift: false, ctrl: false, alt: false, win: false, text: Some("э".into()), key_base: Some('э'),
         };
         let mapped_ru = super::to_injected_key(&russian).expect("russian text maps");

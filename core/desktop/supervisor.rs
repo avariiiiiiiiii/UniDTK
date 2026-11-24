@@ -19,6 +19,10 @@ pub enum ControlCommand {
     Stop,
     InjectKey {
         generation: u64,
+        /// The kernel's input generation at send time: a key queued before the user left
+        /// the desk carries an older one than the `FocusLost` it hears first, and is dropped.
+        #[serde(default)]
+        input_generation: u64,
         vk: u32,
         scan_code: u32,
         extended: bool,
@@ -33,6 +37,9 @@ pub enum ControlCommand {
     },
     FocusLost {
         generation: u64,
+        /// See `InjectKey::input_generation`; older keys never reach the desk.
+        #[serde(default)]
+        input_generation: u64,
     },
     /// A press on the desktop outside the host's region (`host_supervisor::ControlMessage`).
     PointerOutside {
@@ -63,7 +70,7 @@ pub trait ControlSink {
     fn on_show(&mut self);
     fn on_stop(&mut self, reason: &str);
     fn on_inject_key(&mut self, _cmd: ControlCommand) {}
-    fn on_focus_lost(&mut self, _generation: u64) {}
+    fn on_focus_lost(&mut self, _generation: u64, _input_generation: u64) {}
     fn on_pointer_outside(&mut self, _generation: u64) {}
     fn on_wheel(&mut self, _generation: u64, _x: i32, _y: i32, _delta: i32, _touchpad: bool) {}
 }
@@ -108,7 +115,7 @@ pub fn read_control_stream<R: BufRead, S: ControlSink>(
                     Ok(ControlCommand::TaskbarCreated) => sink.on_taskbar_created(),
                     Ok(ControlCommand::Show) => sink.on_show(),
                     Ok(cmd @ ControlCommand::InjectKey { .. }) => sink.on_inject_key(cmd),
-                    Ok(ControlCommand::FocusLost { generation }) => sink.on_focus_lost(generation),
+                    Ok(ControlCommand::FocusLost { generation, input_generation }) => sink.on_focus_lost(generation, input_generation),
                     Ok(ControlCommand::PointerOutside { generation }) => sink.on_pointer_outside(generation),
                     Ok(ControlCommand::Wheel { generation, x, y, delta, touchpad }) => sink.on_wheel(generation, x, y, delta, touchpad),
                     Ok(ControlCommand::Stop) => {

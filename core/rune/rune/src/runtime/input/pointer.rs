@@ -222,7 +222,7 @@ impl<S: 'static> Runtime<S> {
             let now = self.now_clock();
             self.titlebar.press_empty(now, x, y, self.double_click_interval);
             if self.focus.path().is_some() {
-                self.queue.push(Action::Blur);
+                self.queue.push(Action::Blur(crate::BlurCause::Pointer));
             }
             return;
         };
@@ -234,7 +234,7 @@ impl<S: 'static> Runtime<S> {
         if self.bare_drag_region(ti) {
             self.titlebar.press_region(now, x, y, self.double_click_interval);
             if self.focus.path().is_some() {
-                self.queue.push(Action::Blur);
+                self.queue.push(Action::Blur(crate::BlurCause::Pointer));
             }
             return;
         }
@@ -260,7 +260,7 @@ impl<S: 'static> Runtime<S> {
         if n.focus.below && !on_link {
             match self.scroll_region_below(ti, x, y) {
                 Some(r) => self.queue.push(Action::FocusControl(self.nodes[r].path.clone())),
-                None if self.focus.path().is_some() => self.queue.push(Action::Blur),
+                None if self.focus.path().is_some() => self.queue.push(Action::Blur(crate::BlurCause::Pointer)),
                 None => {}
             }
         }
@@ -278,7 +278,7 @@ impl<S: 'static> Runtime<S> {
         } else if !below && !on_link && !in_textbox && !preserve_focus {
             // Tab goes on from here, as from a browser's click on plain content.
             if self.defaults.web_focus { self.focus.step(focus_machine::FocusEvent::StartAt(n.path.clone())); }
-            if self.focus.path().is_some() { self.queue.push(Action::Blur); }
+            if self.focus.path().is_some() { self.queue.push(Action::Blur(crate::BlurCause::Pointer)); }
         }
         let r = n.target;
         let [lx, ly] = self.to_local(ti, x, y);

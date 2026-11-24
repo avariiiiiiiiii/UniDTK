@@ -88,6 +88,10 @@ impl<S: 'static> Runtime<S> {
             }
             if !focused {
                 self.keys_lost();
+                // The desk's own window lost the keyboard: the focused field hears it at once,
+                // the same cause a host report delivers (`BlurCause::WindowLost`), so a draft
+                // is committed or dropped before the user types anywhere else.
+                self.blur_on_focus_lost();
                 // Losing the window ends hover, rather than waiting out an exit grace. A window
                 // that isn't key still hears the pointer, so its next move starts the wait again.
                 self.end_hover_delays();
@@ -566,6 +570,14 @@ impl<S: 'static> Runtime<S> {
             #[cfg(debug_assertions)]
             { ran_other |= r && checks == self.live_checks; }
             if r { ran = true; why |= CommitWhy::INPUT; }
+        }
+        // A field that lost focus this frame hears why once the tree has settled: the
+        // handler runs after the actions above, may still move focus, and its changes go
+        // through the commit below (`BlurCause`, `El::on_blur`). Not inside the focus sync,
+        // which may itself be what blurred the field.
+        if self.drain_blurs(&mut tx) {
+            ran = true;
+            why |= CommitWhy::INPUT;
         }
         let mut open_urls = std::mem::take(&mut tx.open_urls);
         self.latch_requests(&mut tx);

@@ -198,7 +198,7 @@ impl<S: 'static> Runtime<S> {
             tx.copy(c);
         }
         if out.blur {
-            self.set_focus(None, self.focus.keyboard());
+            self.set_focus_cause(None, self.focus.keyboard(), crate::BlurCause::Escape);
         }
         if out.submit
             && let Some(sub) = submit
@@ -330,6 +330,16 @@ impl<S: 'static> Runtime<S> {
     /// Whether the focused editor requires secure native keyboard input.
     pub fn has_secure_focus(&self) -> bool {
         self.focused_input().is_some_and(|i| i.edit.is_secure())
+    }
+
+    /// The host reports the keyboard left (a WorkerW child never learns it from a window
+    /// message): blur the focused field so its app hears the loss. Unlike
+    /// [`window_focus(false)`](crate::Runtime::window_focus) this latches nothing — the desk
+    /// window keeps no system focus to lose, and a later key or press focuses fields again.
+    pub(crate) fn blur_on_focus_lost(&mut self) {
+        if self.focus.path().is_some() {
+            self.queue.push(Action::Blur(crate::BlurCause::WindowLost));
+        }
     }
 
     pub fn has_focus(&self) -> bool {

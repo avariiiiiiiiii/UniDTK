@@ -54,7 +54,8 @@ pub(super) enum Action {
     /// A text field's menu: the field, the window point it opens at, and where in the field a
     /// press asked for it (none from the keyboard).
     FieldMenu(String, (f32, f32), Option<(f32, f32)>),
-    Blur,
+    /// Focus leaves the focused element, with the cause its blur handlers hear.
+    Blur(crate::BlurCause),
     /// What assistive technology asked of an element (`a11y/actions.rs`).
     A11y(String, A11yAct),
 }
@@ -151,7 +152,7 @@ pub(super) fn action_path(action: &Action) -> Option<&str> {
 fn handler_name(action: &Action) -> &'static str {
     live_only_handler(action).unwrap_or(match action {
         Action::Physical(..) => "on_key",
-        Action::FocusControl(_) | Action::HoverFocus(_) | Action::Focus(..) | Action::Blur => "a focus change",
+        Action::FocusControl(_) | Action::HoverFocus(_) | Action::Focus(..) | Action::Blur(_) => "a focus change",
         Action::Dismiss(_) => "a modal's dismiss",
         Action::AtBottom(..) => "on_at_bottom",
         Action::FarFromBottom(..) => "on_far_from_bottom",
@@ -501,9 +502,9 @@ impl<S: 'static> Runtime<S> {
             Action::FileDialog(id, result) => self.run_file_dialog(id, result, &mut one),
             Action::Focus(path, x, y) => self.focus_input(path, x, y, &mut one),
             Action::FieldMenu(path, at, local) => self.field_menu(path, at, local, &mut one),
-            Action::Blur => {
+            Action::Blur(cause) => {
                 if self.focus.path().is_none() { return false; }
-                self.set_focus(None, self.focus.keyboard());
+                self.set_focus_cause(None, self.focus.keyboard(), cause);
                 true
             }
             Action::A11y(path, act) => self.run_a11y(path, act, &mut one),

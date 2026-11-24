@@ -214,7 +214,10 @@ impl<S: 'static> Host<S> {
 
     fn inject_focus_lost(&mut self) {
         self.mods = ModifiersState::empty();
+        // The desk's focused field hears the loss (`BlurCause::WindowLost`) and commits or
+        // discards its draft; `keys_lost` first, so nothing held is typed into it again.
         self.rt.keys_lost();
+        self.rt.blur_on_focus_lost();
         self.rt.physical_observation(crate::PhysicalInput::Modifiers(crate::Mods::default()));
         self.request_input_step();
     }

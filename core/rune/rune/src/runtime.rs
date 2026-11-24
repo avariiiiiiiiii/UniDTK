@@ -588,6 +588,9 @@ pub struct Runtime<S: 'static> {
     /// Focused text fields that unmounted without being blurred: while another field holds focus,
     /// remounting one with its old `focused = true` flag does not steal focus back.
     unmounted_focused: Vec<std::sync::Weak<crate::edit::History>>,
+    /// Fields that lost focus this step, with why: drained once the tree settles, never inside
+    /// the focus sync, so an `on_blur` handler sees committed state and may move focus again.
+    pending_blurs: Vec<(crate::el::BlurFn, crate::BlurCause)>,
     /// The innermost open modal this commit shows and what input may reach inside it, worked
     /// out from the nodes at each commit; none while no modal shows.
     modal_scope: Option<focus::ModalScope>,
@@ -934,6 +937,7 @@ impl<S: 'static> Runtime<S> {
             focus_request: None,
             focus_returned: false,
             unmounted_focused: Vec::new(),
+            pending_blurs: Vec::new(),
             modal_scope: None,
             loops: HashMap::default(),
             loop_clock: Default::default(),
