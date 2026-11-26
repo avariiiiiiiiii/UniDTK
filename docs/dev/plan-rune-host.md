@@ -157,6 +157,10 @@ Batches 2-4 were written in session 142 (`992883d`). A parity audit of the kerne
 | The flat blur | `backdrop-filter`, which sees only what the page drew | the wallpaper itself, blurred once |
 | Adding a widget | a folder under `modules/`, a `specialType` branch in the core, CSS linked by hand in `index.html` | a `native/` crate, one dependency line, one line in `main.rs`; the shell does not change |
 
+## G4: the music player (session 152)
+
+The port is built behind the application's `mp3-native` feature and joins the desk whole (card, library, settings, graph); the gate goes with it. Done: the backend's `player-state` state event (no 2 s poll), the crate `modules/mp3-player/native` with its event list and `logic.rs` (the page's helpers and constants, tested). Found for the shell before the card: the page's popup (320 x 330, centred over the 210 x 220 card, blurred) grows from the pressed zone (`.zone-top` or `.zone-bottom`, radius 75 px) over the card, which stays drawn under it; the native "one morph" turns the card itself into its surface, so a morph from the zone would hide the card's face outside the zone at the first frame. The contract needs a surface drawn over its unmoved tile, an open from a zone rect with its radius (the morph's origin already takes a rect and a radius), and a resize of the open surface on `--dur-layout` (the graph's 380 x 536). The zones lie under an open popup, so there is no switch between the library and the settings while one is open. Still to measure before the arcs: a sustained 30 Hz redraw of the desk (CPU, frame ms, presents per second), to decide whether the arcs need a small surface of their own.
+
 ## Measurements
 
 Every gate records, per process (kernel, WebView2 tree, host), after a one-minute warm-up and over a five-minute idle window:
