@@ -191,6 +191,8 @@ These operations never restart the process. The old design killed and respawned 
 
 `status()` reads `time-pos` and `duration` each time it is called. If libmpv gives no position, the player falls back to its own clock, which counts elapsed time while playing.
 
+Every change (a track started, pause, seek, volume, next and previous, the automatic advance at the end of a track) returns through `announce()`, which publishes the state as the state event `player-state` (session 152): the native card shows the track and the play state from it instead of asking every two seconds, as the page does. The broker keeps the newest frame, so a desk that connects later gets the current state at once.
+
 ---
 
 ## Step 7: Threads and how the end of a track is found

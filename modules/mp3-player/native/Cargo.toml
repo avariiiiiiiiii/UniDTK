@@ -1,0 +1,18 @@
+[package]
+name = "unidtk-native-mp3-player"
+version = "0.1.0"
+edition = "2021"
+description = "The music player's native half: its card, library, settings and graph on the Rune desk"
+
+# A module's native half depends on the shell's widget contract (`unidtk-shell`) and on its
+# own backend crate only, never on another module (r[modules.contract-only]). Built only with
+# the `mp3-native` feature of the application until the port is whole (session 152).
+
+[lib]
+name = "unidtk_native_mp3_player"
+path = "lib.rs"
+
+[dependencies]
+unidtk-shell = { path = "../../../core/desktop" }
+rune = { path = "../../../core/rune/rune" }
+serde_json = "1"

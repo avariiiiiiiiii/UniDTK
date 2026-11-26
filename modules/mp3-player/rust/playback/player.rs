@@ -376,7 +376,7 @@ impl PlayerManager {
             state.last_error = None;
         }
         self.mark_clock_running();
-        Ok(self.status())
+        Ok(self.announce())
     }
 
     fn play_index_track(
@@ -431,7 +431,7 @@ impl PlayerManager {
             state.time_pos = 0.0;
             state.status = "idle".to_string();
         }
-        Ok(self.status())
+        Ok(self.announce())
     }
 
     pub fn toggle_pause(&self) -> Result<PlayerState, String> {
@@ -520,7 +520,7 @@ impl PlayerManager {
         } else {
             self.mark_clock_running();
         }
-        Ok(self.status())
+        Ok(self.announce())
     }
 
     pub fn seek(&self, seconds: f64) -> Result<PlayerState, String> {
@@ -567,7 +567,7 @@ impl PlayerManager {
             state.time_pos = seconds;
         }
         self.mark_clock_running_if_playing();
-        Ok(self.status())
+        Ok(self.announce())
     }
 
     pub fn set_volume(&self, volume: f64) -> Result<PlayerState, String> {
@@ -583,7 +583,7 @@ impl PlayerManager {
                 let _ = mpv.set_property_double("volume", volume);
             }
         }
-        Ok(self.status())
+        Ok(self.announce())
     }
 
     pub fn next(&self) -> Result<PlayerState, String> {
@@ -674,6 +674,16 @@ impl PlayerManager {
             }
         }
         self.jump_relative(-1)
+    }
+
+    /// The state after a change, published as the state event `player-state`: the desk
+    /// shows the track, the play state and the volume without asking every two seconds.
+    fn announce(&self) -> PlayerState {
+        let state = self.status();
+        if let Ok(payload) = serde_json::to_value(&state) {
+            unidtk_api::emit("player-state", payload);
+        }
+        state
     }
 
     pub fn status(&self) -> PlayerState {

@@ -7317,6 +7317,7 @@ dependencies = [
  "unidtk-mod-vpn",
  "unidtk-native-clock",
  "unidtk-native-glyph-bar",
+ "unidtk-native-mp3-player",
  "unidtk-native-vpn",
  "unidtk-shell",
  "windows 0.58.0",
@@ -7430,6 +7431,15 @@ dependencies = [
 
 [[package]]
 name = "unidtk-native-glyph-bar"
+version = "0.1.0"
+dependencies = [
+ "rune",
+ "serde_json",
+ "unidtk-shell",
+]
+
+[[package]]
+name = "unidtk-native-mp3-player"
 version = "0.1.0"
 dependencies = [
  "rune",

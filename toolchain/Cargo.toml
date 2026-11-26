@@ -64,6 +64,9 @@ unidtk-shell = { path = "../core/desktop" }
 unidtk-native-clock = { path = "../modules/clock/native" }
 unidtk-native-glyph-bar = { path = "../modules/glyph-bar/native" }
 unidtk-native-vpn = { path = "../modules/vpn/native" }
+# The music player's native half, built only with `mp3-native` until the port is whole
+# (session 152): nothing of it reaches the desk before then. The gate goes with the port.
+unidtk-native-mp3-player = { path = "../modules/mp3-player/native", optional = true }
 raw-window-handle = "0.6"
 png = "0.18"
 base64 = "0.22"
@@ -105,3 +108,7 @@ features = [
   "Win32_NetworkManagement_Ndis",
   "Win32_Networking_WinSock"
 ]
+
+[features]
+# Off by default: the music player's native half joins the desk only when it is whole.
+mp3-native = ["dep:unidtk-native-mp3-player"]
