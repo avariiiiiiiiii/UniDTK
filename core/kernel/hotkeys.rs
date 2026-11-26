@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
     OnceLock, RwLock, mpsc::{sync_channel, SyncSender},
 };
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,14 @@ static HOTKEYS: OnceLock<RwLock<Vec<HotkeyDefinition>>> = OnceLock::new();
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static INPUT_FOCUSED: AtomicBool = AtomicBool::new(false);
 static INPUT_GENERATION: AtomicU32 = AtomicU32::new(0);
+/// What the desk host last said about the keys, kept apart from the gate (`INPUT_FOCUSED`).
+/// The kernel closes the gate on its own (a key or a press in another window), while the
+/// host speaks only when its own state changes: with a menu or a surface open it keeps
+/// wanting the keys, so after such a close it never spoke again and a field it showed
+/// focused stayed dead. A press back on the host reopens the gate from this claim.
+static HOST_WANTS_KEYS: AtomicBool = AtomicBool::new(false);
+/// The host generation the claim came from: a successor does not inherit it.
+static HOST_CLAIM_GENERATION: AtomicU64 = AtomicU64::new(0);
 static HOST_PID: AtomicU32 = AtomicU32::new(0);
 static HOST_KEY_TX: OnceLock<SyncSender<crate::host_supervisor::ControlMessage>> = OnceLock::new();
 // Escape release stays with the original target across foreground changes.
@@ -207,8 +215,33 @@ fn set_web_input_focus(focused: bool) -> Result<(), String> {
 /// Desktop foreground, so a Foreign filter here would latch input off forever. The hook
 /// already gates every key on the live foreground, which makes the filter redundant.
 pub fn set_native_input_focus(focused: bool) -> Result<(), String> {
+    HOST_CLAIM_GENERATION.store(crate::host_supervisor::active_generation().unwrap_or(0), Ordering::SeqCst);
+    HOST_WANTS_KEYS.store(focused, Ordering::SeqCst);
     apply_input_focus(focused, "desk host");
     Ok(())
+}
+
+/// A real press on the desk host (`NativePointerAction::KeepFocusHostOwnsClick`).
+pub fn host_pressed() {
+    // Describe the next keys after every press on the host too, not only after a focus
+    // report: a field that shows its caret and does not type leaves its trace this way.
+    KEYS_TO_DESCRIBE.store(3, Ordering::Relaxed);
+    let current = crate::host_supervisor::active_generation();
+    if reopen_gate_for_host(&INPUT_FOCUSED, &HOST_WANTS_KEYS, &HOST_CLAIM_GENERATION, current) {
+        let input_generation = INPUT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        crate::log_line(format!(
+            "input-focus: a press on the desk host gives it the keys back (it still wants them), foreground={}, input generation {input_generation}",
+            foreground_class().name()
+        ));
+    }
+}
+
+/// Opens a closed gate when the host still claims the keys for the generation that runs.
+fn reopen_gate_for_host(gate: &AtomicBool, wants: &AtomicBool, claim: &AtomicU64, current: Option<u64>) -> bool {
+    if !wants.load(Ordering::SeqCst) || current != Some(claim.load(Ordering::SeqCst)) {
+        return false;
+    }
+    gate.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
 }
 
 /// Key-downs still to describe in the log after a field took the keyboard: where each one
@@ -925,6 +958,32 @@ thread_local! {
     static TEST_MODIFIERS: std::cell::Cell<Option<Modifiers>> = const { std::cell::Cell::new(None) };
     static START_MASKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static TEST_HOST_SINK: std::cell::RefCell<Option<SyncSender<crate::host_supervisor::ControlMessage>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+mod host_claim_tests {
+    use super::reopen_gate_for_host;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    // Live, 2026-11-26: with the menu open the subscription field showed its caret, the
+    // kernel had closed the gate when the user went to another window, and the host,
+    // which still wanted the keys, never said so again: no letter typed.
+    #[test]
+    fn a_press_on_the_host_reopens_the_gate_it_still_claims() {
+        let (gate, wants, claim) = (AtomicBool::new(false), AtomicBool::new(true), AtomicU64::new(3));
+        assert!(reopen_gate_for_host(&gate, &wants, &claim, Some(3)));
+        assert!(gate.load(Ordering::SeqCst));
+        assert!(!reopen_gate_for_host(&gate, &wants, &claim, Some(3)), "an open gate is not reopened");
+    }
+
+    #[test]
+    fn a_host_that_gave_the_keys_up_or_its_successor_does_not_reopen_the_gate() {
+        let gate = AtomicBool::new(false);
+        assert!(!reopen_gate_for_host(&gate, &AtomicBool::new(false), &AtomicU64::new(3), Some(3)));
+        assert!(!reopen_gate_for_host(&gate, &AtomicBool::new(true), &AtomicU64::new(3), Some(4)));
+        assert!(!reopen_gate_for_host(&gate, &AtomicBool::new(true), &AtomicU64::new(3), None));
+        assert!(!gate.load(Ordering::SeqCst));
+    }
 }
 
 #[cfg(test)]

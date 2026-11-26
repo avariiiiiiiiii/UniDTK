@@ -214,7 +214,9 @@ fn send_mouse_input(msg: u32, point: POINT, w_param: WPARAM) {
                 WindowsAndMessaging::WM_LBUTTONDOWN | WindowsAndMessaging::WM_RBUTTONDOWN
             ) {
                 let action = native_click_policy(true, hits_host, is_desktop_class(hwnd_under_cursor));
-                if action != NativePointerAction::KeepFocusHostOwnsClick {
+                if action == NativePointerAction::KeepFocusHostOwnsClick {
+                    crate::hotkeys::host_pressed();
+                } else {
                     crate::hotkeys::reset_input_focus("a click outside the desk host");
                 }
                 if action == NativePointerAction::BlurFocusAndCloseTop {
