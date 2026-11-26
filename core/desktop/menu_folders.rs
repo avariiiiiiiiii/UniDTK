@@ -6,7 +6,7 @@
 //! (`r[desk.no-blocking-dialogs]`); folder records go through `save_folder` and
 //! `delete_folder`, the desk's side through `desk_apply` (`r[desk.folders]`).
 
-use rune::el::{col, el, row, text, text_input, El};
+use rune::el::{col, el, row, text, El};
 use rune::{Color, TextEdit, Tx};
 use serde_json::{json, Value};
 
@@ -162,7 +162,7 @@ pub fn section<S: MenuHost>(state: &S, look: &Look) -> El {
         menu.new_folder_name.focused = menu.creating_folder;
     })));
     if creating {
-        let name_field = text_input(&state.menu_ref().new_folder_name, look.font(13.0, 400.0))
+        let name_field = crate::controls::text_field(&state.menu_ref().new_folder_name, look.font(13.0, 400.0), look.fg)
             .single_line().key("hit:folder-new-name").label("Название папки")
             .placeholder("Название, например «Игры»", look.fg.alpha(0.55))
             .on_edit(|state: &mut S| &mut state.menu().new_folder_name)
@@ -195,7 +195,7 @@ pub fn section<S: MenuHost>(state: &S, look: &Look) -> El {
     }
     match state.menu_ref().folders.clone() {
         Loaded::Loading => section.child(text("Загрузка…").font(look.font(13.0, 400.0)).color(look.fg.alpha(0.78))),
-        Loaded::Failed(error) => section.child(
+        Loaded::Failed(error) | Loaded::Stale(_, error) => section.child(
             col().gap(10.0).px(4.0).py(16.0)
                 .child(text(format!("Не удалось загрузить папки: {error}")).font(look.font(13.0, 400.0)).color(look.status_error).wrap())
                 .child(row().child(controls::button(look, "hit:retry-folders".into(), "Повторить", ButtonKind::Normal, |state: &mut S, _tx: &mut Tx| crate::menu_desk::load_folders(state)))),
@@ -255,7 +255,7 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
     let (rename_id, edit_id, delete_id) = (id.clone(), id.clone(), id.clone());
     let shown_name = state.menu_ref().folder_names.get(&id).cloned().unwrap_or_else(|| TextEdit::new(name.clone()));
     let first_name = name.clone();
-    let name_field = text_input(&shown_name, look.font(13.0, 600.0))
+    let name_field = crate::controls::text_field(&shown_name, look.font(13.0, 600.0), look.fg)
         .single_line().key(format!("hit:folder-name:{id}")).label("Название папки")
         .on_edit(move |state: &mut S| state.menu().folder_names.entry(edit_id.clone()).or_insert_with(|| TextEdit::new(first_name.clone()).max_chars(40)))
         .on_submit(move |state: &mut S, _tx: &mut Tx| {
@@ -308,7 +308,7 @@ pub fn sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, width
             let (edit_item, submit_item, submit_folder) = (item_id.clone(), item_id.clone(), id.clone());
             let item_name = item["name"].as_str().unwrap_or_default().to_string();
             let shown_item = state.menu_ref().item_names.get(&item_id).cloned().unwrap_or_else(|| TextEdit::new(item_name.clone()));
-            let input = text_input(&shown_item, look.font(13.0, 400.0))
+            let input = crate::controls::text_field(&shown_item, look.font(13.0, 400.0), look.fg)
                 .single_line().key(format!("hit:item-name:{item_id}")).label("Название ярлыка")
                 .on_edit(move |state: &mut S| state.menu().item_names.entry(edit_item.clone()).or_insert_with(|| TextEdit::new(item_name.clone()).max_chars(60)))
                 .on_submit(move |state: &mut S, _tx: &mut Tx| {
@@ -463,7 +463,7 @@ fn load_start<S: MenuHost>(state: &mut S) {
 
 /// `bindStartPicker`: the Start menu's programs filtered by the search, at most 200 shown.
 fn start_picker<S: MenuHost>(state: &S, look: &Look, id: &str) -> El {
-    let search = text_input(&state.menu_ref().start_search, look.font(13.0, 400.0))
+    let search = crate::controls::text_field(&state.menu_ref().start_search, look.font(13.0, 400.0), look.fg)
         .single_line().key("hit:start-search").label("Поиск программы")
         .placeholder("Поиск программы", look.fg.alpha(0.55))
         .on_edit(|state: &mut S| &mut state.menu().start_search);
@@ -472,7 +472,7 @@ fn start_picker<S: MenuHost>(state: &S, look: &Look, id: &str) -> El {
     let note = |message: &str, error: bool| text(message.to_string()).font(look.font(13.0, 400.0)).color(if error { look.status_error } else { look.fg.alpha(0.78) }).wrap();
     match state.menu_ref().start_list.clone() {
         Loaded::Loading => picker.child(note("Загрузка…", false)),
-        Loaded::Failed(error) => picker.child(
+        Loaded::Failed(error) | Loaded::Stale(_, error) => picker.child(
             col().gap(10.0).child(note(&format!("Не удалось прочитать меню Пуск: {error}"), true))
                 .child(row().child(controls::button(look, "hit:start-retry".into(), "Повторить", ButtonKind::Normal, |state: &mut S, _tx: &mut Tx| load_start(state)))),
         ),

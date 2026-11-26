@@ -4,7 +4,7 @@
 //! "Размеры виджетов как в теме". A slider previews while dragged and commits on release; every
 //! other control commits at once, as `setLiveToken` / `commitLiveChange` do.
 
-use rune::el::{col, el, row, text, text_input, El};
+use rune::el::{col, el, row, text, El};
 use rune::{Color, Tx};
 use serde_json::{json, Value};
 
@@ -490,7 +490,7 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
             wells = wells.child(line);
         }
         body = body.child(wells).child(controls::field_heading(look, "Свои темы"));
-        let name_field = text_input(&state.menu_ref().preset_name, look.font(13.0, 400.0))
+        let name_field = crate::controls::text_field(&state.menu_ref().preset_name, look.font(13.0, 400.0), look.fg)
             .single_line()
             .key("hit:preset-name")
             .label("Название темы")

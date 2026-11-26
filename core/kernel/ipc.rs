@@ -146,6 +146,18 @@ impl IpcServer {
         }
     }
 
+    /// Whether `cmd` is declared `long`: the UI door then runs it off the connection's
+    /// thread (`r[ipc.long-commands-off-thread]`).
+    pub fn is_long(&self, cmd: &str) -> bool {
+        if let Some(spec) = crate::command_inventory::find(cmd) {
+            return spec.long;
+        }
+        self.app
+            .try_state::<crate::registry::Registry>()
+            .and_then(|registry| registry.command(cmd).map(|(_, spec)| spec.long))
+            .unwrap_or(false)
+    }
+
     fn route(&self, line: &str) -> String {
         let req: serde_json::Value = match serde_json::from_str(line.trim()) {
             Ok(v) => v,
@@ -457,6 +469,7 @@ fn handle_commands(server: &IpcServer, _args: &Args) -> Result<serde_json::Value
                     unidtk_api::commands::Access::Write => "write",
                 },
                 "retry_safe": spec.is_retry_safe(),
+                "long": spec.long,
             }))
             .collect::<Vec<_>>(),
         "note": "The socket door is read-only by policy: write commands are declared in the inventory (with access=write) but are never served here.",

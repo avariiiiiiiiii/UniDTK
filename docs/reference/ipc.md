@@ -15,6 +15,12 @@ The socket door is read-only by design. A command declared as `write` (writing t
 
 The reason is who can reach each door. Any local process can open a TCP socket on localhost; only the page inside the application holds the interface door. Keeping writes behind the interface door means a stray local process can look, but not act.
 
+r[ipc.long-commands-off-thread]
+
+A command that can take seconds (network, a child process) is declared `long` in its table (`write(long) "vpn_ping_all" …`, `CommandSpec::long`), and both manifests publish the flag. The WebSocket door runs an ordinary command inline, in the order it arrived, and a `long` one on a worker thread: its reply comes back later, carrying its request id, while the commands behind it are answered at once. Only the connection's thread writes the socket. One connection runs at most four long commands, and one of each name at a time; another is refused with `busy`. The host gives a long command its own deadline (`Outbox::request_within`, `Act::call_within`) instead of the default five seconds, and a request that timed out before it left is taken out of the outbox.
+
+The reason: one 22-second server check on the host's single connection held every command behind it, the host's five-second deadline turned them into errors, and the desk drew no folders until the menu was opened again (session 151).
+
 r[ipc.cdp-always-on]
 
 The WebView2 DevTools protocol (CDP) is always enabled in the shipped application, and its port is published in the reply to the socket's `ping`, never guessed. `udtk gui`, `udtk shot`, and `udtk cdp-list` use it.

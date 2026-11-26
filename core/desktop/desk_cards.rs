@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use rune::el::{col, el, row, text, text_input, Align, El};
+use rune::el::{col, el, row, text, Align, El};
 use rune::{Color, TextStyle, Tx};
 use serde_json::{json, Value};
 
@@ -450,8 +450,9 @@ pub fn folder_body(state: &Host, theme: &Theme, card: &Card, ink: Color, origin:
             .child(svg(state, glyph, 22.0, if folder_look { gold } else { ink.alpha(0.6) }));
         let renaming = state.rename.as_ref().filter(|r| r.folder == folder_id && r.item == item_id);
         let label = match renaming {
+            // The box darkens the card with the scrim, so its text stays white, as it always drew.
             Some(rename) => el().w(68.0).px(4.0).py(2.0).radius(6.0).border(1.0, theme.accent).border_layout().fill(theme.scrim.alpha(0.4))
-                .child(text_input(&rename.edit, style(theme, 9.92, 400.0)).single_line().key(format!("hit:rename:{item_id}"))
+                .child(crate::controls::text_field(&rename.edit, style(theme, 9.92, 400.0), Color::WHITE).single_line().key(format!("hit:rename:{item_id}"))
                     .on_edit(|state: &mut Host| &mut state.rename.as_mut().expect("renaming").edit)
                     .on_submit(|state: &mut Host, _tx: &mut Tx| finish_rename(state, true))),
             None => el().w(68.0).child(

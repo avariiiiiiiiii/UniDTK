@@ -67,11 +67,37 @@ pub enum Loaded<T> {
     Loading,
     Ready(T),
     Failed(String),
+    /// A reload failed after a load had worked: the last value, and why the reload did not.
+    /// The desk keeps drawing it (a busy kernel used to empty the desk of its folders), and
+    /// nothing writes from it: an edit needs [`Loaded::Ready`].
+    Stale(T, String),
 }
 
 impl<T> Loaded<T> {
+    /// The value an edit may start from: only a current one.
     pub fn ready(&self) -> Option<&T> {
         if let Loaded::Ready(value) = self { Some(value) } else { None }
+    }
+
+    /// The value the desk draws: the current one, or the last one while a reload fails.
+    pub fn shown(&self) -> Option<&T> {
+        match self {
+            Loaded::Ready(value) | Loaded::Stale(value, _) => Some(value),
+            Loaded::Loading | Loaded::Failed(_) => None,
+        }
+    }
+
+    /// What a failed load or reload leaves: the last value kept as stale, if there was one.
+    pub fn failed(self, error: String) -> Self {
+        match self {
+            Loaded::Ready(value) | Loaded::Stale(value, _) => Loaded::Stale(value, error),
+            Loaded::Loading | Loaded::Failed(_) => Loaded::Failed(error),
+        }
+    }
+
+    /// A load failed, or only a stale value is left: it is worth asking again.
+    pub fn needs_reload(&self) -> bool {
+        matches!(self, Loaded::Failed(_) | Loaded::Stale(..))
     }
 }
 
@@ -570,6 +596,19 @@ pub fn sheet_frame<S: MenuHost>(state: &S, look: &Look, theme: &Theme, title: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A busy kernel answered the folder reload with a timeout, and the desk drew no
+    // folders until the menu was opened again.
+    #[test]
+    fn a_failed_reload_keeps_the_last_list_for_the_desk_but_not_for_edits() {
+        let stale = Loaded::Ready(vec![1, 2]).failed("timeout".into());
+        assert_eq!(stale.shown(), Some(&vec![1, 2]), "the desk keeps drawing it");
+        assert_eq!(stale.ready(), None, "no edit starts from a stale list");
+        assert!(stale.needs_reload());
+        let again = stale.failed("timeout again".into());
+        assert_eq!(again, Loaded::Stale(vec![1, 2], "timeout again".into()));
+        assert_eq!(Loaded::<Vec<u8>>::Loading.failed("x".into()), Loaded::Failed("x".into()));
+    }
 
     #[test]
     fn shortcut_counts_decline_as_russian_does() {

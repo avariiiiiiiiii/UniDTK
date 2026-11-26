@@ -1341,6 +1341,7 @@ fn app_command_manifest() -> Vec<serde_json::Value> {
                     unidtk_api::commands::Access::Write => "write",
                 },
                 "retry_safe": spec.is_retry_safe(),
+                "long": spec.long,
                 "doors": spec
                     .doors
                     .iter()

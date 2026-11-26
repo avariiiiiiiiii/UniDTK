@@ -744,3 +744,28 @@ fn the_window_region_follows_a_card_the_layout_moved_while_the_desk_was_covered(
     let [x, _, w, _] = regions[0].0;
     assert!(x <= 300.0 && x + w >= 350.0, "the region must cover the card where the layout put it: {regions:?}");
 }
+
+// theme.contrast: Rune draws a field with no colour of its own white, and the host sets no
+// window foreground, so the VPN subscription link was near invisible on Sea Glass's light
+// pane. Every host field takes its ink through `controls::text_field`.
+#[test]
+fn a_host_field_draws_its_text_in_the_ink_it_is_given() {
+    struct Pane {
+        edit: rune::TextEdit,
+        ink: rune::Color,
+    }
+    let ink = rune::color::hex("#1e2230").unwrap();
+    let mut rt = rune::Runtime::new(
+        Pane { edit: rune::TextEdit::new("https://example.test/sub"), ink },
+        |s: &Pane, _: &mut rune::Cx<Pane>| {
+            rune::el().size(400.0, 100.0).child(
+                crate::controls::text_field(&s.edit, rune::TextStyle::new(13.0, 400.0), s.ink).key("field"),
+            )
+        },
+        (400.0, 100.0),
+        rune::Env::default(),
+    );
+    rt.frame(0.0);
+    let field = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("field")).expect("the field is in the tree");
+    assert_eq!(field.text_color, Some(ink), "the field's text is drawn in its ink, not white");
+}

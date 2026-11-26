@@ -217,7 +217,7 @@ pub struct Act<'t> {
 pub(crate) type Reply = Box<dyn FnOnce(&mut dyn Widget, Result<Value, String>, &mut Act<'_>) + Send>;
 
 pub(crate) enum Op {
-    Call { cmd: String, args: Value, reply: Option<Reply> },
+    Call { cmd: String, args: Value, reply: Option<Reply>, timeout: std::time::Duration },
     Save(Value),
     Toast { text: String, error: bool },
     Debug(String),
@@ -240,18 +240,24 @@ impl<'t> Act<'t> {
     /// A kernel command; `then` runs on this widget with the answer, if it is still the same
     /// widget on the desk when the answer comes.
     pub fn call<W: Widget>(&mut self, cmd: &str, args: Value, then: impl FnOnce(&mut W, Result<Value, String>, &mut Act<'_>) + Send + 'static) {
+        self.call_within(cmd, args, crate::ws_client::REPLY_TIMEOUT, then);
+    }
+
+    /// [`Act::call`] for a command that runs for seconds (`long` in its module's contract,
+    /// `r[ipc.long-commands-off-thread]`): its answer is waited for `timeout`.
+    pub fn call_within<W: Widget>(&mut self, cmd: &str, args: Value, timeout: std::time::Duration, then: impl FnOnce(&mut W, Result<Value, String>, &mut Act<'_>) + Send + 'static) {
         let reply: Reply = Box::new(move |widget: &mut dyn Widget, result, act| {
             let any: &mut dyn Any = widget;
             if let Some(widget) = any.downcast_mut::<W>() {
                 then(widget, result, act);
             }
         });
-        self.ops.push(Op::Call { cmd: cmd.to_string(), args, reply: Some(reply) });
+        self.ops.push(Op::Call { cmd: cmd.to_string(), args, reply: Some(reply), timeout });
     }
 
     /// A kernel command whose answer nobody waits for; a failure is logged.
     pub fn send(&mut self, cmd: &str, args: Value) {
-        self.ops.push(Op::Call { cmd: cmd.to_string(), args, reply: None });
+        self.ops.push(Op::Call { cmd: cmd.to_string(), args, reply: None, timeout: crate::ws_client::REPLY_TIMEOUT });
     }
 
     /// Merges `fields` into its own record through `desk_apply` (a face, a setting).

@@ -199,7 +199,7 @@ pub fn set_input_focus(_app: &AppHandle, focused: bool) -> Result<(), String> {
 /// user left us.
 fn set_web_input_focus(focused: bool) -> Result<(), String> {
     let focused = focused && !matches!(foreground_class(), ForegroundClass::Foreign);
-    apply_input_focus(focused);
+    apply_input_focus(focused, "page");
     Ok(())
 }
 
@@ -207,13 +207,36 @@ fn set_web_input_focus(focused: bool) -> Result<(), String> {
 /// Desktop foreground, so a Foreign filter here would latch input off forever. The hook
 /// already gates every key on the live foreground, which makes the filter redundant.
 pub fn set_native_input_focus(focused: bool) -> Result<(), String> {
-    apply_input_focus(focused);
+    apply_input_focus(focused, "desk host");
     Ok(())
 }
 
-fn apply_input_focus(focused: bool) {
+/// Key-downs still to describe in the log after a field took the keyboard: where each one
+/// went and why. A field that did not type ("ни символы, ни Ctrl+V") left no trace of
+/// whether the keys reached the host, went to another window or were dropped.
+static KEYS_TO_DESCRIBE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Logs where a key-down went while [`KEYS_TO_DESCRIBE`] lasts.
+fn describe_key(vk: u32, route: &str) {
+    let left = KEYS_TO_DESCRIBE.load(Ordering::Relaxed);
+    if left == 0 || matches!(vk, 0x10..=0x12 | 0x14 | 0x5B | 0x5C | 0xA0..=0xA5) {
+        return;
+    }
+    KEYS_TO_DESCRIBE.store(left - 1, Ordering::Relaxed);
+    crate::log_line(format!("input-focus: key vk=0x{vk:02X} {route}"));
+}
+
+fn apply_input_focus(focused: bool, reporter: &str) {
     let was_focused = INPUT_FOCUSED.swap(focused, Ordering::SeqCst);
     let input_generation = INPUT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    if focused != was_focused || focused {
+        crate::log_line(format!(
+            "input-focus: {reporter} reports focused={focused} (was {was_focused}), input generation {input_generation}"
+        ));
+    }
+    if focused {
+        KEYS_TO_DESCRIBE.store(3, Ordering::Relaxed);
+    }
     if was_focused && !focused && crate::is_native_host() {
         if let Some(generation) = crate::host_supervisor::active_generation() {
             let _ = send_host_control(crate::host_supervisor::ControlMessage::FocusLost {
@@ -224,9 +247,13 @@ fn apply_input_focus(focused: bool) {
     }
 }
 
-pub fn reset_input_focus() {
+/// The kernel takes the keyboard back from the desk; `reason` is logged when a field had it.
+pub fn reset_input_focus(reason: &str) {
     let was_focused = INPUT_FOCUSED.swap(false, Ordering::SeqCst);
     let input_generation = INPUT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    if was_focused {
+        crate::log_line(format!("input-focus: reset ({reason}), input generation {input_generation}"));
+    }
     if was_focused && crate::is_native_host() {
         if let Some(generation) = crate::host_supervisor::active_generation() {
             let _ = send_host_control(crate::host_supervisor::ControlMessage::FocusLost {
@@ -247,6 +274,16 @@ enum ForegroundClass {
     Desktop,
     /// Another application: the user has left the shell.
     Foreign,
+}
+
+impl ForegroundClass {
+    fn name(self) -> &'static str {
+        match self {
+            ForegroundClass::Shell => "shell",
+            ForegroundClass::Desktop => "desktop",
+            ForegroundClass::Foreign => "foreign",
+        }
+    }
 }
 
 fn classify_foreground_pid(pid: u32, desktop_class: bool) -> ForegroundClass {
@@ -284,7 +321,7 @@ fn forward_escape_to_shell(vk: u32, msg: u32, scan_code: isize) {
     // press blurs a field, the next closes the top surface, `r[motion.lifo-stack]`); it reports
     // the focus it is left with, and a foreign foreground already resets it in the hook.
     if !crate::is_native_host() {
-        reset_input_focus();
+        reset_input_focus("Escape on the page");
     }
 
     if crate::is_native_host() {
@@ -572,7 +609,10 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
             let hkl = GetKeyboardLayout(GetWindowThreadProcessId(fg, None));
             LAST_FOREIGN_HKL.with(|slot| slot.set(Some(hkl.0 as isize)));
         }
-        reset_input_focus();
+        if down {
+            describe_key(vk, "went to a foreign window");
+        }
+        reset_input_focus("a key while a foreign window is in front");
     }
 
     // A release belongs to the original successful down, even after Alt+Tab.
@@ -629,7 +669,7 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
                             gen_id,
                         );
                     }
-                    None => reset_input_focus(),
+                    None => reset_input_focus("a key repeat with no desk host"),
                 }
             }
             return LRESULT(1);
@@ -683,11 +723,18 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     // Only LEFT Alt blocks text routing (menu shortcuts); AltGr is a text modifier.
     if !matches!(foreground, ForegroundClass::Desktop)
         || !INPUT_FOCUSED.load(Ordering::SeqCst) || mods.win || mods.lalt
-    { return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) }; }
+    {
+        describe_key(vk, &format!(
+            "left to Windows: foreground={} focused={} win={} left-alt={}",
+            foreground.name(), INPUT_FOCUSED.load(Ordering::SeqCst), mods.win, mods.lalt
+        ));
+        return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) };
+    }
 
     if crate::is_native_host() {
         let Some(gen_id) = crate::host_supervisor::active_generation() else {
-            reset_input_focus();
+            describe_key(vk, "has no desk host to go to");
+            reset_input_focus("a key with no desk host");
             return if owner.is_some() { LRESULT(1) } else { CallNextHookEx(None, code, wparam, lparam) };
         };
         let chord = vk_is_chord(mods.ctrl, vk);
@@ -698,6 +745,11 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
         let (text, key_base) = translate_key_strings(vk, kb.scanCode, mods);
         let extended = kb.flags.0 & 1 != 0;
         let repeat = owner.is_some();
+        describe_key(vk, &format!(
+            "forwarded to the desk host: ctrl={} text={}",
+            mods.ctrl,
+            if text.is_some() { "yes" } else { "none" }
+        ));
         if forward_host_key(vk, kb.scanCode, extended, true, repeat, mods, text, key_base, gen_id) {
             remember_key(vk, KeyOwner {
                 target: 0,
@@ -715,11 +767,11 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: 
     let target = owner.filter(|owned| owned.target != 0).map(|owned| HWND(owned.target as _))
         .or_else(crate::input::get_last_key_target);
     let Some(target) = target else {
-        reset_input_focus();
+        reset_input_focus("a key with no page target");
         return CallNextHookEx(None, code, wparam, lparam);
     };
     if !IsWindow(target).as_bool() || !crate::input::is_key_target(target) {
-        reset_input_focus();
+        reset_input_focus("the page's key target is gone");
         return CallNextHookEx(None, code, wparam, lparam);
     }
     // Unknown Ctrl chords remain with Windows. Supported editing chords are
@@ -906,7 +958,7 @@ mod input_safety_tests {
         assert_eq!(callback(0x45, WM_KEYUP), 1, "lost owned release after switch");
         assert_ne!(callback(0x45, WM_KEYUP), 1, "stole unowned release");
         KEY_OWNERS.with(|keys| *keys.borrow_mut() = [None; 256]);
-        reset_input_focus();
+        reset_input_focus("test");
         TEST_FOREGROUND.with(|slot| slot.set(None));
     }
 
@@ -1020,7 +1072,7 @@ mod input_safety_tests {
         assert!(!INPUT_FOCUSED.load(Ordering::SeqCst), "the DOM report keeps its Foreign filter");
         set_native_input_focus(true).unwrap();
         assert!(INPUT_FOCUSED.load(Ordering::SeqCst), "the native report is stored raw; the hook gates keys on the live foreground");
-        reset_input_focus();
+        reset_input_focus("test");
         TEST_FOREGROUND.with(|slot| slot.set(None));
     }
 
@@ -1068,6 +1120,6 @@ mod input_safety_tests {
             }
             other => panic!("expected InjectKey, got {other:?}"),
         }
-        reset_input_focus();
+        reset_input_focus("test");
     }
 }

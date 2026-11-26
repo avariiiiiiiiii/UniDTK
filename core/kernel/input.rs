@@ -215,7 +215,7 @@ fn send_mouse_input(msg: u32, point: POINT, w_param: WPARAM) {
             ) {
                 let action = native_click_policy(true, hits_host, is_desktop_class(hwnd_under_cursor));
                 if action != NativePointerAction::KeepFocusHostOwnsClick {
-                    crate::hotkeys::reset_input_focus();
+                    crate::hotkeys::reset_input_focus("a click outside the desk host");
                 }
                 if action == NativePointerAction::BlurFocusAndCloseTop {
                     if let Some(generation) = crate::host_supervisor::active_generation() {
@@ -249,7 +249,7 @@ fn send_mouse_input(msg: u32, point: POINT, w_param: WPARAM) {
                         .as_bool();
                 if !is_desktop && !is_own_window {
                     if msg == WindowsAndMessaging::WM_LBUTTONDOWN {
-                        crate::hotkeys::reset_input_focus();
+                        crate::hotkeys::reset_input_focus("a click on another window");
                     }
                     continue;
                 }

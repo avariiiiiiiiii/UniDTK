@@ -74,6 +74,10 @@ pub struct CommandSpec {
     pub access: Access,
     pub doors: &'static [Door],
     pub idempotency: Idempotency,
+    /// The command can take seconds (network, a child process): the UI door runs it off
+    /// the connection's thread so the commands behind it are not held
+    /// (`r[ipc.long-commands-off-thread]`).
+    pub long: bool,
 }
 
 impl CommandSpec {
@@ -87,6 +91,7 @@ impl CommandSpec {
             doors: &[Door::Socket, Door::Ui],
             // Reading twice changes nothing, so a door is free to retry it.
             idempotency: Idempotency::Safe,
+            long: false,
         }
     }
 
@@ -110,6 +115,7 @@ impl CommandSpec {
             doors: &[Door::Socket],
             // Reading twice changes nothing, so a door is free to retry it.
             idempotency: Idempotency::Safe,
+            long: false,
         }
     }
 
@@ -127,6 +133,7 @@ impl CommandSpec {
             access: Access::ReadOnly,
             doors: &[Door::Ui],
             idempotency: Idempotency::Safe,
+            long: false,
         }
     }
 
@@ -139,7 +146,14 @@ impl CommandSpec {
             access: Access::Write,
             doors: &[Door::Ui],
             idempotency: Idempotency::Unsafe,
+            long: false,
         }
+    }
+
+    /// Marks the command as one that can take seconds; see [`CommandSpec::long`].
+    pub const fn long(mut self) -> Self {
+        self.long = true;
+        self
     }
 
     pub fn is_write(&self) -> bool {
@@ -196,17 +210,17 @@ pub fn reply<T: serde::Serialize>(result: Result<T, String>) -> Result<serde_jso
 /// Declares a module's commands, each in one place.
 ///
 /// Every entry gives the access (`read_only`, `read_ui` or `write`: the [`CommandSpec`]
-/// constructor of that name), the command's name and summary, then the module and the
-/// arguments as closure parameters, and a body that evaluates to `Result<T, String>`
-/// for a serializable `T`. The macro generates the module's `COMMANDS` and its
-/// `dispatch_command`, so a spec and its handler cannot drift apart. The arguments are
-/// read with [`arg`].
+/// constructor of that name), optionally `(long)` for a command that can take seconds,
+/// the command's name and summary, then the module and the arguments as closure
+/// parameters, and a body that evaluates to `Result<T, String>` for a serializable `T`.
+/// The macro generates the module's `COMMANDS` and its `dispatch_command`, so a spec and
+/// its handler cannot drift apart. The arguments are read with [`arg`].
 ///
 /// ```ignore
 /// unidtk_api::module_commands! {
 ///     impl VpnModule {
 ///         read_only "vpn_status" "VPN runtime status" |this| Ok(status(&this.runtime));
-///         write "vpn_connect" "Connect to a server" |this, tag: Option<String>| connect(&this.runtime, tag);
+///         write(long) "vpn_connect" "Connect to a server" |this, tag: Option<String>| connect(&this.runtime, tag);
 ///     }
 /// }
 /// ```
@@ -215,7 +229,7 @@ macro_rules! module_commands {
     (
         impl $module:ty {
             $(
-                $access:ident $name:literal $summary:literal
+                $access:ident $(($flag:ident))? $name:literal $summary:literal
                 |$this:ident $(, $arg:ident : $argty:ty)* $(,)?| $body:expr;
             )*
         }
@@ -228,7 +242,7 @@ macro_rules! module_commands {
                         $name,
                         $summary,
                         concat!($(stringify!($arg), " ",)*),
-                    ),
+                    )$(.$flag())?,
                 )*
             ];
 
@@ -281,14 +295,16 @@ mod tests {
         impl Probe {
             read_only "probe_value" "The value" |this| Ok(this.0);
             write "probe_add" "Adds to the value" |this, amount: u32, label: Option<String>| Ok(format!("{}{}", label.unwrap_or_default(), this.0 + amount));
+            write(long) "probe_slow" "Takes seconds" |this| Ok(this.0);
         }
     }
 
     #[test]
     fn the_table_declares_and_dispatches_the_same_commands() {
         let names: Vec<_> = Probe::COMMANDS.iter().map(|spec| spec.name).collect();
-        assert_eq!(names, ["probe_value", "probe_add"]);
+        assert_eq!(names, ["probe_value", "probe_add", "probe_slow"]);
         assert!(Probe::COMMANDS[0].on_socket() && Probe::COMMANDS[1].is_write());
+        assert!(!Probe::COMMANDS[1].long && Probe::COMMANDS[2].long && Probe::COMMANDS[2].is_write());
         assert_eq!(Probe::COMMANDS[1].args, "amount label ");
         let probe = Probe(2);
         assert_eq!(probe.dispatch_command("probe_value", &serde_json::json!({})), Some(Ok(serde_json::json!(2))));

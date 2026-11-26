@@ -218,14 +218,106 @@ fn send_text(socket: &mut tungstenite::WebSocket<TcpStream>, text: String) -> bo
     send_ws_message(socket, tungstenite::Message::Text(text))
 }
 
-fn handle_client_text<F>(
+/// The connection's commands that run off its thread (`r[ipc.long-commands-off-thread]`).
+///
+/// A long command (a server check, a connect) used to run inline, so every command the
+/// host sent after it waited, and the host's own five-second deadline turned them all
+/// into errors: the folder list came back empty and the desk drew no folders. Now a
+/// worker runs it and leaves the reply here; only the connection's thread writes the
+/// socket, because a WebSocket is not shared between threads.
+#[derive(Default)]
+struct LongWork {
+    state: std::sync::Mutex<LongState>,
+}
+
+#[derive(Default)]
+struct LongState {
+    /// The names running now: one of each at a time, at most [`MAX_LONG_IN_FLIGHT`].
+    running: Vec<String>,
+    replies: std::collections::VecDeque<String>,
+}
+
+/// Long commands one connection may run at once.
+const MAX_LONG_IN_FLIGHT: usize = 4;
+
+impl LongWork {
+    fn state(&self) -> std::sync::MutexGuard<'_, LongState> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn start(&self, cmd: &str) -> Result<(), String> {
+        let mut state = self.state();
+        if state.running.iter().any(|running| running == cmd) {
+            return Err(format!("busy: '{cmd}' is already running"));
+        }
+        if state.running.len() >= MAX_LONG_IN_FLIGHT {
+            return Err(format!("busy: {MAX_LONG_IN_FLIGHT} long commands are already running"));
+        }
+        state.running.push(cmd.to_string());
+        Ok(())
+    }
+
+    fn finish(&self, cmd: &str, reply: String) {
+        let mut state = self.state();
+        state.running.retain(|running| running != cmd);
+        state.replies.push_back(reply);
+    }
+
+    /// A start whose worker never ran: the name is free again, and no reply is left.
+    fn abandon(&self, cmd: &str) {
+        self.state().running.retain(|running| running != cmd);
+    }
+
+    fn busy(&self) -> bool {
+        !self.state().running.is_empty()
+    }
+
+    fn take_replies(&self) -> Vec<String> {
+        self.state().replies.drain(..).collect()
+    }
+}
+
+/// Runs `request` on a worker and wakes the connection when its reply is ready.
+fn spawn_long<F>(
+    cmd: &str,
+    request: serde_json::Value,
+    dispatch: &std::sync::Arc<F>,
+    work: &std::sync::Arc<LongWork>,
+    wake: &crate::events::WakeHook,
+) -> Result<(), String>
+where
+    F: Fn(&serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync + 'static,
+{
+    work.start(cmd)?;
+    let (cmd, dispatch, work, wake) = (cmd.to_string(), dispatch.clone(), work.clone(), wake.clone());
+    let name = format!("unidtk-ws-{cmd}");
+    let spawned = std::thread::Builder::new().name(name).spawn({
+        let (cmd, work) = (cmd.clone(), work.clone());
+        move || {
+            let reply = crate::ipc::respond(request.get("id").cloned(), dispatch(&request));
+            // A connection that closed meanwhile never drains this: the reply goes with it.
+            work.finish(&cmd, reply);
+            wake();
+        }
+    });
+    spawned.map(|_| ()).map_err(|error| {
+        work.abandon(&cmd);
+        format!("could not start '{cmd}': {error}")
+    })
+}
+
+fn handle_client_text<F, L>(
     text: &str,
     socket: &mut tungstenite::WebSocket<TcpStream>,
     subscription: &crate::events::Subscription,
-    dispatch: &mut F,
+    dispatch: &std::sync::Arc<F>,
+    is_long: &L,
+    work: &std::sync::Arc<LongWork>,
+    wake: &crate::events::WakeHook,
 ) -> bool
 where
-    F: FnMut(&serde_json::Value) -> Result<serde_json::Value, String>,
+    F: Fn(&serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync + 'static,
+    L: Fn(&str) -> bool,
 {
     let request: serde_json::Value = match serde_json::from_str(text) {
         Ok(value) => value,
@@ -299,20 +391,35 @@ where
         return true;
     }
 
+    let cmd = request.get("cmd").and_then(|cmd| cmd.as_str()).unwrap_or_default().to_string();
+    if is_long(&cmd) {
+        // The reply arrives later through `work`; the commands behind this one go on.
+        return match spawn_long(&cmd, request.clone(), dispatch, work, wake) {
+            Ok(()) => true,
+            Err(refusal) => send_text(socket, crate::ipc::respond(request.get("id").cloned(), Err(refusal))),
+        };
+    }
     let reply = crate::ipc::respond(request.get("id").cloned(), dispatch(&request));
     send_text(socket, reply)
 }
 
 fn serve(stream: TcpStream, server: IpcServer, token: String) {
-    serve_with_dispatch(stream, token, move |request| {
-        server.dispatch(request, unidtk_api::commands::Door::Ui)
-    });
+    let long = server.clone();
+    serve_with_dispatch(
+        stream,
+        token,
+        move |request| server.dispatch(request, unidtk_api::commands::Door::Ui),
+        move |cmd| long.is_long(cmd),
+    );
 }
 
-fn serve_with_dispatch<F>(stream: TcpStream, token: String, mut dispatch: F)
+fn serve_with_dispatch<F, L>(stream: TcpStream, token: String, dispatch: F, is_long: L)
 where
-    F: FnMut(&serde_json::Value) -> Result<serde_json::Value, String>,
+    F: Fn(&serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync + 'static,
+    L: Fn(&str) -> bool,
 {
+    let dispatch = std::sync::Arc::new(dispatch);
+    let work = std::sync::Arc::new(LongWork::default());
     let _ = stream.set_read_timeout(Some(HANDSHAKE_DEADLINE));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
@@ -362,18 +469,28 @@ where
         return;
     };
     #[cfg(windows)]
-    let subscription = crate::events::subscribe_with_wake(waiter.wake_hook());
+    let wake = waiter.wake_hook();
+    #[cfg(windows)]
+    let subscription = crate::events::subscribe_with_wake(wake.clone());
     let mut last_activity = std::time::Instant::now();
 
     'conn: loop {
-        if !subscription.has_topics() && last_activity.elapsed() > IDLE_TIMEOUT {
+        // A connection waiting for its own long command is not idle.
+        if !subscription.has_topics() && !work.busy() && last_activity.elapsed() > IDLE_TIMEOUT {
             break 'conn;
         }
 
-        // Clear the manual-reset wake event strictly BEFORE draining the queue so a
-        // concurrent publish that calls SetEvent during/after drain cannot be lost.
+        // Clear the manual-reset wake event strictly BEFORE draining the queues so a
+        // concurrent publish or a finished long command that calls SetEvent during/after
+        // the drain cannot be lost.
         #[cfg(windows)]
         waiter.reset_wake();
+
+        for reply in work.take_replies() {
+            if !send_text(&mut socket, reply) {
+                break 'conn;
+            }
+        }
 
         for item in subscription.drain() {
             let message = match item {
@@ -404,7 +521,7 @@ where
             match socket.read() {
                 Ok(tungstenite::Message::Text(text)) => {
                     last_activity = std::time::Instant::now();
-                    if !handle_client_text(&text, &mut socket, &subscription, &mut dispatch) {
+                    if !handle_client_text(&text, &mut socket, &subscription, &dispatch, &is_long, &work, &wake) {
                         break 'conn;
                     }
                 }
@@ -428,7 +545,7 @@ where
             }
         }
 
-        let timeout = if subscription.has_topics() {
+        let timeout = if subscription.has_topics() || work.busy() {
             None
         } else {
             let remaining = IDLE_TIMEOUT.saturating_sub(last_activity.elapsed());
@@ -462,16 +579,22 @@ mod tests {
         let token = "test-ws-token".to_string();
         let server_token = token.clone();
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
         let handle = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            serve_with_dispatch(stream, server_token, move |req| {
-                if req.get("cmd").and_then(|v| v.as_str()) == Some("hold") {
-                    let _ = entered_tx.send(());
-                    let _ = release_rx.recv_timeout(Duration::from_secs(2));
-                }
-                Ok(serde_json::json!({ "ok": true }))
-            });
+            serve_with_dispatch(
+                stream,
+                server_token,
+                move |req| {
+                    if req.get("cmd").and_then(|v| v.as_str()) == Some("hold") {
+                        let _ = entered_tx.send(());
+                        let _ = release_rx.lock().unwrap().recv_timeout(Duration::from_secs(2));
+                    }
+                    Ok(serde_json::json!({ "ok": true }))
+                },
+                |_| false,
+            );
         });
 
         let (mut client, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
@@ -547,7 +670,7 @@ mod tests {
         let server_token = token.clone();
         let handle = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            serve_with_dispatch(stream, server_token, |_| Ok(serde_json::json!({})));
+            serve_with_dispatch(stream, server_token, |_| Ok(serde_json::json!({})), |_| false);
         });
 
         let (mut client, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
@@ -594,5 +717,65 @@ mod tests {
             close_start.elapsed() < Duration::from_millis(250),
             "ws server thread must exit immediately when peer drops"
         );
+    }
+
+    // r[ipc.long-commands-off-thread]: the 22-second server check held every later command
+    // of the host, which then timed out at five seconds and drew the desk without folders.
+    #[test]
+    fn a_long_command_does_not_hold_the_commands_behind_it() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = "test-ws-long".to_string();
+        let server_token = token.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            serve_with_dispatch(
+                stream,
+                server_token,
+                move |req| match req["cmd"].as_str() {
+                    Some("slow") => {
+                        let _ = release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5));
+                        Ok(serde_json::json!("slow done"))
+                    }
+                    _ => Ok(serde_json::json!("fast")),
+                },
+                |cmd| cmd == "slow",
+            );
+        });
+
+        let (mut client, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}")).unwrap();
+        match client.get_mut() {
+            tungstenite::stream::MaybeTlsStream::Plain(tcp) => {
+                tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            }
+            _ => unreachable!("loopback ws is plain tcp"),
+        }
+        let mut send = |value: serde_json::Value| client.send(tungstenite::Message::Text(value.to_string())).unwrap();
+        send(serde_json::json!({ "hello": { "token": token } }));
+        send(serde_json::json!({ "id": 1, "cmd": "slow" }));
+        send(serde_json::json!({ "id": 2, "cmd": "slow" }));
+        send(serde_json::json!({ "id": 3, "cmd": "fast" }));
+        let mut read = || -> serde_json::Value {
+            serde_json::from_str(&client.read().unwrap().into_text().unwrap()).unwrap()
+        };
+        assert_eq!(read()["result"]["ready"], true);
+
+        // The second "slow" is refused while the first runs, and "fast" answers at once.
+        let t0 = Instant::now();
+        let busy = read();
+        assert_eq!(busy["id"], 2);
+        assert!(busy["error"].as_str().unwrap().contains("busy"), "{busy}");
+        let fast = read();
+        assert_eq!((fast["id"].clone(), fast["result"].clone()), (serde_json::json!(3), serde_json::json!("fast")));
+        assert!(t0.elapsed() < Duration::from_secs(1), "the fast command waited for the slow one");
+
+        release_tx.send(()).unwrap();
+        let slow = read();
+        assert_eq!((slow["id"].clone(), slow["result"].clone()), (serde_json::json!(1), serde_json::json!("slow done")));
+
+        drop(client);
+        handle.join().unwrap();
     }
 }

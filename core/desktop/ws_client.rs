@@ -30,17 +30,28 @@ use windows::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent, Wait
 
 use std::os::windows::io::AsRawSocket;
 
-/// How long a requested command waits for its reply.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a requested command waits for its reply, unless it asks for longer
+/// ([`Outbox::request_within`]).
+pub const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What a requester hears: the reply's result or error, or why there is none.
 pub type ReplyHandler = Box<dyn FnOnce(Result<Value, String>) + Send>;
 
 struct Pending {
+    /// Counted from the moment the command left (`confirm_sent`); until then, from when it
+    /// was queued, so a command that never leaves still hears a timeout.
     deadline: Instant,
+    timeout: Duration,
+    cmd: String,
     /// The command left the outbox; a dropped link loses its reply.
     sent: bool,
     handler: ReplyHandler,
+}
+
+/// The error a requester hears when its command's deadline passed. It names the command:
+/// a bare "timeout" in a folder list said nothing about which call the kernel did not answer.
+pub fn timeout_error(cmd: &str, timeout: Duration) -> String {
+    format!("timeout: the kernel did not answer '{cmd}' within {} s", timeout.as_secs())
 }
 
 /// Unsent commands the outbox holds; one more is refused, loudly.
@@ -127,11 +138,20 @@ impl Outbox {
     /// command left. A command that never left is sent again on the next session.
     /// The handler hears every outcome, a refusal here included.
     pub fn request(&self, cmd: &str, args: Value, handler: ReplyHandler) -> Result<u64, String> {
+        self.request_within(cmd, args, REPLY_TIMEOUT, handler)
+    }
+
+    /// [`Outbox::request`] for a command that can take longer than [`REPLY_TIMEOUT`]: a
+    /// server check runs for seconds, and its answer arrived after the requester had been
+    /// told "timeout" and stopped listening.
+    pub fn request_within(&self, cmd: &str, args: Value, timeout: Duration, handler: ReplyHandler) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // A poisoned lock still holds consistent maps (every critical section is one insert
         // or remove), and dropping the handler would leave its requester waiting for ever.
-        self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, Pending { deadline: Instant::now() + REPLY_TIMEOUT, sent: false, handler });
+        self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(
+            id,
+            Pending { deadline: Instant::now() + timeout, timeout, cmd: cmd.to_string(), sent: false, handler },
+        );
         let queued = {
             let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.queue.len() >= OUTBOX_CAPACITY {
@@ -166,17 +186,24 @@ impl Outbox {
     }
 
     /// Times out the requests past their deadline; returns how long until the next one is due.
+    /// A timed-out command that never left is taken out of the queue: the kernel must not
+    /// run it after its requester was told it failed.
     fn expire(&self) -> Option<Duration> {
         let now = Instant::now();
-        let expired: Vec<Pending> = {
-            let Ok(mut pending) = self.pending.lock() else { return None };
+        let expired: Vec<(u64, Pending)> = {
+            let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let ids: Vec<u64> = pending.iter().filter(|(_, p)| p.deadline <= now).map(|(id, _)| *id).collect();
-            ids.into_iter().filter_map(|id| pending.remove(&id)).collect()
+            ids.into_iter().filter_map(|id| pending.remove(&id).map(|p| (id, p))).collect()
         };
-        for pending in expired {
-            (pending.handler)(Err("timeout: the kernel did not answer".into()));
+        let unsent: Vec<u64> = expired.iter().filter(|(_, p)| !p.sent).map(|(id, _)| *id).collect();
+        if !unsent.is_empty() {
+            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.queue.retain(|queued| !unsent.contains(&queued.id));
         }
-        let pending = self.pending.lock().ok()?;
+        for (_, pending) in expired {
+            (pending.handler)(Err(timeout_error(&pending.cmd, pending.timeout)));
+        }
+        let pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         pending.values().map(|p| p.deadline.saturating_duration_since(now)).min()
     }
 
@@ -258,6 +285,8 @@ impl Outbox {
         if let Ok(mut pending) = self.pending.lock() {
             if let Some(pending) = pending.get_mut(&id) {
                 pending.sent = true;
+                // The kernel's time starts now, not while the command waited for the link.
+                pending.deadline = Instant::now() + pending.timeout;
             }
         }
     }
@@ -754,6 +783,27 @@ mod tests {
             outbox.send("set_system_volume", json!({"level": n}), None).unwrap();
         }
         assert!(outbox.send("set_system_volume", json!({"level": 1}), None).is_err());
+    }
+
+    // A command its requester was told had timed out must not run later, and the error
+    // names it; a long command gets its own deadline, counted from when it left.
+    #[test]
+    fn a_timed_out_unsent_command_leaves_the_queue_and_a_long_one_waits_its_own_time() {
+        let outbox = Outbox::new().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let short = tx.clone();
+        outbox.request_within("get_folders", json!({}), Duration::from_millis(1), Box::new(move |r| { let _ = short.send(r); })).unwrap();
+        outbox.request_within("vpn_ping_all", json!({}), Duration::from_secs(60), Box::new(move |r| { let _ = tx.send(r); })).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let next_due = outbox.expire();
+        let error = rx.try_recv().expect("the short request timed out").unwrap_err();
+        assert!(error.contains("get_folders") && error.starts_with("timeout:"), "{error}");
+        assert!(rx.try_recv().is_err(), "the long request is still waiting");
+        assert!(next_due.is_some_and(|due| due > Duration::from_secs(50)), "{next_due:?}");
+        let (id, cmd, _) = outbox.front().expect("the long command is still queued");
+        assert_eq!(cmd, "vpn_ping_all", "the expired command was taken out of the queue");
+        outbox.confirm_sent(id);
+        assert!(outbox.front().is_none());
     }
 
     #[test]

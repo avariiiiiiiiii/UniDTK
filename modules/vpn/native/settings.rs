@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use rune::el::{col, el, row, text, text_input, El};
+use rune::el::{col, el, row, text, El};
 use rune::TextEdit;
 use serde_json::{json, Value};
 use unidtk_shell::controls::{self, ButtonKind, Look};
@@ -383,7 +383,7 @@ fn input(
         .border_layout()
         .fill(look.well.alpha(0.25))
         .child(
-            text_input(edit, look.font(13.0, 400.0))
+            controls::text_field(edit, look.font(13.0, 400.0), look.fg)
                 .single_line()
                 .key(key)
                 .label(label.to_string())

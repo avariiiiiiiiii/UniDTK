@@ -262,6 +262,14 @@ pub fn field_heading(look: &Look, label: &str) -> El {
     el().w_full().pt(12.0).pb(6.0).child(field_label(look, label, ""))
 }
 
+/// A text field whose text, caret and selection are drawn in `ink`. Rune draws a field
+/// with no colour of its own white (the host sets no window foreground), so a pasted
+/// subscription link was near invisible on a light theme; every host field goes through
+/// here and names the ink its surface needs (`theme.contrast`).
+pub fn text_field(edit: &rune::TextEdit, style: TextStyle, ink: Color) -> El {
+    rune::el::text_input(edit, style).color(ink).caret(ink, ink.alpha(0.2))
+}
+
 /// `.menu-tabs`: a well of 18 % around equal tabs, the selected one on a 16 % fill; an
 /// unselected tab's label turns full ink on hover.
 /// Left and Right move to the neighbouring tab, wrapping, and take the focus with them.

@@ -317,22 +317,28 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
 
             fn on_inject_key(&mut self, cmd: ControlCommand) {
                 let current_gen = self.active_generation.load(Ordering::Acquire);
-                let input_generation = match &cmd {
-                    ControlCommand::InjectKey { generation, input_generation, .. } => {
+                let (input_generation, vk) = match &cmd {
+                    ControlCommand::InjectKey { generation, input_generation, vk, .. } => {
                         if *generation != current_gen {
+                            note_dropped_key(*vk, &format!("host generation {generation}, the desk runs {current_gen}"));
                             return;
                         }
-                        *input_generation
+                        (*input_generation, *vk)
                     }
                     _ => return,
                 };
                 // A key the kernel queued before the desk lost the keyboard arrives after its
                 // `FocusLost`; delivering it would type into the app behind the user's back.
                 // The blur advanced the desk's generation, so an older key is dropped here.
-                if input_generation < self.input_generation.load(Ordering::Acquire) {
+                let accepted = self.input_generation.load(Ordering::Acquire);
+                if input_generation < accepted {
+                    note_dropped_key(vk, &format!("input generation {input_generation} is older than {accepted}"));
                     return;
                 }
-                let Some(ev) = to_injected_key(&cmd) else { return };
+                let Some(ev) = to_injected_key(&cmd) else {
+                    note_dropped_key(vk, "no key it maps to");
+                    return;
+                };
                 let window = self.inspector.window.lock().ok().and_then(|g| g.clone());
                 if let Some(w) = window {
                     w.inject_key(ev);
@@ -601,6 +607,15 @@ fn publish_region(inspector: &Inspector) -> Result<(), String> {
         snapshot.region_set_ms.push_back(set_ms);
     }
     Ok(())
+}
+
+/// A key the kernel forwarded that the desk did not deliver, in `unidtk-desktop.log`: a
+/// field that typed nothing had left no trace of where its keys went. Bounded per run.
+fn note_dropped_key(vk: u32, why: &str) {
+    static NOTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if NOTED.fetch_add(1, Ordering::Relaxed) < 50 {
+        crate::desktop_host::note(&format!("key vk=0x{vk:02X} dropped: {why}"));
+    }
 }
 
 pub(crate) fn to_injected_key(cmd: &ControlCommand) -> Option<rune::InjectedKey> {

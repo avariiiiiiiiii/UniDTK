@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use rune::el::{col, el, text, text_input, El};
+use rune::el::{col, el, text, El};
 use rune::{Color, Image, ImageCache, Pixels, TextEdit, Tx};
 use serde_json::{json, Value};
 
@@ -269,9 +269,9 @@ impl Host {
     /// What the desk shows: the layout with the folders and the switched-off modules.
     pub(crate) fn desk(&self) -> Option<Desk> {
         let layout = self.layout.as_ref()?;
-        let folders = self.menu.folders.ready().map_or(&[][..], Vec::as_slice);
+        let folders = self.menu.folders.shown().map_or(&[][..], Vec::as_slice);
         let empty = HashSet::new();
-        let disabled = self.menu.disabled_modules.ready().unwrap_or(&empty);
+        let disabled = self.menu.disabled_modules.shown().unwrap_or(&empty);
         Some(desk_cards::desk(layout, folders, disabled, &|id| self.type_of(id).is_some()))
     }
 
@@ -737,13 +737,13 @@ impl Host {
     fn run_ops(&mut self, id: &str, gen: u64, ops: Vec<Op>, tx: &mut Tx) {
         for op in ops {
             match op {
-                Op::Call { cmd, args, reply } => {
+                Op::Call { cmd, args, reply, timeout } => {
                     let owner = id.to_string();
                     match reply {
-                        Some(reply) => self.call(&cmd, args, Box::new(move |host: &mut Host, result, tx: &mut Tx| host.reply(&owner, gen, reply, result, tx))),
+                        Some(reply) => self.call_within(&cmd, args, timeout, Box::new(move |host: &mut Host, result, tx: &mut Tx| host.reply(&owner, gen, reply, result, tx))),
                         None => {
                             let what = cmd.clone();
-                            self.call(&cmd, args, Box::new(move |host: &mut Host, result, _tx: &mut Tx| {
+                            self.call_within(&cmd, args, timeout, Box::new(move |host: &mut Host, result, _tx: &mut Tx| {
                                 if let Err(error) = result {
                                     log_frontend(host, &format!("{owner}: {what} failed: {error}"));
                                 }
@@ -807,6 +807,38 @@ impl Host {
     }
 }
 
+impl Host {
+    /// [`MenuHost::call`] with its own deadline, for a command that runs for seconds
+    /// (`r[ipc.long-commands-off-thread]`).
+    fn call_within(&mut self, cmd: &str, args: Value, timeout: std::time::Duration, then: Box<dyn FnOnce(&mut Self, Result<Value, String>, &mut Tx) + Send>) {
+        let Some(ui) = self.ui.get().cloned() else {
+            menu::error_toast(self, "Не получилось: нет связи с ядром");
+            return;
+        };
+        let outbox = self.inspector.outbox.lock().ok().and_then(|slot| slot.clone());
+        let Some(outbox) = outbox else {
+            // The requester still hears it: a list stops saying "Загрузка…".
+            ui.update(move |state: &mut Host, tx: &mut Tx| then(state, Err("нет связи с ядром".into()), tx));
+            return;
+        };
+        // A timeout is written down: they used to vanish into a four-second debug line,
+        // so a desk that lost its folders left no trace of the call that failed.
+        let logged = cmd != "frontend_log";
+        let handler: crate::ws_client::ReplyHandler = Box::new(move |result| {
+            ui.update(move |state: &mut Host, tx: &mut Tx| {
+                if let Err(error) = &result {
+                    if logged && error.starts_with("timeout:") {
+                        log_frontend(state, error);
+                    }
+                }
+                then(state, result, tx)
+            });
+        });
+        // A refusal (the outbox is full) has already reached the handler.
+        let _ = outbox.request_within(cmd, args, timeout, handler);
+    }
+}
+
 /// The fields `desk_apply`'s `position` takes; anything else is a widget's setting.
 fn position_fields(op: &Value) -> bool {
     op.as_object().is_some_and(|fields| fields.keys().all(|k| matches!(k.as_str(), "op" | "id" | "x" | "y" | "w" | "h" | "ax" | "ay" | "anchor" | "version")))
@@ -849,21 +881,7 @@ impl MenuHost for Host {
     }
 
     fn call(&mut self, cmd: &str, args: Value, then: Box<dyn FnOnce(&mut Self, Result<Value, String>, &mut Tx) + Send>) {
-        let Some(ui) = self.ui.get().cloned() else {
-            menu::error_toast(self, "Не получилось: нет связи с ядром");
-            return;
-        };
-        let outbox = self.inspector.outbox.lock().ok().and_then(|slot| slot.clone());
-        let Some(outbox) = outbox else {
-            // The requester still hears it: a list stops saying "Загрузка…".
-            ui.update(move |state: &mut Host, tx: &mut Tx| then(state, Err("нет связи с ядром".into()), tx));
-            return;
-        };
-        let handler: crate::ws_client::ReplyHandler = Box::new(move |result| {
-            ui.update(move |state: &mut Host, tx: &mut Tx| then(state, result, tx));
-        });
-        // A refusal (the outbox is full) has already reached the handler.
-        let _ = outbox.request(cmd, args, handler);
+        self.call_within(cmd, args, crate::ws_client::REPLY_TIMEOUT, then);
     }
 
     fn enter_arrange(&mut self, tx: &mut Tx) {
@@ -1278,7 +1296,7 @@ fn arrange_bar(state: &Host, theme: &Theme) -> Option<El> {
         }),
     ];
     if session.folder_form {
-        let name = text_input(&session.folder_name, look.font(13.0, 400.0)).single_line().key("hit:arrange-folder-name")
+        let name = crate::controls::text_field(&session.folder_name, look.font(13.0, 400.0), look.fg).single_line().key("hit:arrange-folder-name")
             .placeholder("Название папки", look.fg.alpha(0.55))
             .on_edit(|state: &mut Host| match state.arrange.as_mut() {
                 Some(a) => &mut a.folder_name,
@@ -1479,7 +1497,7 @@ pub(crate) fn poll(state: &mut Host, _: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     // The widgets follow the desk: made, synced or dropped when the layout or the
     // switched-off modules change.
-    let disabled: Vec<String> = state.menu.disabled_modules.ready().map(|set| {
+    let disabled: Vec<String> = state.menu.disabled_modules.shown().map(|set| {
         let mut list: Vec<String> = set.iter().cloned().collect();
         list.sort();
         list

@@ -86,7 +86,7 @@ fn nesting_host<S: MenuHost>(state: &S, id: &str) -> Option<String> {
     let layout = state.layout()?;
     let host = layout.nested.iter().find(|(_, children)| children.iter().any(|c| c == id))?.0.clone();
     let name = modules().into_iter().find(|m| m.id == host).map(|m| m.name)
-        .or_else(|| state.menu_ref().folders.ready().and_then(|f| f.iter().find(|f| f["id"] == host.as_str()).and_then(|f| f["name"].as_str().map(str::to_string))))
+        .or_else(|| state.menu_ref().folders.shown().and_then(|f| f.iter().find(|f| f["id"] == host.as_str()).and_then(|f| f["name"].as_str().map(str::to_string))))
         .unwrap_or(host);
     Some(name)
 }
@@ -105,19 +105,20 @@ pub fn load_lists<S: MenuHost>(state: &mut S) {
 /// A disconnected request completes with an error. A new link can fill in that list
 /// even when it reconnects to the same kernel and the layout revision is unchanged.
 pub(crate) fn retry_failed_lists<S: MenuHost>(state: &mut S) {
-    if matches!(state.menu_ref().disabled_modules, Loaded::Failed(_)) {
+    if state.menu_ref().disabled_modules.needs_reload() {
         load_disabled_modules(state);
     }
-    if matches!(state.menu_ref().folders, Loaded::Failed(_)) {
+    if state.menu_ref().folders.needs_reload() {
         load_folders(state);
     }
 }
 
 fn load_disabled_modules<S: MenuHost>(state: &mut S) {
     state.call("get_disabled_modules", json!({}), Box::new(|state: &mut S, result, _tx: &mut Tx| {
-        state.menu().disabled_modules = match result {
+        let menu = state.menu();
+        menu.disabled_modules = match result {
             Ok(list) => Loaded::Ready(list.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()),
-            Err(error) => Loaded::Failed(error),
+            Err(error) => std::mem::replace(&mut menu.disabled_modules, Loaded::Loading).failed(error),
         };
     }));
 }
@@ -134,7 +135,10 @@ pub fn load_folders<S: MenuHost>(state: &mut S) {
                 state.menu().missing = targets.iter().zip(flags).filter(|(_, gone)| *gone).filter_map(|(t, _)| t.as_str().map(str::to_string)).collect();
             }));
         }
-        Err(error) => state.menu().folders = Loaded::Failed(error),
+        Err(error) => {
+            let menu = state.menu();
+            menu.folders = std::mem::replace(&mut menu.folders, Loaded::Loading).failed(error);
+        }
     }));
 }
 
@@ -183,7 +187,7 @@ pub fn pane<S: MenuHost>(state: &S, look: &Look) -> El {
     let hidden = state.layout().map(|l| l.hidden.clone()).unwrap_or_default();
     match state.menu_ref().disabled_modules.clone() {
         Loaded::Loading => pane = pane.child(empty(look, "Загрузка…", false)),
-        Loaded::Failed(error) => {
+        Loaded::Failed(error) | Loaded::Stale(_, error) => {
             pane = pane.child(
                 col().gap(10.0).child(empty(look, &format!("Не удалось загрузить список виджетов: {error}"), true))
                     .child(row().child(controls::button(look, "hit:retry-widgets".into(), "Повторить", ButtonKind::Normal, |state: &mut S, tx: &mut Tx| load(state, tx)))),
