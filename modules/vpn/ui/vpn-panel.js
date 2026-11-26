@@ -263,10 +263,10 @@ async function initVpnPanel(body) {
     isUpdatingAutoConnect = true;
     autoToggleInput.disabled = true;
     try {
-      logFrontend(`vpn_set_auto_connect invoke enabled=${nextChecked}`);
-      await invoke("vpn_set_auto_connect", { enabled: nextChecked });
+      logFrontend(`settings_set vpn/auto_connect=${nextChecked}`);
+      await invoke("settings_set", { module: "vpn", key: "auto_connect", value: nextChecked });
     } catch (e) {
-      logFrontend(`vpn_set_auto_connect error=${e.message || e}`);
+      logFrontend(`settings_set vpn/auto_connect error=${e.message || e}`);
       showDebugMessage(`VPN: ${e.message || e}`);
       autoToggleInput.checked = !nextChecked;
     } finally {

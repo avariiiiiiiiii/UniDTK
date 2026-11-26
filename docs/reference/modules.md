@@ -51,6 +51,11 @@ The contract crate is `core/api` (package `unidtk-api`). It must not depend on `
 - Commands: `CommandSpec` and the `module_commands!` table (`unidtk_api::commands`).
 - Services: `log`, `emit`, `subscribe`, `state`, and `paths`.
 - Storage: `ModuleContext::store(StoreSpec)` returns a `ModuleDb`. See [Storage](storage.md).
+- Settings: `ModuleContext::settings()` returns a `ModuleSettings`. See below.
+
+r[modules.settings-contract]
+
+A setting a person changes in the menu is declared by its module and kept by the kernel, the third contract beside the log (`log`) and the store (`ModuleDb`). The module declares what it has in `Module::settings()`, a static table of `SettingSpec { key, label, summary, kind, secret }` whose kinds are `Switch`, `Text`, `Number`, `Choice`, `TextList` and `Record` (a JSON object the module checks and its own pane section draws). The kernel keeps every value in the table `module_settings` of `unidtk.redb`, with a version of its own (a row of its own, so a damaged value never resets it). A write is checked against the declaration, then by the module's `check_setting(key, old, new)`, a pure function that normalises or refuses and runs with nothing held, and is refused when the caller read an older version (a compare-and-set in the write transaction); an unchanged value keeps its version. After the commit, `setting_changed(key, version)` runs on a kernel worker thread and the state event `settings-changed { module, key, version }` goes out, never with the value. The commands are `settings_specs` and `settings_get` (interface door: a `secret` value is a credential), `settings_set` (write) and `settings_keys` (the socket: declarations and versions, no values). The menu draws the declared fields itself ([shell](shell.md)). A module moves its old storage into the contract inside `init`, before its switched-off gate, logging and going on when a step fails. VPN's `auto_connect` is the first setting on it (session 152); its subscription and home server, mp3-player's `config.toml` and Telegram's configuration are the next ([ideas and debt](../dev/ideas-and-debt.md)).
 
 ## Switching a module on and off
 

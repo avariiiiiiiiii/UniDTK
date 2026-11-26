@@ -100,6 +100,18 @@ pub fn load<S: MenuHost>(state: &mut S, _tx: &mut Tx) {
 pub fn load_lists<S: MenuHost>(state: &mut S) {
     load_disabled_modules(state);
     load_folders(state);
+    load_setting_modules(state);
+}
+
+/// Which modules declare settings: their sheets offer "Настроить…".
+fn load_setting_modules<S: MenuHost>(state: &mut S) {
+    state.call("settings_specs", json!({}), Box::new(|state: &mut S, result, _tx: &mut Tx| {
+        let menu = state.menu();
+        menu.setting_modules = match result {
+            Ok(specs) => Loaded::Ready(specs.as_object().map(|ids| ids.keys().cloned().collect()).unwrap_or_default()),
+            Err(error) => std::mem::replace(&mut menu.setting_modules, Loaded::Loading).failed(error),
+        };
+    }));
 }
 
 /// A disconnected request completes with an error. A new link can fill in that list
@@ -110,6 +122,9 @@ pub(crate) fn retry_failed_lists<S: MenuHost>(state: &mut S) {
     }
     if state.menu_ref().folders.needs_reload() {
         load_folders(state);
+    }
+    if state.menu_ref().setting_modules.needs_reload() {
+        load_setting_modules(state);
     }
 }
 
@@ -333,7 +348,8 @@ fn widget_sheet<S: MenuHost>(state: &S, look: &Look, theme: &Theme, id: &str, wi
             state.apply(vec![json!({ "op": "eject", "id": id })], tx);
         }));
     }
-    if state.settings_factory(id).is_some() {
+    let declared = state.menu_ref().setting_modules.shown().is_some_and(|ids| ids.contains(id));
+    if declared || state.settings_factory(id).is_some() {
         let id = id.to_string();
         actions = actions.child(controls::button(look, "hit:module-settings".into(), &format!("Настроить {}…", module.name), ButtonKind::Normal, move |state: &mut S, tx: &mut Tx| {
             menu::open_module_settings(state, &id, tx);

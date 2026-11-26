@@ -64,7 +64,7 @@ Each command is a `CommandSpec` value, defined in [core/api/src/commands.rs](../
 | `read_ui(...)` | ReadOnly | UI only (a read the page needs, kept off the socket) | Safe | 6 | 44 |
 | `write(...)` | Write | UI only | Unsafe | 14 | 79 |
 
-The manifest holds **178** commands (session 152, counted from `udtk help --json`): 35 of the kernel (the constant `ALL`, in declaration order) and 143 of the modules. Thirty-one of them are served on the socket (including the lock-free `host_ping`, `host_tree`, `host_frames`, and `host_hit` native inspector proxies), and 169 on the UI door (including `host_register` and `set_desktop_input_focus` over the authenticated WebSocket door). The 95 writes never reach the socket by construction. Each name is written once: the kernel's route table takes the name from the constant (`COMMAND.name`), and a module's table generates its spec and its handler from one line.
+The manifest holds **181** commands (session 152): 39 of the kernel (the constant `ALL`, in declaration order) and 142 of the modules. Thirty-two of them are served on the socket (including the lock-free `host_ping`, `host_tree`, `host_frames`, and `host_hit` native inspector proxies), and 172 on the UI door (including `host_register` and `set_desktop_input_focus` over the authenticated WebSocket door). The 95 writes never reach the socket by construction. Each name is written once: the kernel's route table takes the name from the constant (`COMMAND.name`), and a module's table generates its spec and its handler from one line.
 
 Inventory rules that the tests enforce are listed in [Chapter 15](ch15-how-a-module-joins-the-bridge.md#chapter-15-how-a-module-joins-the-bridge).
 

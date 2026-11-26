@@ -38,6 +38,7 @@ pub mod commands;
 pub mod manifest;
 pub mod modules;
 pub mod paths;
+pub mod settings;
 
 // For `module_commands!`, so a module needs no `serde_json` of its own to use it.
 #[doc(hidden)]
@@ -501,6 +502,9 @@ pub struct ModuleContext {
     /// Issues separate file stores. The core installs its own implementation;
     /// in unit tests it may be absent, in which case [`ModuleContext::store`] returns an error.
     stores: Option<Arc<dyn StoreFactory>>,
+    /// The module's settings, kept by the core. In unit tests it may be absent, in which
+    /// case [`ModuleContext::settings`] returns an error.
+    settings: Option<Arc<dyn settings::ModuleSettings>>,
     run_mode: ModuleRunMode,
     /// Whether the core started the module. `false` means the user has disabled the module: the core
     /// still keeps the managed shell (so Tauri commands do not panic), but the module must NOT
@@ -516,6 +520,7 @@ impl ModuleContext {
             db,
             host: None,
             stores: None,
+            settings: None,
             run_mode: ModuleRunMode::Production,
             enabled: true,
         }
@@ -529,9 +534,24 @@ impl ModuleContext {
             db,
             host: None,
             stores: Some(Arc::new(InMemoryStoreFactory)),
+            settings: None,
             run_mode: ModuleRunMode::Diagnostic,
             enabled: true,
         }
+    }
+
+    /// Install the module's settings (the core does this; a diagnostic run installs
+    /// [`settings::InMemorySettings`]).
+    pub fn with_settings(mut self, settings: Arc<dyn settings::ModuleSettings>) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+
+    /// The module's settings (`r[modules.settings-contract]`), as [`Self::db`] is its store.
+    pub fn settings(&self) -> Result<Arc<dyn settings::ModuleSettings>, String> {
+        self.settings
+            .clone()
+            .ok_or_else(|| format!("{}: the core did not provide settings", self.id.as_str()))
     }
 
     pub fn with_host(mut self, host: Arc<dyn Any + Send + Sync>) -> Self {
@@ -782,6 +802,24 @@ pub trait Module: Send + Sync {
     fn hotkeys(&self) -> &'static [HotkeySpec] {
         &[]
     }
+
+    /// The settings this module shows in the menu (`r[modules.settings-contract]`).
+    fn settings(&self) -> &'static [settings::SettingSpec] {
+        &[]
+    }
+
+    /// The module's own check of a setting it declared, after the declaration's check:
+    /// the value to store (normalised), or why it is refused. Pure: no store, no lock, no
+    /// I/O, because the core calls it between its read and its write. A refusal of a
+    /// secret setting never repeats the value.
+    fn check_setting(&self, _key: &str, _old: &Value, new: Value) -> Result<Value, String> {
+        Ok(new)
+    }
+
+    /// A setting was stored. Called after the write committed, on a core worker thread
+    /// with no core lock held; two calls may arrive in either order, so read the value
+    /// through [`ModuleContext::settings`] instead of trusting `version`.
+    fn setting_changed(&self, _key: &str, _version: u64) {}
 }
 
 #[cfg(test)]

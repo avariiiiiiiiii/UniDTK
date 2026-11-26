@@ -99,7 +99,7 @@ export const WS_WRITES = [
   "vpn_connect",
   "vpn_disconnect",
   "vpn_ping_all",
-  "vpn_set_auto_connect",
+  "settings_set",
 ];
 
 /**

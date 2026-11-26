@@ -47,6 +47,22 @@ impl<'a> View<'a> {
         }
     }
 
+    /// [`View::on`] for a control that hands over a value (a choice of pills).
+    pub fn on_value<P: Settings>(
+        &self,
+        handler: impl Fn(&mut P, &str, &mut Act) + Clone + 'static,
+    ) -> impl Fn(&mut Host, &str, &mut Tx) + Clone + 'static {
+        let generation = self.generation;
+        move |host, value, tx| {
+            let handler = handler.clone();
+            run(host, generation, tx, |settings, act| {
+                if let Some(pane) = downcast::<P>(settings) {
+                    handler(pane, value, act);
+                }
+            });
+        }
+    }
+
     pub fn edit<P: Settings>(
         &self,
         field: impl Fn(&mut P) -> &mut TextEdit + 'static,
@@ -63,8 +79,18 @@ impl<'a> View<'a> {
     }
 }
 
+/// The pane a binding was made for: the session's own, or a part of a
+/// [`crate::settings_pane::Composite`] (the declared fields, or the module's section).
 fn downcast<P: Settings>(settings: &mut dyn Settings) -> Option<&mut P> {
-    (settings as &mut dyn Any).downcast_mut()
+    let any = settings as &mut dyn Any;
+    if any.is::<P>() {
+        return any.downcast_mut();
+    }
+    let composite = any.downcast_mut::<crate::settings_pane::Composite>()?;
+    if (&composite.generic as &dyn Any).is::<P>() {
+        return (&mut composite.generic as &mut dyn Any).downcast_mut();
+    }
+    composite.live.as_deref_mut().and_then(|live| (live as &mut dyn Any).downcast_mut())
 }
 
 type Reply = Box<dyn FnOnce(&mut dyn Settings, Result<Value, String>, &mut Act) + Send>;

@@ -31,6 +31,7 @@ mod menu_look;
 pub mod motion;
 mod protocol;
 pub mod settings;
+mod settings_pane;
 mod shell;
 mod shortcut_glyphs;
 mod supervisor;

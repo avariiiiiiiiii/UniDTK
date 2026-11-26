@@ -131,6 +131,8 @@ pub struct Menu {
     /// Commands in flight, by control key (`runOnce`): their controls are disabled.
     pub busy: HashSet<String>,
     pub disabled_modules: Loaded<HashSet<String>>,
+    /// The modules that declare settings (`settings_specs`): their sheet offers "Настроить…".
+    pub setting_modules: Loaded<HashSet<String>>,
     pub folders: Loaded<Vec<Value>>,
     pub missing: HashSet<String>,
     pub creating_folder: bool,
@@ -166,6 +168,7 @@ impl Default for Menu {
             previous_colors: None,
             busy: HashSet::new(),
             disabled_modules: Loaded::Loading,
+            setting_modules: Loaded::Loading,
             folders: Loaded::Loading,
             missing: HashSet::new(),
             creating_folder: false,
@@ -342,12 +345,20 @@ pub fn open_module_settings<S: MenuHost>(state: &mut S, id: &str, tx: &mut Tx) {
     if !menu.open || !matches!(&menu.sheet, Some(Sheet::Widget(shown)) if shown == id) {
         return;
     }
-    let Some(make) = state.settings_factory(id) else { return };
+    // The declared fields when the module has any (`r[modules.settings-contract]`), with the
+    // module's own pane below them as its live section; else the module's pane alone.
+    let declared = state.menu_ref().setting_modules.shown().is_some_and(|ids| ids.contains(id));
+    let live = state.settings_factory(id).map(|make| make());
+    let pane: Box<dyn settings::Settings> = match (declared, live) {
+        (true, live) => Box::new(crate::settings_pane::Composite { generic: crate::settings_pane::GenericPane::new(id), live }),
+        (false, Some(live)) => live,
+        (false, None) => return,
+    };
     close_sheet(state, tx);
     let menu = state.menu();
     menu.settings_generation += 1;
     let generation = menu.settings_generation;
-    menu.view = View::ModuleSettings(settings::Session { generation, settings: make() });
+    menu.view = View::ModuleSettings(settings::Session { generation, settings: pane });
     settings::run(state, generation, tx, |pane, act| pane.load(act));
     tx.focus("hit:module-settings-back", false);
 }

@@ -38,7 +38,6 @@ struct VpnPane {
     connected: Option<bool>,
     saving: bool,
     subscription: TextEdit,
-    auto_connect: bool,
     /// The settings last acknowledged by the kernel. The switch only changes `enabled`.
     saved_home: Value,
     home: [TextEdit; HOME_FIELDS.len()],
@@ -49,7 +48,6 @@ struct VpnPane {
 
 enum Change {
     Subscription(String),
-    AutoConnect(bool),
     Home {
         config: Value,
         message: &'static str,
@@ -60,7 +58,6 @@ impl VpnPane {
     fn fill(&mut self, settings: &Value) {
         self.subscription =
             TextEdit::new(settings["subscription_url"].as_str().unwrap_or_default());
-        self.auto_connect = settings["auto_connect"] == true;
         let home = &settings["home_server"];
         let port = home["port"]
             .as_u64()
@@ -167,7 +164,6 @@ impl VpnPane {
         self.saving = true;
         let (cmd, args) = match &change {
             Change::Subscription(url) => ("vpn_set_subscription_url", json!({ "url": url })),
-            Change::AutoConnect(enabled) => ("vpn_set_auto_connect", json!({ "enabled": enabled })),
             Change::Home { config, .. } => {
                 ("vpn_set_home_server_config", json!({ "config": config }))
             }
@@ -197,7 +193,6 @@ impl VpnPane {
                 self.load_device(act);
                 act.toast("Подписка сохранена");
             }
-            Change::AutoConnect(enabled) => self.auto_connect = enabled,
             Change::Home { config, message } => {
                 self.saved_home = config;
                 act.toast(message);
@@ -260,7 +255,7 @@ impl Settings for VpnPane {
         let look = if self.saving {
             pending_look = Look {
                 busy: Rc::new(
-                    ["vpn-sub-save", "vpn-auto", "vpn-home", "vpn-home-save"]
+                    ["vpn-sub-save", "vpn-home", "vpn-home-save"]
                         .map(str::to_owned)
                         .into(),
                 ),
@@ -301,15 +296,6 @@ impl Settings for VpnPane {
             |pane| &mut pane.subscription,
             Self::save_subscription,
         );
-        let auto = controls::switch(
-            look,
-            "hit:vpn-auto".into(),
-            self.auto_connect,
-            view.on(|pane: &mut Self, act| pane.save(Change::AutoConnect(!pane.auto_connect), act)),
-        )
-        .role("switch")
-        .label("Подключаться при запуске")
-        .checked(self.auto_connect);
         let home_on = self.home_enabled();
         let home = controls::switch(
             look,
@@ -350,12 +336,6 @@ impl Settings for VpnPane {
                         view.on(Self::save_subscription),
                     ))),
             )
-            .child(switch_row(
-                look,
-                "Подключаться при запуске",
-                "VPN включится сам, когда запустится UniDTK",
-                auto,
-            ))
             .child(controls::heading(look, "Домашний сервер"))
             .child(switch_row(
                 look,
@@ -470,9 +450,8 @@ mod tests {
     #[test]
     fn a_missing_home_server_gets_the_pages_defaults() {
         let mut pane = VpnPane::default();
-        pane.fill(&json!({ "subscription_url": "https://x", "auto_connect": true }));
+        pane.fill(&json!({ "subscription_url": "https://x" }));
         assert_eq!(pane.subscription.text, "https://x");
-        assert!(pane.auto_connect);
         assert!(!pane.home_enabled());
         let config = pane.home_config().unwrap();
         assert_eq!(config["port"], 443);

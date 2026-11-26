@@ -33,7 +33,6 @@ pub(super) struct VpnSettings {
     pub subscription_url: String,
     pub default_tag: String,
     pub last_tag: Option<String>,
-    pub auto_connect: bool,
     pub home_server: HomeServerConfig,
 }
 

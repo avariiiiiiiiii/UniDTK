@@ -15,7 +15,7 @@ There are two database files, both in `%LOCALAPPDATA%\UniDTK`:
 
 r[storage.no-raw-db]
 
-A module never receives the raw database engine. State that must live in the shared database goes through `ModuleDb`, for which the kernel allocates the key slice `mods/<id>/…`. Anything else a module keeps in its own data files, declared through `StoreSpec`, or in memory. Because only the kernel opens the files, moving them affects no module.
+A module never receives the raw database engine. State that must live in the shared database goes through `ModuleDb`, for which the kernel allocates the key slice `mods/<id>/…`; a setting shown in the menu goes through the settings contract ([modules.settings-contract](modules.md#r-modules.settings-contract)), which keeps `<module>/<key>` and its version in the table `module_settings`. Anything else a module keeps in its own data files, declared through `StoreSpec`, or in memory. Because only the kernel opens the files, moving them affects no module.
 
 r[storage.log-queue]
 

@@ -4,7 +4,7 @@
 //! card and, compact, in a host's nesting zone (`.nested-body > .dash-vpn` drops the margin,
 //! the padding and the background). The server list follows the subscription revision from
 //! `vpn_status`, polled every 3 s while the panel is on screen. Writes (`vpn_connect`,
-//! `vpn_disconnect`, `vpn_set_auto_connect`) go through the interface door.
+//! `vpn_disconnect`, the `auto_connect` setting) go through the interface door.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -388,7 +388,9 @@ impl Vpn {
 
     fn set_auto(&mut self, next: bool, act: &mut Act<'_>) {
         self.auto_pending = Some(next);
-        act.call("vpn_set_auto_connect", json!({ "enabled": next }), |vpn: &mut Vpn, result, act| {
+        // The switch is the VPN's declared setting (`r[modules.settings-contract]`); the
+        // last press wins, so no version is sent.
+        act.call("settings_set", json!({ "module": "vpn", "key": "auto_connect", "value": next }), |vpn: &mut Vpn, result, act| {
             if let Err(error) = result {
                 act.debug(format!("VPN: {error}"));
             }
@@ -592,8 +594,10 @@ impl Vpn {
         let mut list = col().w_full().gap(2.0);
         for (index, (note, colour)) in notes.into_iter().enumerate() {
             list = list.child(
+                // The width the text breaks at: inside the scroll it would otherwise lay out on
+                // one line and be cut at the menu's edge (seen live, session 152).
                 el().key(format!("vpn-note:{index}")).w_full().px(9.0).py(4.0)
-                    .child(text(note).font(note_style).color(colour).max_lines(4).wrap_anywhere()),
+                    .child(text(note).font(note_style).color(colour).max_lines(4).wrap_anywhere().w(note_width)),
             );
         }
         for (index, tag) in servers.into_iter().enumerate() {

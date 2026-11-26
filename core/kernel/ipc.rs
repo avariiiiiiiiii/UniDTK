@@ -319,6 +319,10 @@ static ROUTES: &[(&str, Handler)] = &[
         crate::command_inventory::SET_DESKTOP_INPUT_FOCUS.name,
         handle_set_desktop_input_focus,
     ),
+    (crate::command_inventory::SETTINGS_SPECS.name, handle_settings_specs),
+    (crate::command_inventory::SETTINGS_GET.name, handle_settings_get),
+    (crate::command_inventory::SETTINGS_SET.name, handle_settings_set),
+    (crate::command_inventory::SETTINGS_KEYS.name, handle_settings_keys),
     (crate::command_inventory::HOST_PING.name, handle_host_ping),
     (crate::command_inventory::HOST_TREE.name, handle_host_tree),
     (crate::command_inventory::HOST_FRAMES.name, handle_host_frames),
@@ -425,6 +429,28 @@ fn handle_get_widget_config(
         Ok(None) => Ok(serde_json::Value::Null),
         Err(e) => Err(e),
     }
+}
+
+fn handle_settings_specs(server: &IpcServer, _args: &Args) -> Result<serde_json::Value, String> {
+    crate::module_settings::specs_of_all(&server.app)
+}
+
+fn handle_settings_get(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let module = args.get("module").and_then(|v| v.as_str()).ok_or("settings: {module} is required")?;
+    crate::module_settings::get_all(&server.app, server.db.raw_db(), module)
+}
+
+fn handle_settings_set(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let module = args.get("module").and_then(|v| v.as_str()).ok_or("settings: {module} is required")?;
+    let key = args.get("key").and_then(|v| v.as_str()).ok_or("settings_set: {key} is required")?;
+    let value = args.get("value").cloned().ok_or("settings_set: {value} is required")?;
+    let expected = args.get("expectedVersion").and_then(|v| v.as_u64());
+    crate::module_settings::set_one(&server.app, server.db.raw_db(), module, key, value, expected)
+}
+
+fn handle_settings_keys(server: &IpcServer, args: &Args) -> Result<serde_json::Value, String> {
+    let module = args.get("module").and_then(|v| v.as_str()).ok_or("settings: {module} is required")?;
+    crate::module_settings::keys_of(&server.app, server.db.raw_db(), module)
 }
 
 fn handle_get_disabled_modules(

@@ -11,6 +11,44 @@ mod hwid;
 mod settings;
 mod subscription;
 use settings::{store, SettingsStore, Snapshot, VpnSettings};
+use unidtk_api::settings::{ModuleSettings, SettingKind, SettingSpec};
+
+/// What the VPN shows in the menu's declared fields (`r[modules.settings-contract]`); the
+/// subscription and the home server are still its own pane's.
+const DECLARED_SETTINGS: &[SettingSpec] = &[SettingSpec {
+    key: "auto_connect",
+    label: "Подключаться при запуске",
+    summary: "VPN включится сам, когда запустится UniDTK",
+    kind: SettingKind::Switch { default: false },
+    secret: false,
+}];
+
+/// The kernel's keeper of [`DECLARED_SETTINGS`], from the module's context.
+static DECLARED: std::sync::OnceLock<Arc<dyn ModuleSettings>> = std::sync::OnceLock::new();
+
+/// Connect at start-up; off when the contract cannot be read.
+fn auto_connect_on() -> bool {
+    DECLARED.get().and_then(|declared| declared.get("auto_connect").ok()).is_some_and(|stored| stored.value == true)
+}
+
+/// Moves `auto_connect` from the old record into the settings contract, once (a stored
+/// version means it moved, or the person has set it since). Never stops start-up: an
+/// error is logged and the switch reads as off.
+fn migrate_auto_connect(db: &dyn unidtk_api::ModuleDb, declared: &dyn ModuleSettings) {
+    let Ok(Some(bytes)) = db.kv_get("settings") else { return };
+    let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return };
+    if record["auto_connect"] != true {
+        return;
+    }
+    match declared.get("auto_connect") {
+        Ok(current) if current.version == 0 => match declared.set("auto_connect", json!(true), Some(0)) {
+            Ok(_) => unidtk_api::log("vpn: auto_connect moved into the settings contract"),
+            Err(error) => unidtk_api::log(format!("vpn: auto_connect not moved: {error}")),
+        },
+        Ok(_) => {}
+        Err(error) => unidtk_api::log(format!("vpn: auto_connect not moved: {error}")),
+    }
+}
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -100,7 +138,6 @@ fn stop_done_path() -> std::path::PathBuf {
 
 fn settings_status(settings: VpnSettings) -> VpnSettingsStatus {
     VpnSettingsStatus {
-        auto_connect: settings.auto_connect,
         default_tag: settings.default_tag,
         last_tag: settings.last_tag,
         subscription_url: settings.subscription_url,
@@ -120,7 +157,6 @@ unidtk_api::module_commands! {
         read_only(long) "vpn_list_servers" "VPN servers" |this, subscription_revision: Option<u64>| list_servers(&this.runtime, subscription_revision);
         read_ui "vpn_subscription_notes" "The provider's notes beside its servers, and this machine's device id for it" |this| Ok(subscription_notes(&this.runtime));
         write(long) "vpn_refresh_servers" "Fetch the subscription again" |this| refresh_servers(&this.runtime);
-        write "vpn_set_auto_connect" "Toggle connect-on-startup" |this, enabled: bool| set_auto_connect(enabled);
         write "vpn_set_subscription_url" "Set the subscription URL" |this, url: String| set_subscription_url(url);
         write "vpn_set_home_server_config" "Set the home server" |this, config: HomeServerConfig| set_home_server_config(config);
         write(long) "vpn_connect" "Connect to a server (or the selected one)" |this, tag: Option<String>, subscription_revision: Option<u64>| {
@@ -144,12 +180,6 @@ fn load_settings() -> Result<VpnSettings, String> {
 
 pub fn settings() -> Result<VpnSettingsStatus, String> {
     Ok(settings_status(load_settings()?))
-}
-
-pub fn set_auto_connect(enabled: bool) -> Result<VpnSettingsStatus, String> {
-    let settings = store()?.update(|settings| settings.auto_connect = enabled)?;
-    unidtk_api::log(format!("vpn: auto-connect set to {enabled}"));
-    Ok(settings_status(settings))
 }
 
 pub fn set_subscription_url(url: String) -> Result<VpnSettingsStatus, String> {
@@ -251,7 +281,6 @@ pub struct VpnStatus {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VpnSettingsStatus {
-    pub auto_connect: bool,
     pub default_tag: String,
     pub last_tag: Option<String>,
     pub subscription_url: String,
@@ -2369,7 +2398,7 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
         proxy_error: inner.proxy_error.clone(),
         ip_unverified: inner.ip_unverified,
         error: inner.last_error.clone(),
-        auto_connect: settings.as_ref().is_some_and(|snapshot| snapshot.settings.auto_connect),
+        auto_connect: auto_connect_on(),
         subscription_revision,
         skipped_servers: if subscription_revision == Some(inner.servers_revision) {
             inner.skipped_servers
@@ -2658,12 +2687,12 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
         };
         unidtk_api::log(format!(
             "vpn: auto-connect settings enabled={} sub_url_empty={} default_tag={:?} last_tag={:?}",
-            settings.auto_connect,
+            auto_connect_on(),
             settings.subscription_url.is_empty(),
             settings.default_tag,
             settings.last_tag
         ));
-        if !settings.auto_connect {
+        if !auto_connect_on() {
             unidtk_api::log("vpn: auto-connect skipped, disabled by last manual disconnect");
             return;
         }
@@ -2681,10 +2710,10 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
         }
         MANUAL_DISCONNECT.store(false, std::sync::atomic::Ordering::SeqCst);
         // Re-checked before each step: the AUTO toggle being switched off
-        // (set_auto_connect) or a manual disconnect during an in-flight try must
+        // (the `auto_connect` setting) or a manual disconnect during an in-flight try must
         // both stop further retries instead of reconnecting behind the user.
         let cancelled = |when: &str| {
-            if !load_settings().is_ok_and(|settings| settings.auto_connect) {
+            if !auto_connect_on() {
                 unidtk_api::log(format!("vpn: auto-connect aborted, disabled {when}"));
                 return true;
             }
@@ -2816,6 +2845,14 @@ impl unidtk_api::Module for VpnModule {
         }
 
         settings::bind(ctx.db());
+        // Before the switched-off gate, so a disabled module's setting moves too.
+        match ctx.settings() {
+            Ok(declared) => {
+                migrate_auto_connect(ctx.db().as_ref(), declared.as_ref());
+                let _ = DECLARED.set(declared);
+            }
+            Err(error) => unidtk_api::log(format!("vpn: {error}")),
+        }
         if !ctx.enabled() {
             unidtk_api::log("vpn: disabled — auto-connect not started");
             return Ok(());
@@ -2835,6 +2872,10 @@ impl unidtk_api::Module for VpnModule {
     /// The connection state, not a log of transitions.
     fn state_events(&self) -> &'static [&'static str] {
         &["vpn"]
+    }
+
+    fn settings(&self) -> &'static [SettingSpec] {
+        DECLARED_SETTINGS
     }
 
     /// A non-zero budget waits for the elevated helper to confirm that sing-box

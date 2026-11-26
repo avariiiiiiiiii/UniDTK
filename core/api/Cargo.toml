@@ -15,6 +15,7 @@ name = "unidtk_api"
 path = "src/lib.rs"
 
 [dependencies]
-serde = "1"
+# `derive`: the settings declarations (`settings.rs`) serialise for the menu.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"

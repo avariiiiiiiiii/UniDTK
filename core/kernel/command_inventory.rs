@@ -97,6 +97,20 @@ pub const SET_DESKTOP_INPUT_FOCUS: CommandSpec = CommandSpec::write(
     "Report focused text-input state from the active desktop host",
     "{focused}",
 );
+/// The settings contract (`r[modules.settings-contract]`): what each module declares, its
+/// values (on the interface door only: a value can be a credential), a write, and on the
+/// socket what is stored without a value.
+pub const SETTINGS_SPECS: CommandSpec =
+    CommandSpec::read_ui("settings_specs", "Every module's declared settings", "");
+pub const SETTINGS_GET: CommandSpec =
+    CommandSpec::read_ui("settings_get", "One module's settings with their values and versions", "{module}");
+pub const SETTINGS_SET: CommandSpec = CommandSpec::write(
+    "settings_set",
+    "Store one setting, checked by its declaration and its module, refused when the version moved",
+    "{module, key, value, expectedVersion?}",
+);
+pub const SETTINGS_KEYS: CommandSpec =
+    CommandSpec::read_only("settings_keys", "One module's settings: declarations, versions, whether stored; no values", "{module}");
 pub const HOST_PING: CommandSpec = CommandSpec::read_only_cli(
     "host_ping",
     "Read native desktop host status via kernel proxy",
@@ -195,6 +209,10 @@ pub static ALL: &[&CommandSpec] = &[
     &DESK_LAYOUT_GET,
     &HOST_REGISTER,
     &SET_DESKTOP_INPUT_FOCUS,
+    &SETTINGS_SPECS,
+    &SETTINGS_GET,
+    &SETTINGS_SET,
+    &SETTINGS_KEYS,
     &HOST_PING,
     &HOST_TREE,
     &HOST_FRAMES,

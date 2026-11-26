@@ -1059,7 +1059,7 @@ async function renderVpn() {
         <span class="menu-row-sub">VPN включится сам, когда запустится UniDTK</span>
       </span>
       <label class="menu-switch">
-        <input type="checkbox" id="vpnAutoConnect" ${settings.auto_connect ? "checked" : ""} aria-label="Подключаться при запуске">
+        <input type="checkbox" id="vpnAutoConnect" ${status?.auto_connect ? "checked" : ""} aria-label="Подключаться при запуске">
         <span class="menu-slider" aria-hidden="true"></span>
       </label>
     </div>
@@ -1106,7 +1106,7 @@ async function renderVpn() {
   pane.querySelector("#vpnAutoConnect").addEventListener("change", async (e) => {
     const toggle = e.target;
     try {
-      await invoke("vpn_set_auto_connect", { enabled: toggle.checked });
+      await invoke("settings_set", { module: "vpn", key: "auto_connect", value: toggle.checked });
     } catch (err) {
       toggle.checked = !toggle.checked;
       showToast(`Автоподключение не сохранено: ${err?.message || err}`, { tone: "error" });

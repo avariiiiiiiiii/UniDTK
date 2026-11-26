@@ -59,7 +59,7 @@ fn concurrent_writes_merge_on_the_latest_settings() {
     std::thread::scope(|scope| {
         let first = scope.spawn(|| {
             store.update(|settings| {
-                settings.auto_connect = true;
+                settings.default_tag = "picked".into();
                 entered.wait();
                 release.wait();
             })
@@ -74,7 +74,7 @@ fn concurrent_writes_merge_on_the_latest_settings() {
         assert!(lock_is_held);
     });
     let saved = store.read().unwrap();
-    assert!(saved.auto_connect);
+    assert_eq!(saved.default_tag, "picked");
     assert_eq!(saved.last_tag.as_deref(), Some("chosen"));
 }
 
@@ -82,13 +82,13 @@ fn concurrent_writes_merge_on_the_latest_settings() {
 fn failed_writes_preserve_settings_and_the_subscription_revision() {
     let dir = LegacyDir::new();
     let db = Arc::new(InMemoryModuleDb::new());
-    let original = br#"{"subscription_url":"https://old.example/","auto_connect":true}"#;
+    let original = br#"{"subscription_url":"https://old.example/","default_tag":"kept"}"#;
     db.kv_set(SETTINGS, original).unwrap();
     db.kv_set(CACHE, b"previous cache").unwrap();
     let store = SettingsStore::new(Arc::new(RejectWrites(db.clone())), dir.0.clone());
 
     assert!(store
-        .update(|settings| settings.auto_connect = false)
+        .update(|settings| settings.default_tag = "changed".into())
         .is_err());
     assert!(store
         .update(|settings| settings.subscription_url = "https://new.example/".into())
@@ -183,17 +183,17 @@ fn legacy_settings_are_removed_only_after_a_successful_import() {
     let dir = LegacyDir::new();
     let db = Arc::new(InMemoryModuleDb::new());
     let store = SettingsStore::new(db.clone(), dir.0.clone());
-    assert!(!store.read().unwrap().auto_connect);
+    assert!(store.read().unwrap().default_tag.is_empty());
     assert!(db.kv_get(SETTINGS).unwrap().is_none());
 
-    let legacy = "\u{feff}{\"auto_connect\":true,\"home_server\":{}}";
+    let legacy = "\u{feff}{\"default_tag\":\"legacy\",\"home_server\":{}}";
     fs::write(dir.settings_path(), legacy).unwrap();
     let read_only = SettingsStore::new(Arc::new(RejectWrites(db.clone())), dir.0.clone());
     assert!(read_only.read().is_err());
     assert_eq!(fs::read_to_string(dir.settings_path()).unwrap(), legacy);
 
     let imported = store.read().unwrap();
-    assert!(imported.auto_connect);
+    assert_eq!(imported.default_tag, "legacy");
     assert_eq!(imported.home_server.port, 443);
     assert!(db.kv_get(SETTINGS).unwrap().is_some());
     assert!(!dir.settings_path().exists());
@@ -206,7 +206,7 @@ fn malformed_storage_cannot_be_overwritten_with_defaults_or_legacy_data() {
     let store = SettingsStore::new(db.clone(), dir.0.clone());
     fs::write(dir.settings_path(), "not JSON").unwrap();
     assert!(store
-        .update(|settings| settings.auto_connect = true)
+        .update(|settings| settings.default_tag = "x".into())
         .is_err());
     assert_eq!(fs::read_to_string(dir.settings_path()).unwrap(), "not JSON");
     assert!(db.kv_get(SETTINGS).unwrap().is_none());
@@ -215,7 +215,7 @@ fn malformed_storage_cannot_be_overwritten_with_defaults_or_legacy_data() {
     fs::write(dir.settings_path(), "{}").unwrap();
     assert!(store.read().is_err());
     assert!(store
-        .update(|settings| settings.auto_connect = true)
+        .update(|settings| settings.default_tag = "x".into())
         .is_err());
     assert_eq!(
         db.kv_get(SETTINGS).unwrap().as_deref(),

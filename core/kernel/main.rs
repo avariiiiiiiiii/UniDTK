@@ -19,6 +19,7 @@ mod explorer_migration;
 mod log_store;
 mod logging;
 mod module_db;
+mod module_settings;
 mod module_store;
 mod panic_hook;
 pub mod registry;
@@ -214,16 +215,23 @@ pub(crate) fn should_prevent_implicit_exit(exit_code: Option<i32>, shutting_down
 /// Module context: its own database slice + AppHandle as host state.
 /// If redb failed to open, the module receives an empty stub; modules that do not
 /// need the database must still start in degraded mode.
-fn module_context(app: &tauri::AppHandle, id: &str, enabled: bool) -> unidtk_api::ModuleContext {
-    let module_id = unidtk_api::ModuleId::new(id);
-    let db: Arc<dyn unidtk_api::ModuleDb> = match shared_db(app) {
+/// Its settings (`r[modules.settings-contract]`) come from the same database; without
+/// one the module gets none and its `settings()` reports why.
+fn module_context(app: &tauri::AppHandle, module: &Arc<dyn unidtk_api::Module>, enabled: bool) -> unidtk_api::ModuleContext {
+    let module_id = unidtk_api::ModuleId::new(module.id());
+    let shared = shared_db(app);
+    let db: Arc<dyn unidtk_api::ModuleDb> = match &shared {
         Some(shared) => Arc::new(crate::module_db::RedbModuleDb::new(shared.raw_db(), &module_id)),
         None => Arc::new(NoopModuleDb),
     };
-    unidtk_api::ModuleContext::new(module_id, db)
+    let context = unidtk_api::ModuleContext::new(module_id, db)
         .with_host(Arc::new(app.clone()))
         .with_store_factory(store_factory())
-        .with_enabled(enabled)
+        .with_enabled(enabled);
+    match shared {
+        Some(shared) => context.with_settings(Arc::new(crate::module_settings::KernelSettings::new(shared.raw_db(), module))),
+        None => context,
+    }
 }
 
 /// Modules the user has disabled (from redb `disabled_modules`). Default `[]`.
@@ -565,7 +573,7 @@ pub(crate) fn apply_module_enabled(app: &tauri::AppHandle, db: &UniDtkDatabase, 
         log_line(format!("module {id}: the stored disabled list is damaged ({why}); starting a new one"));
     })?;
     if enabled {
-        module.resume(module_context(app, id, true))?;
+        module.resume(module_context(app, module, true))?;
     } else {
         module.suspend()?;
     }
@@ -660,6 +668,36 @@ fn hotkeys_list() -> Result<Vec<hotkeys::HotkeyDefinition>, String> {
 #[tauri::command(async)]
 fn hotkey_toggle(id: String, enabled: bool) -> Result<(), String> {
     hotkeys::toggle_hotkey(&id, enabled)
+}
+
+// The settings contract's commands for the page (`r[modules.settings-contract]`).
+#[tauri::command(async)]
+fn settings_specs(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    module_settings::specs_of_all(&app)
+}
+
+#[tauri::command(async)]
+fn settings_get(app: tauri::AppHandle, module: String) -> Result<serde_json::Value, String> {
+    let db = shared_db(&app).ok_or("database is not open")?;
+    module_settings::get_all(&app, db.raw_db(), &module)
+}
+
+#[tauri::command(async)]
+fn settings_set(
+    app: tauri::AppHandle,
+    module: String,
+    key: String,
+    value: serde_json::Value,
+    expected_version: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let db = shared_db(&app).ok_or("database is not open")?;
+    module_settings::set_one(&app, db.raw_db(), &module, &key, value, expected_version)
+}
+
+#[tauri::command(async)]
+fn settings_keys(app: tauri::AppHandle, module: String) -> Result<serde_json::Value, String> {
+    let db = shared_db(&app).ok_or("database is not open")?;
+    module_settings::keys_of(&app, db.raw_db(), &module)
 }
 
 #[tauri::command(async)]
@@ -1597,6 +1635,11 @@ fn main() {
             hotkeys_list,
             hotkey_toggle,
             set_desktop_input_focus,
+            // the settings contract
+            settings_specs,
+            settings_get,
+            settings_set,
+            settings_keys,
             ]);
             move |invoke: tauri::ipc::Invoke| invoke_module_command(invoke).unwrap_or_else(|invoke| kernel_commands(invoke))
         })
@@ -1745,7 +1788,7 @@ fn main() {
             // stays off the wallpaper attach; until then its commands answer "not ready".
             for module in app.state::<registry::Registry>().in_start_order() {
                 let id = module.id();
-                module.init(module_context(app.handle(), id, !disabled_mods.contains(id)))?;
+                module.init(module_context(app.handle(), module, !disabled_mods.contains(id)))?;
                 log_line(format!("setup: module {id} started"));
             }
 
