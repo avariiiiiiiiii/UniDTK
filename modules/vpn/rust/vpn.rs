@@ -115,23 +115,23 @@ unidtk_api::module_commands! {
     impl VpnModule {
         read_only "vpn_status" "VPN runtime status" |this| Ok(status(&this.runtime));
         read_only "vpn_settings" "VPN settings" |this| settings();
-        read_only "vpn_list_servers" "VPN servers" |this, subscription_revision: Option<u64>| list_servers(&this.runtime, subscription_revision);
-        write "vpn_refresh_servers" "Fetch the subscription again" |this| refresh_servers(&this.runtime);
+        read_only(long) "vpn_list_servers" "VPN servers" |this, subscription_revision: Option<u64>| list_servers(&this.runtime, subscription_revision);
+        write(long) "vpn_refresh_servers" "Fetch the subscription again" |this| refresh_servers(&this.runtime);
         write "vpn_set_auto_connect" "Toggle connect-on-startup" |this, enabled: bool| set_auto_connect(enabled);
         write "vpn_set_subscription_url" "Set the subscription URL" |this, url: String| set_subscription_url(url);
         write "vpn_set_home_server_config" "Set the home server" |this, config: HomeServerConfig| set_home_server_config(config);
-        write "vpn_connect" "Connect to a server (or the selected one)" |this, tag: Option<String>, subscription_revision: Option<u64>| {
+        write(long) "vpn_connect" "Connect to a server (or the selected one)" |this, tag: Option<String>, subscription_revision: Option<u64>| {
             unidtk_api::log(format!("vpn: command connect tag={tag:?}"));
             connect(&this.runtime, tag, subscription_revision)
         };
-        write "vpn_disconnect" "Drop the current connection" |this| {
+        write(long) "vpn_disconnect" "Drop the current connection" |this| {
             disconnect(&this.runtime);
             Ok(())
         };
         write "vpn_select_server" "Select the server to connect to" |this, tag: String| select_server(&this.runtime, tag);
         // Not a read, though it answers with measurements: it takes a global
         // in-progress guard and stores the results.
-        write "vpn_ping_all" "Measure latency of every server" |this, subscription_revision: Option<u64>| ping_all(&this.runtime, subscription_revision);
+        write(long) "vpn_ping_all" "Measure latency of every server" |this, subscription_revision: Option<u64>| ping_all(&this.runtime, subscription_revision);
     }
 }
 
@@ -765,20 +765,22 @@ fn resolve_ipv4(host: &str) -> Result<String, String> {
     let target = host.to_string();
     std::thread::spawn(move || {
         use std::net::ToSocketAddrs;
-        let answer = (target.as_str(), 0)
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut addresses| addresses.find_map(|address| match address.ip() {
+        // A name that does not resolve and a name with only IPv6 answers are different
+        // faults; reading both as "no IPv4" called a deleted server IPv6-only.
+        let answer = (target.as_str(), 0).to_socket_addrs().map(|mut addresses| {
+            addresses.find_map(|address| match address.ip() {
                 std::net::IpAddr::V4(v4) => Some(v4.to_string()),
                 std::net::IpAddr::V6(_) => None,
-            }));
+            })
+        });
         let _ = tx.send(answer);
     });
     match rx.recv_timeout(RESOLVE_TIMEOUT) {
-        Ok(Some(address)) => Ok(address),
-        Ok(None) => Err(format!(
+        Ok(Ok(Some(address))) => Ok(address),
+        Ok(Ok(None)) => Err(format!(
             "the VPN server '{host}' has no IPv4 address; a tunnel over IPv6 only is not supported"
         )),
+        Ok(Err(error)) => Err(format!("the VPN server '{host}' does not resolve: {error}")),
         Err(_) => Err(format!(
             "could not resolve the VPN server '{host}' within {} s; check the network or the subscription",
             RESOLVE_TIMEOUT.as_secs()
@@ -787,19 +789,19 @@ fn resolve_ipv4(host: &str) -> Result<String, String> {
 }
 
 /// Every server's dial literal for one ping run: one lookup per distinct host, so
-/// `vpn_ping_all` does not pay the timeout once per server. A host that does not
-/// resolve keeps its name, and the ping then reports it as dead on its own.
-fn resolve_dials(servers: &[VpnServer]) -> std::collections::HashMap<String, String> {
+/// `vpn_ping_all` does not pay the timeout once per server. A host that cannot be
+/// dialled (no name, or IPv6 only) keeps its reason, which its row reports.
+fn resolve_dials(servers: &[VpnServer]) -> std::collections::HashMap<String, Result<String, String>> {
     use std::collections::HashMap;
     let mut dials = HashMap::new();
     for server in servers {
         if dials.contains_key(&server.host) {
             continue;
         }
-        let dial = resolve_ipv4(&server.host).unwrap_or_else(|error| {
-            unidtk_api::log(format!("vpn: ping uses the hostname for '{}': {error}", server.host));
-            server.host.clone()
-        });
+        let dial = resolve_ipv4(&server.host);
+        if let Err(error) = &dial {
+            unidtk_api::log(format!("vpn: ping cannot dial '{}': {error}", server.host));
+        }
         dials.insert(server.host.clone(), dial);
     }
     dials
@@ -1033,6 +1035,24 @@ static MANUAL_DISCONNECT: std::sync::atomic::AtomicBool =
 // traffic over to the VPN TUN (TDLib "no proxy") while the VPN is up.
 static CONNECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// One process-lifecycle operation at a time: a connect's bring-up, a disconnect's
+// stop, the watchdog's cleanup, a server check and a shutdown. They share the stop
+// task's done-marker, and the helper's stop kills every bundled sing-box, so two
+// overlapping ones failed each other: a stop during a server check killed the check's
+// core, and a disconnect between a connect's epoch check and its start left a tunnel
+// up under an "Off" switch. The UI door runs these commands off its thread
+// (r[ipc.long-commands-off-thread]), so waiting here holds no other command.
+static LIFECYCLE: Mutex<()> = Mutex::new(());
+
+fn lifecycle() -> std::sync::MutexGuard<'static, ()> {
+    LIFECYCLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+// One subscription fetch at a time. The fetch runs without the runtime lock, so
+// `vpn_status` never waits on the network; this keeps two callers that both found an
+// empty list from fetching twice.
+static FETCH: Mutex<()> = Mutex::new(());
+
 /// True while the wallpaper VPN tunnel is considered up.
 pub fn is_connected() -> bool {
     CONNECTED.load(std::sync::atomic::Ordering::SeqCst)
@@ -1182,14 +1202,13 @@ fn log_network_snapshot(label: &str) {
 // SOCKS port or TUN never came up) right next to everything else instead of
 // requiring a manual trip into the data dir.
 fn log_tail_file(label: &str, path: &std::path::Path, max_lines: usize) {
-    match std::fs::read_to_string(path) {
+    match read_tail(path, TAIL_BYTES) {
         Ok(content) => {
             let lines: Vec<&str> = content.lines().collect();
             let start = lines.len().saturating_sub(max_lines);
             unidtk_api::log(format!(
-                "vpn: {label} log tail ({} of {} lines) [{}]",
+                "vpn: {label} log tail ({} lines) [{}]",
                 lines.len() - start,
-                lines.len(),
                 path.display()
             ));
             for line in &lines[start..] {
@@ -1201,6 +1220,25 @@ fn log_tail_file(label: &str, path: &std::path::Path, max_lines: usize) {
             path.display()
         )),
     }
+}
+
+/// How much of a core's log the tail reads: the whole file reached 15 MB, read into
+/// memory after every failed connect for its last 40 lines.
+const TAIL_BYTES: u64 = 64 * 1024;
+
+/// The last `bytes` of `path`, from the first whole line in them.
+fn read_tail(path: &std::path::Path, bytes: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(bytes)))?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+    let text = String::from_utf8_lossy(&buffer).into_owned();
+    Ok(match (len > bytes, text.split_once('\n')) {
+        (true, Some((_, rest))) => rest.to_string(),
+        _ => text,
+    })
 }
 
 // Dials the local sing-box SOCKS port directly instead of relying on the
@@ -1227,20 +1265,38 @@ fn socks_agent(timeout: Duration) -> Result<ureq::Agent, String> {
         .build())
 }
 
-fn probe_vpn_transport() -> Result<u32, String> {
-    // Probe IP-literal endpoints, NOT hostnames: DNS-over-tunnel may not have
-    // warmed up yet. Any HTTP response (even 4xx) proves the transport works.
-    // `1.1.1.1` and `8.8.8.8` both serve valid certs for their own IP, so
-    // TLS-by-IP succeeds. Single fast pass per address so a dead server caps
-    // total probe time at ~8s instead of dragging out connect().
+/// How long a fresh tunnel gets to carry one request before connect gives up on it.
+const PROBE_BUDGET: Duration = Duration::from_secs(10);
+
+/// One connect's whole bring-up: the old core's stop, the TUN, the SOCKS port and the
+/// probe share it, so a connect answers within it however its steps go. The host waits
+/// longer than this for `vpn_connect` (a server check may hold the lifecycle first).
+const CONNECT_BUDGET: Duration = Duration::from_secs(30);
+
+/// Whether the tunnel carries traffic, retried until `deadline`. Any HTTP response
+/// (even 4xx) proves the transport works. One pass over two IP literals used to decide
+/// it, and a cold tunnel fails exactly those (a TLS reset from 1.1.1.1 and 8.8.8.8 while
+/// a hostname's plain 204 answers), so the endpoints mix IP literals with hostnames
+/// (DNS-over-tunnel may not be warm yet) and plain HTTP with TLS, and the rounds repeat.
+fn probe_vpn_transport(deadline: Instant) -> Result<u32, String> {
     let agent = socks_agent(Duration::from_secs(4))?;
-    let endpoints = ["https://1.1.1.1/", "https://8.8.8.8/"];
+    let endpoints = [
+        "https://1.1.1.1/",
+        "http://cp.cloudflare.com/generate_204",
+        "http://1.1.1.1/cdn-cgi/trace",
+        "https://8.8.8.8/",
+        "http://www.gstatic.com/generate_204",
+    ];
     let mut last_error = None;
-    for url in endpoints {
-        unidtk_api::log(format!("vpn: probe http {url} start"));
+    for url in endpoints.iter().cycle() {
         let start = Instant::now();
+        let Some(timeout) = endpoint_timeout(deadline, start).map(|left| left.min(Duration::from_secs(4))) else {
+            break;
+        };
+        unidtk_api::log(format!("vpn: probe http {url} start"));
         match agent
             .get(url)
+            .timeout(timeout)
             .set("User-Agent", "shell-vpn-probe/1.0")
             .call()
         {
@@ -1259,6 +1315,8 @@ fn probe_vpn_transport() -> Result<u32, String> {
                 let error = error.to_string();
                 unidtk_api::log(format!("vpn: probe http {url} failed: {error}"));
                 last_error = Some(error);
+                // A refused or reset request returns at once; don't spin on it.
+                std::thread::sleep(Duration::from_millis(150));
             }
         }
     }
@@ -1365,14 +1423,12 @@ fn ensure_binaries_present() -> Result<(), String> {
     Ok(())
 }
 
-/// Outcome of a successful bring-up. The transport probe is "soft": the tunnel
-/// is considered up once the TUN interface exists, and a failed HTTP probe is
-/// surfaced as a warning rather than tearing the connection down. Same for
-/// the eventual `ip_unverified` signal derived from `pre_ip_handle`: IP
-/// mismatch is evidence, not a hard gate.
+/// Outcome of a successful bring-up: the tunnel carried a request. A tunnel whose probe
+/// never got an answer is refused, not reported as connected with a warning (the switch
+/// used to say "on" while nothing passed). The `ip_unverified` signal derived from
+/// `pre_ip_handle` stays evidence, not a hard gate.
 struct BringUpResult {
     latency_ms: Option<u32>,
-    probe_error: Option<String>,
     /// Started near the top of `bring_up()` (in parallel with stop/start), not
     /// yet joined. `connect()` joins it on its own detached post-commit
     /// thread so the lookup — and the fresh post-connect lookup it's compared
@@ -1484,8 +1540,18 @@ fn bring_up(
     settings: &VpnSettings,
     epoch: u64,
     dial: Result<String, String>,
+    deadline: Instant,
 ) -> Result<BringUpResult, String> {
     ensure_binaries_present()?;
+    let superseded = || CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch;
+    // A core this bring-up started is stopped again before it reports anything: the
+    // disconnect that superseded it may have run its own stop before the start.
+    let abandon = |message: &str| -> String {
+        unidtk_api::log(format!("vpn: {message}; stopping the core this connect started"));
+        let nonce = perform_stop();
+        let _ = wait_until_stopped(Duration::from_secs(5), nonce.as_deref());
+        message.to_string()
+    };
     unidtk_api::log(format!("vpn: bring_up tag={}", server.tag));
     unidtk_api::log(format!(
         "vpn: core log singbox={} exe={}",
@@ -1512,7 +1578,8 @@ fn bring_up(
     // Always start from a clean slate: stop any prior run and wait for it to
     // actually release the SOCKS port and TUN adapter before continuing.
     let stop_nonce = perform_stop();
-    if !wait_until_stopped(Duration::from_secs(10), stop_nonce.as_deref()) {
+    let stop_wait = deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(10));
+    if !wait_until_stopped(stop_wait, stop_nonce.as_deref()) {
         return Err("previous VPN processes did not shut down in time; try again".into());
     }
 
@@ -1589,6 +1656,9 @@ fn bring_up(
 
     let mut tun_ready = false;
     for attempt in 1..=20 {
+        if superseded() {
+            return Err(abandon("VPN was disconnected while connecting"));
+        }
         // The adapter must carry the address chosen for this connect: a leftover
         // `wallpaper-tun` from a dead core answers "connected" too, and the
         // config then could not have set its address.
@@ -1626,6 +1696,9 @@ fn bring_up(
     // to the tunnel through it, so make sure it is up before reporting success.
     let mut socks_ready = false;
     for attempt in 1..=20 {
+        if superseded() {
+            return Err(abandon("VPN was disconnected while connecting"));
+        }
         if port_is_open(SOCKS_PORT) {
             unidtk_api::log(format!(
                 "vpn: socks port {SOCKS_PORT} opened after {attempt} checks"
@@ -1645,16 +1718,21 @@ fn bring_up(
         return Err("sing-box did not open its local SOCKS port in time (see singbox.log)".into());
     }
 
-    let (latency_ms, probe_error) = match probe_vpn_transport() {
+    let probe_deadline = deadline.min(Instant::now() + PROBE_BUDGET);
+    let latency_ms = match probe_vpn_transport(probe_deadline) {
         Ok(latency_ms) => {
             unidtk_api::log(format!("vpn: proxy probe OK latency={latency_ms}ms"));
-            (Some(latency_ms), None)
+            latency_ms
         }
         Err(error) => {
             unidtk_api::log(format!("vpn: proxy probe failed: {error}"));
-            (None, Some(error))
+            log_tail_file("singbox", &singbox_log_path(), 20);
+            return Err(abandon(&format!("the server carries no traffic: {error}")));
         }
     };
+    if superseded() {
+        return Err(abandon("VPN was disconnected while connecting"));
+    }
 
     // Off the hot path, on a detached thread: status()'s watchdog polls the
     // SOCKS port again within ~200ms of connect() committing, so anything
@@ -1673,8 +1751,7 @@ fn bring_up(
 
     unidtk_api::log("vpn: bring_up connected OK");
     Ok(BringUpResult {
-        latency_ms,
-        probe_error,
+        latency_ms: Some(latency_ms),
         pre_ip_handle,
     })
 }
@@ -1729,7 +1806,7 @@ fn find_free_port_range(count: usize) -> u16 {
 fn build_multi_ping_config(
     servers: &[VpnServer],
     start_port: u16,
-    dials: &std::collections::HashMap<String, String>,
+    dials: &std::collections::HashMap<String, Result<String, String>>,
 ) -> serde_json::Value {
     let mut inbounds = Vec::new();
     let mut outbounds = Vec::new();
@@ -1750,7 +1827,10 @@ fn build_multi_ping_config(
         // Same literal as a connect uses: the throwaway config has no DNS block,
         // so a hostname here would be resolved by the system and could disagree
         // with what the real tunnel dials.
-        let dial = dials.get(&server.host).map_or(server.host.as_str(), String::as_str);
+        let dial = match dials.get(&server.host) {
+            Some(Ok(literal)) => literal.as_str(),
+            _ => server.host.as_str(),
+        };
         outbounds.push(build_singbox_outbound(server, &out_tag, dial));
 
         rules.push(json!({
@@ -1772,17 +1852,27 @@ fn build_multi_ping_config(
     })
 }
 
-fn probe_proxy_get(port: u16, timeout: Duration) -> Result<u32, String> {
+/// One server's whole check, every endpoint included. Endpoints used to get 3.5 s to
+/// connect plus 3.5 s to read each, six in a row, so a dead server cost ~20 s and the
+/// whole check outlived the host's wait (the picker stayed empty).
+const SERVER_CHECK_BUDGET: Duration = Duration::from_secs(5);
+
+/// The endpoint request's own share of `budget` left at `now`: none once less than a
+/// useful slice remains.
+fn endpoint_timeout(deadline: Instant, now: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|left| *left >= Duration::from_millis(200))
+}
+
+fn probe_proxy_get(port: u16, budget: Duration) -> Result<u32, String> {
     let proxy = ureq::Proxy::new(format!("socks5://127.0.0.1:{port}"))
         .map_err(|e| format!("proxy config error: {e}"))?;
-    let agent = ureq::AgentBuilder::new()
-        .proxy(proxy)
-        .timeout_connect(timeout)
-        .timeout_read(timeout)
-        .build();
+    let agent = ureq::AgentBuilder::new().proxy(proxy).build();
 
     // Multiple endpoints to maximize success rate across different server configs.
-    // Some servers block certain endpoints, so we try several in sequence.
+    // Some servers block certain endpoints, so we try several in sequence, within one
+    // budget for the server.
     let endpoints = [
         "http://www.gstatic.com/generate_204",
         "http://cp.cloudflare.com/generate_204",
@@ -1792,11 +1882,17 @@ fn probe_proxy_get(port: u16, timeout: Duration) -> Result<u32, String> {
         "http://captive.apple.com/hotspot-detect.html",
     ];
 
+    let deadline = Instant::now() + budget;
     let mut last_error = String::new();
     for url in endpoints {
         let req_start = Instant::now();
+        let Some(timeout) = endpoint_timeout(deadline, req_start) else {
+            last_error = format!("no answer within {} s ({last_error})", budget.as_secs());
+            break;
+        };
         match agent
             .get(url)
+            .timeout(timeout)
             .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
             .call()
         {
@@ -1831,6 +1927,39 @@ fn probe_proxy_get(port: u16, timeout: Duration) -> Result<u32, String> {
 
 static PING_IN_PROGRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Puts a child the kernel itself starts (the server check's sing-box) into a job that
+/// closes with the kernel: its `Drop` guard does not run when the process is killed or
+/// exits, and an orphaned core kept its ports and ~70 MB until the next stop's sweep.
+#[cfg(windows)]
+fn dies_with_kernel(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    // The job's handle stays open for the life of the process; the OS closes it on exit.
+    static JOB: std::sync::OnceLock<Option<isize>> = std::sync::OnceLock::new();
+    let job = JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(None, windows::core::PCWSTR::null()).ok()?;
+        let mut limit = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limit as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .ok()?;
+        Some(job.0 as isize)
+    });
+    if let Some(job) = job {
+        if let Err(error) = unsafe { AssignProcessToJobObject(HANDLE(*job as _), HANDLE(child.as_raw_handle())) } {
+            unidtk_api::log(format!("vpn: the check's core is not tied to the kernel: {error}"));
+        }
+    }
+}
+
 pub fn ping_all(
     runtime: &VpnRuntime,
     subscription_revision: Option<u64>,
@@ -1855,13 +1984,13 @@ pub fn ping_all(
     let _guard = PingGuard;
 
     let settings_store = store()?;
-    let (servers, revision) = {
-        let mut inner = runtime.inner.lock().unwrap();
-        let snapshot = settings_store.snapshot(subscription_revision)?;
-        ensure_binaries_present()?;
-        ensure_servers(&mut inner, settings_store, &snapshot)?;
-        (inner.servers.clone(), snapshot.revision)
-    };
+    let snapshot = settings_store.snapshot(subscription_revision)?;
+    ensure_binaries_present()?;
+    ensure_servers(runtime, settings_store, &snapshot)?;
+    let (servers, revision) = (runtime.inner.lock().unwrap().servers.clone(), snapshot.revision);
+    // A stop now would kill this check's sing-box with the tunnel's (the helper sweeps
+    // every bundled core), so the check waits its turn with connects and disconnects.
+    let _lifecycle = lifecycle();
     if servers.is_empty() {
         return Err("no servers to ping".into());
     }
@@ -1888,7 +2017,10 @@ pub fn ping_all(
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
     {
-        Ok(child) => child,
+        Ok(child) => {
+            dies_with_kernel(&child);
+            child
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&cfg_path);
             return Err(format!("spawn sing-box for ping failed: {e}"));
@@ -1947,9 +2079,15 @@ pub fn ping_all(
                         break;
                     }
                     let port = base_port + i as u16;
+                    // A server whose name cannot be dialled is not probed: its reason is
+                    // the answer, and probing it only burned the budget.
+                    let unreachable = match dials.get(&servers[i].host) {
+                        Some(Err(reason)) => Some(reason.clone()),
+                        _ => None,
+                    };
                     let mut r = None;
-                    if port_is_open(port) {
-                        if let Ok(latency_ms) = probe_proxy_get(port, Duration::from_millis(3500)) {
+                    if unreachable.is_none() && port_is_open(port) {
+                        if let Ok(latency_ms) = probe_proxy_get(port, SERVER_CHECK_BUDGET) {
                             r = Some(VpnPingResult {
                                 tag: servers[i].tag.clone(),
                                 latency_ms: Some(latency_ms),
@@ -1964,7 +2102,7 @@ pub fn ping_all(
                             tag: servers[i].tag.clone(),
                             latency_ms: None,
                             ok: false,
-                            error: Some("Proxy probe failed".to_string()),
+                            error: Some(unreachable.unwrap_or_else(|| "Proxy probe failed".to_string())),
                         });
                     }
                     if let Some(ref res) = r {
@@ -2020,64 +2158,81 @@ pub fn list_servers(
     runtime: &VpnRuntime,
     subscription_revision: Option<u64>,
 ) -> Result<Vec<VpnServer>, String> {
-    let mut inner = runtime.inner.lock().unwrap();
     let settings_store = store()?;
     let snapshot = settings_store.snapshot(subscription_revision)?;
-    ensure_servers(&mut inner, settings_store, &snapshot)?;
+    ensure_servers(runtime, settings_store, &snapshot)?;
+    let inner = runtime.inner.lock().unwrap();
     settings_store.with_current_subscription(snapshot.revision, || Ok(inner.servers.clone()))
 }
 
 pub fn refresh_servers(runtime: &VpnRuntime) -> Result<Vec<VpnServer>, String> {
-    let mut inner = runtime.inner.lock().unwrap();
     let settings_store = store()?;
     let snapshot = settings_store.snapshot(None)?;
-    inner.use_subscription(snapshot.revision);
-    refresh_servers_locked(&mut inner, settings_store, &snapshot)?;
-    Ok(inner.servers.clone())
+    runtime.inner.lock().unwrap().use_subscription(snapshot.revision);
+    fetch_into(runtime, settings_store, &snapshot, true)?;
+    Ok(runtime.inner.lock().unwrap().servers.clone())
 }
 
-fn ensure_servers(inner: &mut RuntimeInner, settings_store: &SettingsStore, snapshot: &Snapshot) -> Result<(), String> {
+fn ensure_servers(runtime: &VpnRuntime, settings_store: &SettingsStore, snapshot: &Snapshot) -> Result<(), String> {
+    let mut inner = runtime.inner.lock().unwrap();
     inner.use_subscription(snapshot.revision);
-    if inner.servers.is_empty() {
-        refresh_servers_locked(inner, settings_store, snapshot)?;
+    if !inner.servers.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    drop(inner);
+    fetch_into(runtime, settings_store, snapshot, false)
 }
 
-fn refresh_servers_locked(inner: &mut RuntimeInner, settings_store: &SettingsStore, snapshot: &Snapshot) -> Result<(), String> {
+/// Fetches the subscription and publishes it for `snapshot`'s revision. The network
+/// part holds neither the runtime lock nor the settings lock: a status poll during a
+/// 15-second fetch answers at once. `force` fetches even when another caller filled
+/// the list while this one waited for [`FETCH`].
+fn fetch_into(runtime: &VpnRuntime, settings_store: &SettingsStore, snapshot: &Snapshot, force: bool) -> Result<(), String> {
     let url = &snapshot.settings.subscription_url;
     if url.is_empty() {
         return Err("VPN subscription URL is not configured".into());
     }
-    // Network I/O runs outside the settings lock. Publication and fallback use the same revision.
-    let fetched = fetch_servers(url);
-    settings_store.with_current_subscription(snapshot.revision, || match fetched {
-        Ok((servers, skipped)) => {
-            unidtk_api::log(format!("vpn: fetched {} servers, {skipped} entries skipped", servers.len()));
-            if let Err(error) = settings_store.save_servers_cache(&servers) {
-                unidtk_api::log(format!("vpn: could not cache refreshed servers: {error}"));
-            }
-            inner.servers = servers;
-            inner.skipped_servers = skipped;
-            Ok(())
+    let _fetch = FETCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !force {
+        let inner = runtime.inner.lock().unwrap();
+        if inner.servers_revision == snapshot.revision && !inner.servers.is_empty() {
+            return Ok(());
         }
-        Err(e) => {
-            unidtk_api::log(format!("vpn: fetch_servers failed: {e}"));
-            // A failed fetch can use the server list saved for this subscription.
-            if !inner.servers.is_empty() {
-                unidtk_api::log("vpn: keeping in-memory servers after failed refresh");
-                return Ok(());
+    }
+    let fetched = fetch_servers(url);
+    let mut inner = runtime.inner.lock().unwrap();
+    // Publication and fallback use the revision the fetch was for, and only while it is
+    // still the current one (the guard refuses a fetch a newer subscription replaced).
+    settings_store.with_current_subscription(snapshot.revision, || {
+        inner.use_subscription(snapshot.revision);
+        match fetched {
+            Ok((servers, skipped)) => {
+                unidtk_api::log(format!("vpn: fetched {} servers, {skipped} entries skipped", servers.len()));
+                if let Err(error) = settings_store.save_servers_cache(&servers) {
+                    unidtk_api::log(format!("vpn: could not cache refreshed servers: {error}"));
+                }
+                inner.servers = servers;
+                inner.skipped_servers = skipped;
+                Ok(())
             }
-            let cached = settings_store.load_servers_cache();
-            if !cached.is_empty() {
-                unidtk_api::log(format!(
-                    "vpn: using {} cached servers after failed refresh",
-                    cached.len()
-                ));
-                inner.servers = cached;
-                return Ok(());
+            Err(e) => {
+                unidtk_api::log(format!("vpn: fetch_servers failed: {e}"));
+                // A failed fetch can use the server list saved for this subscription.
+                if !inner.servers.is_empty() {
+                    unidtk_api::log("vpn: keeping in-memory servers after failed refresh");
+                    return Ok(());
+                }
+                let cached = settings_store.load_servers_cache();
+                if !cached.is_empty() {
+                    unidtk_api::log(format!(
+                        "vpn: using {} cached servers after failed refresh",
+                        cached.len()
+                    ));
+                    inner.servers = cached;
+                    return Ok(());
+                }
+                Err(e)
             }
-            Err(e)
         }
     })
 }
@@ -2110,6 +2265,7 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
         // the elevated stop, unless a new connect has started in the meantime.
         let runtime_for_cleanup = runtime.clone();
         std::thread::spawn(move || {
+            let _lifecycle = lifecycle();
             let busy = {
                 let inner = runtime_for_cleanup.inner.lock().unwrap();
                 inner.connecting || inner.connected
@@ -2166,19 +2322,26 @@ pub fn connect(
     // Snapshot CONNECT_EPOCH so we can detect a concurrent disconnect/shutdown
     // that ran while bring_up was unlocked.
     let settings_store = store()?;
-    let (server, epoch, snapshot) = {
+    let already_connecting = || -> Result<(), String> {
+        unidtk_api::log("vpn: connect ignored: already connecting");
+        Err("VPN connection is already in progress".into())
+    };
+    if runtime.inner.lock().unwrap().connecting {
+        return already_connecting();
+    }
+    // The subscription fetch, when the list is empty, runs without the runtime lock.
+    let snapshot = settings_store.snapshot(subscription_revision)?;
+    ensure_servers(runtime, settings_store, &snapshot)?;
+    let (server, epoch) = {
         let mut inner = runtime.inner.lock().unwrap();
         if inner.connecting {
-            unidtk_api::log("vpn: connect ignored: already connecting");
-            return Err("VPN connection is already in progress".into());
+            return already_connecting();
         }
-        let snapshot = settings_store.snapshot(subscription_revision)?;
-        ensure_servers(&mut inner, settings_store, &snapshot)?;
         let Some((server, epoch)) = inner.reserve_connect(settings_store, &snapshot, tag.as_deref())?
         else {
             return Ok(());
         };
-        (server, epoch, snapshot)
+        (server, epoch)
     };
 
     // The dial literal is resolved here, before bring_up's long stop/start: the
@@ -2190,7 +2353,10 @@ pub fn connect(
         .join()
         .unwrap_or_else(|_| Err("the resolver thread panicked".into()));
 
-    let result = bring_up(&server, &snapshot.settings, epoch, dial);
+    // Held to the end: a disconnect or a server check waits for this bring-up (and its
+    // cleanup below) instead of running its stop in the middle of it.
+    let _lifecycle = lifecycle();
+    let result = bring_up(&server, &snapshot.settings, epoch, dial, Instant::now() + CONNECT_BUDGET);
 
     let mut inner = runtime.inner.lock().unwrap();
     if CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch {
@@ -2225,7 +2391,7 @@ pub fn connect(
             CONNECTED.store(true, std::sync::atomic::Ordering::SeqCst);
             inner.selected_tag = Some(server.tag.clone());
             inner.proxy_latency_ms = outcome.latency_ms;
-            inner.proxy_error = outcome.probe_error;
+            inner.proxy_error = None;
             // ip_unverified stays false (set when connecting was reserved,
             // above) until the detached thread below resolves it — this
             // commit must not wait on any IP lookup.
@@ -2316,6 +2482,9 @@ pub fn disconnect(runtime: &VpnRuntime) {
     CONNECTED.store(false, std::sync::atomic::Ordering::SeqCst);
     // Bring the managed Telegram VLESS tunnel back the moment VPN is down.
     publish_vpn_state();
+    // A connect still bringing its core up sees the new epoch and stops; this stop
+    // runs after it, so the core it may have started cannot outlive the switch.
+    let _lifecycle = lifecycle();
     // …then actually stop and VERIFY the processes are gone. A silent stop
     // failure would otherwise leave sing-box (and its strict_route WFP
     // filters) alive with the UI showing Off — i.e. "internet broken for no
@@ -2385,11 +2554,25 @@ pub fn shutdown_and_wait(runtime: &VpnRuntime, budget: Duration) -> bool {
         return true;
     }
 
-    let stop_nonce = perform_stop();
     if budget.is_zero() {
+        // The main thread cannot wait for a bring-up in flight; that bring-up sees the
+        // new epoch and stops its own core (`bring_up`'s `abandon`).
+        let _ = perform_stop();
         return true;
     }
-    let stopped = wait_until_stopped(budget, stop_nonce.as_deref());
+    let start = Instant::now();
+    let _lifecycle = loop {
+        match LIFECYCLE.try_lock() {
+            Ok(guard) => break Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if start.elapsed() < budget / 2 => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => break None,
+        }
+    };
+    let stop_nonce = perform_stop();
+    let stopped = wait_until_stopped(budget.saturating_sub(start.elapsed()), stop_nonce.as_deref());
     if !stopped {
         unidtk_api::log("vpn: shutdown wait timed out");
     }
@@ -2429,17 +2612,37 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
             return;
         }
         MANUAL_DISCONNECT.store(false, std::sync::atomic::Ordering::SeqCst);
-        for attempt in 1..=3 {
-            // Re-check each attempt: the AUTO toggle being switched off
-            // (set_auto_connect) or a manual disconnect during an in-flight
-            // try must both stop further retries instead of reconnecting
-            // behind the user.
+        // Re-checked before each step: the AUTO toggle being switched off
+        // (set_auto_connect) or a manual disconnect during an in-flight try must
+        // both stop further retries instead of reconnecting behind the user.
+        let cancelled = |when: &str| {
             if !load_settings().is_ok_and(|settings| settings.auto_connect) {
-                unidtk_api::log("vpn: auto-connect aborted, disabled during attempts");
-                return;
+                unidtk_api::log(format!("vpn: auto-connect aborted, disabled {when}"));
+                return true;
             }
             if MANUAL_DISCONNECT.load(std::sync::atomic::Ordering::SeqCst) {
-                unidtk_api::log("vpn: auto-connect aborted, manual disconnect during attempts");
+                unidtk_api::log(format!("vpn: auto-connect aborted, manual disconnect {when}"));
+                return true;
+            }
+            false
+        };
+        // At logon the network often comes up after the app: a connect then is refused
+        // for carrying no traffic, so wait until the subscription's host resolves.
+        let host = subscription_host(&settings.subscription_url);
+        let waited = Instant::now();
+        while let Err(error) = resolve_ipv4(&host) {
+            if waited.elapsed() >= AUTO_CONNECT_NETWORK_WAIT {
+                unidtk_api::log(format!("vpn: auto-connect: no network after {} s ({error}); trying anyway", waited.elapsed().as_secs()));
+                break;
+            }
+            if cancelled("while waiting for the network") {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        let pauses = [2, 5, 10];
+        for attempt in 1..=pauses.len() + 1 {
+            if cancelled("during attempts") {
                 return;
             }
             unidtk_api::log(format!("vpn: auto-connect attempt {attempt} -> {target}"));
@@ -2448,9 +2651,9 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
                     unidtk_api::log("vpn: auto-connect succeeded");
                     return;
                 }
-                Err(e) if attempt < 3 => {
+                Err(e) if attempt <= pauses.len() => {
                     unidtk_api::log(format!("vpn: auto-connect attempt {attempt} failed: {e}"));
-                    std::thread::sleep(Duration::from_secs(2));
+                    std::thread::sleep(Duration::from_secs(pauses[attempt - 1]));
                 }
                 Err(e) => {
                     unidtk_api::log(format!("vpn: auto-connect final failure: {e}"));
@@ -2459,6 +2662,17 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
             }
         }
     });
+}
+
+/// How long auto-connect at logon waits for the network before its first attempt.
+const AUTO_CONNECT_NETWORK_WAIT: Duration = Duration::from_secs(90);
+
+/// The host part of a subscription URL: what must resolve before a connect can work.
+fn subscription_host(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    host_port.split(':').next().unwrap_or_default().to_string()
 }
 
 /// VPN module: it owns the runtime, and its commands read it from here.
@@ -2573,10 +2787,12 @@ impl unidtk_api::Module for VpnModule {
 #[cfg(test)]
 mod subscription_tests {
     use super::{
-        build_singbox_config, build_singbox_outbound, decode_subscription, parse_subscription,
-        parse_vless_line, pick_server, pick_tun_address, resolve_ipv4, VpnServer, VpnSettings,
+        build_singbox_config, build_singbox_outbound, decode_subscription, endpoint_timeout,
+        parse_subscription, parse_vless_line, pick_server, pick_tun_address, read_tail,
+        resolve_ipv4, subscription_host, VpnServer, VpnSettings,
     };
     use base64::Engine;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn the_dial_address_is_a_literal_and_the_name_stays_the_domain() {
@@ -2710,5 +2926,41 @@ mod subscription_tests {
     #[test]
     fn garbage_is_an_error() {
         assert!(decode_subscription("<html>not a subscription</html>").is_err());
+    }
+
+    #[test]
+    fn auto_connect_waits_for_the_subscription_host() {
+        assert_eq!(subscription_host("https://bot.example.ru/sub/abc?x=1"), "bot.example.ru");
+        assert_eq!(subscription_host("https://user:pw@host.example:8443/p"), "host.example");
+        assert_eq!(subscription_host("host.example/p"), "host.example");
+    }
+
+    // A dead server's check used to cost six endpoints of 3.5 s + 3.5 s each; the whole
+    // check now shares one budget per server.
+    #[test]
+    fn an_endpoint_gets_only_what_is_left_of_the_budget() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(5);
+        assert_eq!(endpoint_timeout(deadline, now), Some(Duration::from_secs(5)));
+        assert_eq!(endpoint_timeout(deadline, now + Duration::from_millis(4900)), None);
+        assert_eq!(endpoint_timeout(deadline, now + Duration::from_secs(6)), None);
+    }
+
+    #[test]
+    fn a_name_that_does_not_resolve_is_not_called_ipv6_only() {
+        let error = resolve_ipv4("no-such-host.invalid").unwrap_err();
+        assert!(!error.contains("IPv6"), "{error}");
+    }
+
+    #[test]
+    fn the_log_tail_reads_only_the_end_and_starts_on_a_whole_line() {
+        let path = std::env::temp_dir().join(format!("unidtk-tail-{}.log", std::process::id()));
+        let body: String = (0..2000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&path, &body).unwrap();
+        let tail = read_tail(&path, 100).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(tail.len() <= 100, "{}", tail.len());
+        assert!(tail.starts_with("line "), "{tail:?}");
+        assert!(tail.ends_with("line 1999\n"), "{tail:?}");
     }
 }

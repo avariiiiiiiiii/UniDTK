@@ -18,7 +18,7 @@ Every mechanism here is taken from the code. Line numbers refer to the files as 
 | :--- | :--- |
 | [modules/vpn/rust/vpn.rs](../../modules/vpn/rust/vpn.rs) | The module: subscription, configuration, connect, disconnect, status, shutdown (2,240 lines). |
 | [modules/vpn/rust/settings.rs](../../modules/vpn/rust/settings.rs) | Settings updates, legacy import and the subscription cache. |
-| [modules/vpn/helper/main.rs](../../modules/vpn/helper/main.rs) | `vpn-helper.exe`: starts and stops `sing-box.exe` with the rights of its scheduled task (207 lines). |
+| [modules/vpn/helper/main.rs](../../modules/vpn/helper/main.rs) | `vpn-helper.exe`: starts and stops `sing-box.exe` with the rights of its scheduled task. |
 | [modules/vpn/native/lib.rs](../../modules/vpn/native/lib.rs) | The native half: the VPN panel on the Rune desk, in its own card and compact in a host's nesting zone ([shell.widget-contract](../reference/shell.md#r-shell.widget-contract)). |
 | [modules/vpn/native/settings.rs](../../modules/vpn/native/settings.rs) | The native menu pane for the subscription, auto-connect, and the home server. |
 | [scheduler-tasks/UniDTKSingboxTask.xml](../../scheduler-tasks/UniDTKSingboxTask.xml) | Task `UniDTKSingbox`, which runs `vpn-helper.exe start`. |
@@ -43,7 +43,8 @@ Binaries live next to the program (`sing-box.exe`, `vpn-helper.exe`), in the ins
 | `vpn_core.pid` | the helper | PID of the running `sing-box.exe`. |
 | `vpn_stop.cutoff` | the module | The stop request: a nonce on line 1. |
 | `vpn_stop.done` | the helper | The nonce of the stop that has finished. |
-| `logs/vpn_helper.log` | the helper | Log of helper actions. |
+| `logs/vpn_helper.log` | the helper | Log of helper actions, one timestamped line each; moved to `.1` past 1 MB. |
+| `logs/singbox_stderr.log` | sing-box | What the core prints outside its own log (a panic); moved to `.1` past 1 MB. |
 
 ---
 
@@ -210,7 +211,7 @@ Stopping sing-box takes place in another process, in another security context, a
 3. It writes `vpn_stop.cutoff`: line 1 is the nonce, line 2 is the time of the request in RFC 3339 format.
 4. It starts `UniDTKVpnStop`. If the helper is missing, it falls back to ending the start task.
 
-The helper reads only line 1 of the cutoff file. Line 2 is written but not used by the helper.
+The helper reads both lines. Line 1 is the nonce. Line 2 tells it who asked: a request written within the last 15 seconds is logged as `requested by the app, nonce <pid>-<n>`, an older one or none as `NOT requested by the app`. That is how a stop someone ran by hand (the task, or the helper itself) is told apart from the app's own (session 151: a stop nobody logged killed a live core).
 
 ### 4.2 The helper's side
 
@@ -218,7 +219,7 @@ The helper reads only line 1 of the cutoff file. Line 2 is written but not used 
 
 - Reads the PID from `vpn_core.pid`.
 - Checks that the process at that PID really is `sing-box.exe`. The check asks Windows for the image path (`QueryFullProcessImageNameW`) and tests whether it ends with `sing-box.exe`. If the PID has been reused by another program, it is not killed.
-- Terminates the process and waits at most 2,000 ms for it to exit.
+- Terminates the process and waits at most 2,000 ms for it to exit. The log says `terminated` only when `TerminateProcess` succeeded; otherwise it names the Win32 error.
 - Removes `vpn_core.pid`.
 - Writes the nonce to `vpn_stop.done`. This happens even when nothing was killed, because the app's waiter treats the marker as "the stop has run".
 
@@ -238,6 +239,12 @@ The comment in the code explains why the marker is needed. Checking the port alo
 
 `connect()` and `bring_up()` split the work so that the lock on shared state is never held during the slow parts.
 
+One process-wide lifecycle lock (`LIFECYCLE`) orders everything that starts or stops a core: a connect's bring-up and its cleanup, a disconnect's stop, the watchdog's cleanup, a server check (below) and an awaited shutdown. They share the done marker, and the helper's stop kills every bundled sing-box, so two overlapping ones used to fail each other: a stop during a server check killed the check's core, and a disconnect between a connect's epoch check and its start left a tunnel up under an "Off" switch. The commands that take this lock are `long` on the UI door ([ipc.long-commands-off-thread](../reference/ipc.md#r-ipc.long-commands-off-thread)), so waiting for it holds no other command.
+
+**The server check** (`vpn_ping_all`, the picker's "ПРОВЕРИТЬ ВСЕ") starts one sing-box with a SOCKS inbound per server and probes them all at once. Each server has one budget for all its endpoints (`SERVER_CHECK_BUDGET`, 5 s, each request bounded by what is left), so the whole check ends in about 6-7 s even when servers are dead; it used to give every endpoint 3.5 s to connect plus 3.5 s to read, six in a row, and one dead server took 20 s. A server whose name does not resolve, or resolves only to IPv6, is not probed: its row reports that reason (`resolve_ipv4` tells the two apart; it used to call a name that no longer exists "IPv6 only"). The check's core is put into a job that closes with the kernel (`dies_with_kernel`), so it cannot outlive a killed kernel. As the page does, the panel then connects to the fastest server, unless the person pressed the switch or picked a server while the check ran.
+
+The subscription fetch never holds the runtime lock: `fetch_into` fetches unlocked (one fetch at a time, `FETCH`) and publishes under the settings revision, so `vpn_status` answers at once during a 15-second fetch.
+
 ### 5.1 `connect()`: reserve, then work unlocked
 
 `connect()` holds the runtime lock only long enough to:
@@ -246,7 +253,7 @@ The comment in the code explains why the marker is needed. Checking the port alo
 2. choose the server: the requested tag, else the selected tag, else the last tag, else the default tag, else the first server,
 3. read the current `CONNECT_EPOCH` and set `connecting = true`.
 
-It then calls `bring_up()` without the lock. The comment says the waits can take tens of seconds, and status polling must stay responsive during them.
+It then takes the lifecycle lock and calls `bring_up()` without the runtime lock, with one budget for the whole bring-up (`CONNECT_BUDGET`, 30 s): the old core's stop, the TUN, the SOCKS port and the probe share it.
 
 When `bring_up()` returns, `connect()` takes the lock again and checks the epoch. `disconnect()` and `shutdown()` increment `CONNECT_EPOCH`. If the epoch changed, the connect was cancelled while it ran, and its result must not overwrite the newer state. In that case the connect stops any processes it may have started.
 
@@ -263,16 +270,16 @@ If the epoch is unchanged, `connect()`:
 
 1. `ensure_binaries_present()` checks that `sing-box.exe` and `vpn-helper.exe` exist.
 2. A thread reads the current public IP without the tunnel. This is the baseline for later comparison. It runs in parallel with everything below. The proxy's own hostname is resolved on a second thread beside it (`resolve_ipv4`, 4-second bound); its failure is the connect's error, and no configuration is written.
-3. `perform_stop()` fires the stop protocol, and `wait_until_stopped(10 s)` waits for it. If the wait times out, the connect fails with `previous VPN processes did not shut down in time`.
+3. `perform_stop()` fires the stop protocol, and `wait_until_stopped` waits for it, at most 10 s of the budget. If the wait times out, the connect fails with `previous VPN processes did not shut down in time`.
 4. `active_happ_tun_present()` refuses to continue if a Happ tunnel is active (Step 7).
 5. If port 12908 is still open, the connect is refused.
 6. A disconnect or shutdown that ran during the wait above ends the connect here: the epoch in `CONNECT_EPOCH` no longer matches, so nothing is started.
 7. The TUN address is picked for this run (3.1), the configuration is built, written, and validated (Step 3).
 8. Happ is checked a second time, because the steps above can take several seconds.
 9. `task_start("UniDTKSingbox")` starts sing-box through the helper.
-10. The module polls for the `wallpaper-tun` interface: 20 checks, 250 ms apart. That is at most about 5 seconds. Each check also reads the adapter's address and accepts only the /30 chosen in step 7. If the interface never appears, it logs the last lines of `singbox.log`, runs `perform_stop()`, and returns an error. The error says whether Happ is the likely cause.
+10. The module polls for the `wallpaper-tun` interface: 20 checks, 250 ms apart. That is at most about 5 seconds. Every check first reads the epoch: a disconnect that arrived meanwhile stops the core this connect started (`abandon`) and ends the connect, so its core cannot outlive the switch even when the disconnect's own stop ran earlier. Each check also reads the adapter's address and accepts only the /30 chosen in step 7. If the interface never appears, it logs the last lines of `singbox.log`, runs `perform_stop()`, and returns an error. The error says whether Happ is the likely cause.
 11. The module polls for port 12908 the same way, 20 checks, 250 ms apart.
-12. `probe_vpn_transport()` sends an HTTPS request through the SOCKS port to `https://1.1.1.1/`, then to `https://8.8.8.8/` if the first fails (4-second timeout each). It uses IP literals on purpose, because DNS over the tunnel may not be warm yet. Any HTTP response, even a 4xx, counts as proof that the transport works. A failure is recorded as a warning, not as a failed connect. The comment says the tunnel counts as up once the TUN interface exists.
+12. `probe_vpn_transport()` asks through the SOCKS port until one request is answered or 10 s pass (`PROBE_BUDGET`, within the connect's budget). It cycles through IP literals and hostnames, plain HTTP and TLS (`https://1.1.1.1/`, `http://cp.cloudflare.com/generate_204`, `http://1.1.1.1/cdn-cgi/trace`, `https://8.8.8.8/`, `http://www.gstatic.com/generate_204`), each request bounded by what is left: a cold tunnel fails the two IP-literal HTTPS endpoints while a hostname's plain 204 answers, and DNS over the tunnel may not be warm yet. Any HTTP response, even a 4xx, counts as proof that the transport works. When none answers, the connect is refused: the core is stopped and `vpn_status.error` reads `the server carries no traffic: <the last error>`. Before session 151 a failed probe was only a warning, and the switch said "on" while nothing passed.
 
 The reason a connect gave travels to both panels: `vpn_status.error` carries it, the Rune panel draws it under the switch, and the WebView panel writes it into `.vpn-error`. Before #538 nothing drew that field, so a refused connect flipped the switch back without a word.
 
@@ -296,7 +303,7 @@ The helper is a small Rust program, not a script. Its first line is the crate at
 #![windows_subsystem = "windows"]
 ```
 
-With this attribute Windows does not create a console window for the process, so a hidden task cannot flash a black window. The header comment of `helper/main.rs` gives the history: the old chain was `wscript.exe` → a VBS file → `powershell.exe` → a `.ps1` script. Starting that chain used WMI and .NET and took seconds, which did not fit into the time Windows allows for shutdown. The Rust helper starts and stops in milliseconds.
+With this attribute Windows does not create a console window for the process, so a hidden task cannot flash a black window. The helper runs elevated but writes into the user's own data directory, so before every write (its log, the PID file, the done marker, the core's start) it refuses a directory that is a junction or a symlink (`safe_dir`): a link there would point an administrator's write anywhere on the disk. The header comment of `helper/main.rs` gives the history: the old chain was `wscript.exe` → a VBS file → `powershell.exe` → a `.ps1` script. Starting that chain used WMI and .NET and took seconds, which did not fit into the time Windows allows for shutdown. The Rust helper starts and stops in milliseconds.
 
 ### 6.1 `start`
 
@@ -306,12 +313,12 @@ match Command::new(&exe)
     .arg(&config)
     .stdin(Stdio::null())
     .stdout(Stdio::null())
-    .stderr(Stdio::null())
+    .stderr(stderr)
     .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
     .spawn()
 ```
 
-The helper starts sing-box detached, writes its PID to `vpn_core.pid`, and exits at once. The comment says why it does not stay resident: the core must outlive the helper, and a resident helper would keep the `UniDTKSingbox` task marked as running forever.
+The helper moves `singbox.log` to `.1` past 5 MB (it had reached 15 MB, and the kernel reads its tail after a failed connect; that tail is now the last 64 KB only), sends the core's stderr to `logs/singbox_stderr.log`, starts sing-box detached, writes its PID to `vpn_core.pid`, and exits at once. The comment says why it does not stay resident: the core must outlive the helper, and a resident helper would keep the `UniDTKSingbox` task marked as running forever.
 
 Before it spawns, `start` checks whether the recorded PID is still a sing-box process. If it is, the helper does nothing and returns success.
 
@@ -350,7 +357,8 @@ When the module is enabled, `init` calls `auto_connect_on_startup`. That functio
 1. It stops if `auto_connect` is off in the settings.
 2. It stops if there is no subscription URL.
 3. It takes the target server: `last_tag` if set, otherwise `default_tag`.
-4. It tries `connect()` up to three times. Before each try it checks again that `auto_connect` is still on and that `MANUAL_DISCONNECT` is not set. Between failed tries it sleeps for 2 seconds.
+4. It waits, up to 90 seconds (`AUTO_CONNECT_NETWORK_WAIT`), until the subscription's host resolves: at logon the network often comes up after the app, and a connect before it would be refused for carrying no traffic (5.2).
+5. It tries `connect()` up to four times, pausing 2, 5 and 10 seconds after a failure. Before each step it checks again that `auto_connect` is still on and that `MANUAL_DISCONNECT` is not set.
 
 Two flags are kept apart on purpose. `auto_connect` is the user's preference, "reconnect on next launch". `MANUAL_DISCONNECT` is process-local: a manual disconnect stops an auto-connect that is still retrying, but it does not change the preference. A manual connect does not change the preference either.
 

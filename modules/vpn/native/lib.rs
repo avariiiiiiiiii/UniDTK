@@ -25,6 +25,13 @@ fn make(_: &Init<'_>) -> Box<dyn Widget> {
 /// The page's poll interval while a panel is on screen.
 const POLL: Duration = Duration::from_secs(3);
 
+/// How long the panel waits for its `long` commands (`r[ipc.long-commands-off-thread]`).
+/// A check gives every server 5 s at once; a connect has a 30 s bring-up and may first
+/// wait for a check; a list may fetch the subscription (15 s).
+const CHECK_WAIT: Duration = Duration::from_secs(60);
+const CONNECT_WAIT: Duration = Duration::from_secs(45);
+const LIST_WAIT: Duration = Duration::from_secs(25);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Ping {
     ok: bool,
@@ -46,6 +53,9 @@ struct Vpn {
     /// The switch as the person set it while the command runs.
     pending: Option<bool>,
     pinging: bool,
+    /// Bumped by every switch press and server pick: a check that ends after one does not
+    /// connect to its fastest server behind the person's back.
+    choice: u64,
     auto_pending: Option<bool>,
     pings: Option<HashMap<String, Ping>>,
     /// The server list is open.
@@ -143,7 +153,7 @@ impl Vpn {
         }
         self.loading = true;
         self.failed = false;
-        act.call("vpn_list_servers", json!({ "subscriptionRevision": revision }), move |vpn: &mut Vpn, result, act| {
+        act.call_within("vpn_list_servers", json!({ "subscriptionRevision": revision }), LIST_WAIT, move |vpn: &mut Vpn, result, act| {
             if let Some(error) = vpn.receive_servers(revision, result) {
                 act.log(format!("vpn_list_servers error={error}"));
             }
@@ -226,6 +236,7 @@ impl Vpn {
         if next && self.subscription_revision.is_none() {
             return;
         }
+        self.choice += 1;
         self.busy = true;
         self.pending = Some(next);
         let (cmd, args) = if next {
@@ -234,7 +245,7 @@ impl Vpn {
         } else {
             ("vpn_disconnect", json!({}))
         };
-        act.call(cmd, args, |vpn: &mut Vpn, result, act| {
+        act.call_within(cmd, args, CONNECT_WAIT, |vpn: &mut Vpn, result, act| {
             if let Err(error) = result {
                 act.debug(format!("VPN: {error}"));
             }
@@ -246,12 +257,18 @@ impl Vpn {
 
     /// `connectTo`: a server from the list, or the fastest after a check.
     fn connect_to(&mut self, tag: String, revision: u64, act: &mut Act<'_>) {
-        if self.busy || self.subscription_revision != Some(revision) {
+        if self.subscription_revision != Some(revision) {
             return;
         }
+        if self.busy {
+            // The pick used to vanish without a word while a connect ran.
+            act.debug("VPN: подключение уже идёт");
+            return;
+        }
+        self.choice += 1;
         self.busy = true;
         self.selected = Some(tag.clone());
-        act.call("vpn_connect", json!({ "tag": tag, "subscriptionRevision": revision }), |vpn: &mut Vpn, result, act| {
+        act.call_within("vpn_connect", json!({ "tag": tag, "subscriptionRevision": revision }), CONNECT_WAIT, |vpn: &mut Vpn, result, act| {
             if let Err(error) = result {
                 act.debug(format!("VPN: {error}"));
             }
@@ -266,7 +283,8 @@ impl Vpn {
             return;
         }
         self.pinging = true;
-        act.call("vpn_ping_all", json!({ "subscriptionRevision": revision }), move |vpn: &mut Vpn, result, act| {
+        let choice = self.choice;
+        act.call_within("vpn_ping_all", json!({ "subscriptionRevision": revision }), CHECK_WAIT, move |vpn: &mut Vpn, result, act| {
             if !vpn.finish_ping(revision) {
                 return;
             }
@@ -279,10 +297,13 @@ impl Vpn {
                     let best = rows.iter().filter(|(_, p)| p.ok && p.ms.is_some()).min_by_key(|(_, p)| p.ms).map(|(tag, p)| (tag.clone(), p.ms.unwrap_or(0)));
                     vpn.pings = Some(rows.into_iter().collect());
                     match best {
-                        Some((tag, ms)) => {
+                        // The page's `pingAllServers` takes the fastest, unless the person
+                        // switched or picked a server while the check ran.
+                        Some((tag, ms)) if vpn.choice == choice => {
                             act.debug(format!("⚡ {} · {ms} мс", display_text(&tag)));
                             vpn.connect_to(tag, revision, act);
                         }
+                        Some((tag, ms)) => act.debug(format!("⚡ {} · {ms} мс", display_text(&tag))),
                         None => act.debug("Рабочих серверов не найдено"),
                     }
                 }
