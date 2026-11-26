@@ -106,7 +106,9 @@ pub trait Widget: Any {
     }
 
     /// A kernel event of its type's `events`. `snapshot` marks the catch-up frame a subscribe
-    /// or a reconnect replays, which must not repeat a side effect.
+    /// or a reconnect replays, which must not repeat a side effect. An event does not draw
+    /// the desk again by itself: call [`Act::redraw`] when what the widget shows changed
+    /// (`r[shell.redraw-on-change]`).
     fn on_event(&mut self, _name: &str, _payload: &Value, _snapshot: bool, _act: &mut Act<'_>) {}
 
     /// It came on screen as a surface (its own, or its host's nesting zone) or left it.
@@ -293,7 +295,7 @@ impl<'t> Act<'t> {
         self.ops.push(Op::Close);
     }
 
-    /// Draw again: what it shows changed outside a handler's own state.
+    /// Draw again: what it shows changed. A kernel event draws nothing without it.
     pub fn redraw(&mut self) {
         self.ops.push(Op::Redraw);
     }

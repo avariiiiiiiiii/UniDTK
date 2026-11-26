@@ -59,6 +59,12 @@ r[shell.wake-schedule]
 
 The desk wakes at the earliest of what is due: each widget's own wake (`Widget::wake`, the seconds until it has something new to show), the toast's end, the menu's slide-out, the debug line, the end of the settle after arrange mode (one motion step in which the desk takes no press, `body.arrange-settling`). A widget's wake is never sooner than a frame, so a widget that asks for "now" does not spin the desk. While a morph runs the desk draws every frame and then stops. An idle desk wakes only when a widget asks: the clock once a second or once a minute by its face, a VPN panel every 3 s while it is on screen.
 
+While the window is off screen (`App::on_visibility`: minimised, hidden, or covered whole where the system says so) no widget is woken for its timers; when it comes back, the schedule runs at once and each widget catches up (session 152).
+
+r[shell.redraw-on-change]
+
+The host is one full-screen window and Rune has no partial present, so a frame redraws all of it. A kernel event draws the desk again only when a widget asked for it (`Act::redraw` in its `on_event`; `Host::deliver_event` returns the request and the link delivers through `AppHandle::update_if`): the Glyph Bar asks when the volume it shows changed, and an event no widget listens to presents nothing. Command replies still draw (session 152: events first; the replies are the next step).
+
 ## Startup
 
 The native window starts hidden and outside the taskbar. Explorer discovery stays on a worker under [kernel.no-blocking-main-thread](kernel.md#r-kernel.no-blocking-main-thread). The UI thread validates and parents the window as `WS_CHILD`, then Rune orders it in with `SW_SHOWNOACTIVATE`.

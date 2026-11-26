@@ -156,10 +156,11 @@ fn jelly_bead(theme: &Theme, index: usize, lit: usize, muted: bool, side: f32) -
 }
 
 impl Widget for GlyphBar {
-    fn on_event(&mut self, name: &str, payload: &Value, _snapshot: bool, _act: &mut Act<'_>) {
+    fn on_event(&mut self, name: &str, payload: &Value, _snapshot: bool, act: &mut Act<'_>) {
         if name == "system-volume" {
-            if let Some(volume) = volume_of(payload) {
+            if let Some(volume) = volume_of(payload).filter(|volume| *volume != self.volume) {
                 self.volume = volume;
+                act.redraw();
             }
         }
     }

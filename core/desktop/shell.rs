@@ -61,6 +61,8 @@ enum StartupData {
 /// The desk: the app state Rune's handlers receive.
 pub struct Host {
     pub(crate) inspector: Arc<Inspector>,
+    /// The window is on screen (`App::on_visibility`); off screen no widget timer runs.
+    pub(crate) window_shown: bool,
     /// The latest desk received from the kernel, or the startup fallback.
     pub(crate) layout: Option<Layout>,
     /// Until the layout and both lists are available, or the one startup deadline passes.
@@ -148,6 +150,7 @@ impl Host {
             grain_made_for: None,
             types,
             widgets: BTreeMap::new(),
+            window_shown: true,
             sticky: HashMap::new(),
             wheel_carry: HashMap::new(),
             next_gen: 1,
@@ -711,14 +714,18 @@ impl Host {
         });
     }
 
-    fn with_dyn(&mut self, id: &str, tx: &mut Tx, f: impl FnOnce(&mut dyn Widget, &mut Act<'_>)) {
-        let Some(slot) = self.widgets.get_mut(id) else { return };
+    /// Runs `f` on widget `id` and applies what it asked for; true when it asked to be drawn
+    /// again (`Act::redraw`).
+    fn with_dyn(&mut self, id: &str, tx: &mut Tx, f: impl FnOnce(&mut dyn Widget, &mut Act<'_>)) -> bool {
+        let Some(slot) = self.widgets.get_mut(id) else { return false };
         let gen = slot.gen;
         let mut act = Act::new(id, tx);
         f(slot.widget.as_mut(), &mut act);
         let ops = std::mem::take(&mut act.ops);
         drop(act);
+        let redraw = ops.iter().any(|op| matches!(op, Op::Redraw));
         self.run_ops(id, gen, ops, tx);
+        redraw
     }
 
     /// A text field inside widget `id`, or the scratch field when it is gone.
@@ -788,11 +795,25 @@ impl Host {
     }
 
     /// A kernel event, to every widget whose type asked for it.
-    pub(crate) fn deliver_event(&mut self, event: &str, payload: &Value, snapshot: bool, tx: &mut Tx) {
+    /// Hands a kernel event to the widgets that listen for it. True when one asked to be
+    /// drawn again: every other event leaves the frame as it is, because the host is one
+    /// full-screen window and a redraw presents all of it (`r[shell.redraw-on-change]`).
+    pub(crate) fn deliver_event(&mut self, event: &str, payload: &Value, snapshot: bool, tx: &mut Tx) -> bool {
         self.sticky.insert(event.to_string(), payload.clone());
         let ids: Vec<String> = self.widgets.iter().filter(|(_, slot)| slot.ty.events.contains(&event)).map(|(id, _)| id.clone()).collect();
+        let mut redraw = false;
         for id in ids {
-            self.with_dyn(&id, tx, |widget, act| widget.on_event(event, payload, snapshot, act));
+            redraw |= self.with_dyn(&id, tx, |widget, act| widget.on_event(event, payload, snapshot, act));
+        }
+        redraw
+    }
+
+    /// The window went off screen or came back (`App::on_visibility`). Off screen, no widget
+    /// is woken for its timers; back, the schedule runs at once so each catches up.
+    pub(crate) fn set_window_shown(&mut self, shown: bool, tx: &mut Tx) {
+        self.window_shown = shown;
+        if shown {
+            tx.wake_at(tx.clock());
         }
     }
 
@@ -1520,8 +1541,9 @@ pub(crate) fn poll(state: &mut Host, _: f64, tx: &mut Tx) -> bool {
     let mut next = f64::INFINITY;
     let at = |instant: Instant, until: Instant, tx: &Tx| tx.clock() + until.saturating_duration_since(instant).as_secs_f64();
 
-    // Each widget's wake: a tick when it is due, then its next wake, the earliest kept.
-    let ids: Vec<String> = state.widgets.keys().cloned().collect();
+    // Each widget's wake: a tick when it is due, then its next wake, the earliest kept. Off
+    // screen nothing is woken: a clock nobody sees does not tick the desk.
+    let ids: Vec<String> = if state.window_shown { state.widgets.keys().cloned().collect() } else { Vec::new() };
     for id in ids {
         let due = state.widgets.get(&id).and_then(|slot| slot.due);
         if due.is_some_and(|due| instant >= due) {
@@ -1655,5 +1677,48 @@ mod tests {
         assert_eq!((n, carry), (1, 0.0));
         // Turning back cancels what is carried instead of stepping.
         assert_eq!(super::take_notches(100.0, -30.0), (0, 70.0));
+    }
+}
+
+#[cfg(test)]
+mod redraw_tests {
+    use super::*;
+    use crate::widget::{Act, Init, Widget, WidgetType};
+
+    struct Probe {
+        redraws: bool,
+    }
+
+    impl Widget for Probe {
+        fn content(&self, _: &crate::widget::View<'_>) -> Option<El> {
+            None
+        }
+
+        fn on_event(&mut self, _: &str, _: &Value, _: bool, act: &mut Act<'_>) {
+            if self.redraws {
+                act.redraw();
+            }
+        }
+    }
+
+    static PROBE: WidgetType = WidgetType {
+        id: "probe",
+        events: &["probe-event"],
+        make: |_: &Init<'_>| Box::new(Probe { redraws: false }),
+        settings: None,
+    };
+    static TYPES: &[&WidgetType] = &[&PROBE];
+
+    // r[shell.redraw-on-change]: the host is one full-screen window, so an event that
+    // changes nothing on screen must not present a frame.
+    #[test]
+    fn an_event_no_widget_draws_for_presents_no_frame() {
+        let mut host = Host::new(crate::inspector::Inspector::new().unwrap(), None, (800.0, 600.0), 1.0, Default::default(), TYPES);
+        let mut tx = Tx::default();
+        host.widgets.insert("quiet".into(), Slot { gen: 1, ty: &PROBE, widget: Box::new(Probe { redraws: false }), visible: true, due: None });
+        assert!(!host.deliver_event("probe-event", &serde_json::json!({}), false, &mut tx));
+        assert!(!host.deliver_event("nobody-listens", &serde_json::json!({}), false, &mut tx));
+        host.widgets.insert("drawn".into(), Slot { gen: 2, ty: &PROBE, widget: Box::new(Probe { redraws: true }), visible: true, due: None });
+        assert!(host.deliver_event("probe-event", &serde_json::json!({}), false, &mut tx));
     }
 }

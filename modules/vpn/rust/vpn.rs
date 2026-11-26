@@ -62,7 +62,13 @@ fn migrate_settings(store: &SettingsStore, declared: &dyn ModuleSettings) {
         move_value("auto_connect", json!(true));
     }
     if record["home_server"].is_object() {
-        move_value("home_server", record["home_server"].clone());
+        // A record written from `HomeServerConfig::default()` holds port 0 (the derive, not
+        // the serde default): that is "never set", and the module's check refuses it.
+        let mut home = record["home_server"].clone();
+        if home["port"].as_u64().unwrap_or(0) == 0 {
+            home["port"] = json!(443);
+        }
+        move_value("home_server", home);
     }
     if !moved.is_empty() {
         unidtk_api::log(format!("vpn: moved into the settings contract: {}", moved.join(", ")));
@@ -3262,6 +3268,16 @@ mod settings_contract_tests {
         assert_eq!(declared.get("subscriptions").unwrap().value, json!(["https://x.example/T+k"]));
         assert_eq!(declared.get("auto_connect").unwrap().value, json!(true));
         assert_eq!(declared.get("home_server").unwrap().value["host"], "h.example");
+
+        // Live, session 152: the old record of a never-used home server had port 0, and
+        // the check refused the whole record.
+        let zero = Arc::new(InMemoryModuleDb::new());
+        zero.kv_set("settings", br#"{"home_server":{"enabled":false,"host":"","port":0}}"#).unwrap();
+        let zero_store = SettingsStore::new(zero, std::env::temp_dir().join("unidtk-vpn-migrate-none"));
+        let zero_declared = Arc::new(InMemorySettings::new(DECLARED_SETTINGS));
+        zero_store.declare(zero_declared.clone());
+        migrate_settings(&zero_store, zero_declared.as_ref());
+        assert_eq!(zero_declared.get("home_server").unwrap().value["port"], 443);
         let (_, subscriptions) = store.subscriptions().unwrap();
         let key = store.read().unwrap().last_tag.unwrap();
         assert_eq!(key, format!("{}/Estonia", subscriptions[0].id));

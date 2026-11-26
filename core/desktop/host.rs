@@ -49,7 +49,8 @@ fn layout_link(ui: rune::AppHandle<Host>, outbox: Arc<Outbox>, widgets: &'static
                     tx.instant();
                 }
             }),
-            Delivery::Event { event, payload, snapshot } => ui.update(move |state, tx| state.deliver_event(&event, &payload, snapshot, tx)),
+            // Drawn again only when a widget asked (`r[shell.redraw-on-change]`).
+            Delivery::Event { event, payload, snapshot } => ui.update_if(move |state, tx| state.deliver_event(&event, &payload, snapshot, tx)),
         }
     };
     let ask = move || {
@@ -201,6 +202,7 @@ pub fn run(widgets: &'static [&'static crate::widget::WidgetType]) -> Result<(),
     let state_ui = ui_slot.clone();
     // Without a kernel there is nobody to ask: draw the module defaults.
     let app = App::new(spec).init(move || Host::new(state_inspector, (!supervised).then(Layout::empty), canvas, scale, state_ui, widgets))
+        .on_visibility(|state: &mut Host, shown, tx| state.set_window_shown(shown, tx))
         .open_inactive()
         .window_options(WindowOptions {
             transparent: true, borderless: true, visible: false, skip_taskbar: true,
