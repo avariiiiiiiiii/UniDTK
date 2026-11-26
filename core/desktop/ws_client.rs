@@ -134,16 +134,11 @@ impl Outbox {
     }
 
     /// Sends a command and calls `handler` once with what came of it (on the link's thread):
-    /// the reply, a timeout after [`REPLY_TIMEOUT`], or lost when the link dropped after the
-    /// command left. A command that never left is sent again on the next session.
-    /// The handler hears every outcome, a refusal here included.
-    pub fn request(&self, cmd: &str, args: Value, handler: ReplyHandler) -> Result<u64, String> {
-        self.request_within(cmd, args, REPLY_TIMEOUT, handler)
-    }
-
-    /// [`Outbox::request`] for a command that can take longer than [`REPLY_TIMEOUT`]: a
-    /// server check runs for seconds, and its answer arrived after the requester had been
-    /// told "timeout" and stopped listening.
+    /// the reply, a timeout after `timeout`, or lost when the link dropped after the command
+    /// left. A command that never left is sent again on the next session. The handler hears
+    /// every outcome, a refusal here included. Most commands wait [`REPLY_TIMEOUT`]; a long
+    /// one (a server check runs for seconds) passes its own, or its answer would arrive after
+    /// the requester had been told "timeout" and stopped listening.
     pub fn request_within(&self, cmd: &str, args: Value, timeout: Duration, handler: ReplyHandler) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // A poisoned lock still holds consistent maps (every critical section is one insert

@@ -62,6 +62,33 @@ struct Vpn {
     menu: bool,
     visible: bool,
     polled: Option<Instant>,
+    /// What the provider said beside its servers (`vpn_subscription_notes`).
+    notes: Option<Notes>,
+    /// "ОБНОВИТЬ" runs: the subscription is fetched again.
+    refreshing: bool,
+}
+
+/// The provider's notes: its announcement and the placeholder entries it sends in place of
+/// servers, drawn as comments above the servers, and its refusal when it gave none.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Notes {
+    comments: Vec<String>,
+    refusal: Option<String>,
+}
+
+impl Notes {
+    fn read(value: &Value) -> Self {
+        Notes {
+            comments: value["comments"].as_array().into_iter().flatten()
+                .filter_map(|c| c.as_str().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string))
+                .collect(),
+            refusal: value["refusal"].as_str().map(str::trim).filter(|r| !r.is_empty()).map(str::to_string),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.comments.is_empty() && self.refusal.is_none()
+    }
 }
 
 /// `repairMojibake`: a UTF-8 tag read as Windows-1251 is turned back, when it decodes cleanly.
@@ -154,8 +181,42 @@ impl Vpn {
         self.loading = true;
         self.failed = false;
         act.call_within("vpn_list_servers", json!({ "subscriptionRevision": revision }), LIST_WAIT, move |vpn: &mut Vpn, result, act| {
-            if let Some(error) = vpn.receive_servers(revision, result) {
-                act.log(format!("vpn_list_servers error={error}"));
+            match vpn.receive_servers(revision, result) {
+                Some(error) => act.log(format!("vpn_list_servers error={error}")),
+                None => vpn.load_notes(revision, act),
+            }
+        });
+    }
+
+    /// The provider's notes for the list just read: a list of placeholders only is the
+    /// provider talking, and its words are what the picker shows.
+    fn load_notes(&mut self, revision: u64, act: &mut Act<'_>) {
+        act.call("vpn_subscription_notes", json!({}), move |vpn: &mut Vpn, result, act| {
+            match result {
+                Ok(value) if value["subscription_revision"].as_u64() == Some(revision) && vpn.subscription_revision == Some(revision) => {
+                    vpn.notes = Some(Notes::read(&value));
+                }
+                Ok(_) => {}
+                Err(error) => act.log(format!("vpn_subscription_notes error={error}")),
+            }
+        });
+    }
+
+    /// "ОБНОВИТЬ": the subscription fetched again, for a provider that gave no servers
+    /// (a device freed at the provider lets this one in on the next answer).
+    fn refetch(&mut self, revision: u64, act: &mut Act<'_>) {
+        if self.refreshing || self.subscription_revision != Some(revision) {
+            return;
+        }
+        self.refreshing = true;
+        act.call_within("vpn_refresh_servers", json!({}), LIST_WAIT, move |vpn: &mut Vpn, result, act| {
+            vpn.refreshing = false;
+            if let Err(error) = result {
+                act.debug(format!("VPN: {error}"));
+            }
+            if vpn.subscription_revision == Some(revision) {
+                vpn.servers = None;
+                vpn.load_servers(act);
             }
         });
     }
@@ -207,6 +268,7 @@ impl Vpn {
                 _ => {
                     self.subscription_revision = Some(revision);
                     self.servers = None;
+                    self.notes = None;
                     self.selected = None;
                     self.pings = None;
                     self.loading = false;
@@ -335,6 +397,27 @@ impl Vpn {
         });
     }
 
+    /// The picker's text and whether it can be pressed: the chosen server, "Загрузка…",
+    /// the subscription error with a retry, or, when the provider sent no servers, its own
+    /// words (a device limit, "your app is not supported").
+    fn picker_label(&self) -> (String, bool) {
+        if self.loading || self.refreshing {
+            return ("Загрузка…".to_string(), false);
+        }
+        if self.failed {
+            return ("Ошибка подписки · повторить".to_string(), true);
+        }
+        let Some(servers) = &self.servers else { return ("Загрузка…".to_string(), false) };
+        if servers.is_empty() {
+            if let Some(notes) = self.notes.as_ref().filter(|n| !n.is_empty()) {
+                let said = notes.refusal.clone().or_else(|| notes.comments.first().cloned()).unwrap_or_default();
+                return (display_text(&said), !self.busy);
+            }
+        }
+        let shown = self.selected.as_ref().filter(|s| servers.contains(s)).or(servers.first());
+        (shown.map_or_else(|| "Выберите сервер".to_string(), |s| display_text(s)), !self.busy)
+    }
+
     /// The servers in the list's order: by the last check (answered fastest first, then
     /// failed, then unchecked), else as the subscription lists them.
     fn ordered(&self) -> Vec<String> {
@@ -380,17 +463,7 @@ impl Vpn {
                 vpn.toggle(next, act);
             }));
 
-        // The picker: the chosen server, "Загрузка…", or the subscription error with a retry.
-        let (picker_label, picker_enabled) = if self.loading {
-            ("Загрузка…".to_string(), false)
-        } else if self.failed {
-            ("Ошибка подписки · повторить".to_string(), true)
-        } else if let Some(servers) = &self.servers {
-            let shown = self.selected.as_ref().filter(|s| servers.contains(s)).or(servers.first());
-            (shown.map_or_else(|| "Выберите сервер".to_string(), |s| display_text(s)), !busy)
-        } else {
-            ("Загрузка…".to_string(), false)
-        };
+        let (picker_label, picker_enabled) = self.picker_label();
         let inner = width - if nested { 2.0 } else { 30.0 };
         let mut button = row().key(format!("hit:vpn-server:{key}")).w_full().min_h(28.0).pl(8.0).pr(28.0).py(5.0).radius(8.0).items_center()
             .fill(theme.bg_elevated.alpha(0.05)).border(1.0, theme.bg_elevated.alpha(0.08)).border_layout()
@@ -403,7 +476,9 @@ impl Vpn {
                 if vpn.busy || !vpn.visible || vpn.subscription_revision != revision {
                     return;
                 }
-                if vpn.failed || vpn.servers.as_ref().map_or(true, Vec::is_empty) {
+                // No servers but the provider's words: the list opens on them.
+                let only_notes = vpn.servers.as_ref().is_some_and(Vec::is_empty) && vpn.notes.as_ref().is_some_and(|n| !n.is_empty());
+                if !only_notes && (vpn.failed || vpn.servers.as_ref().map_or(true, Vec::is_empty)) {
                     if revision.is_some() {
                         vpn.load_servers(act);
                     } else {
@@ -473,23 +548,54 @@ impl Vpn {
     fn server_menu(&self, v: &View<'_>, width: f32, revision: u64) -> El {
         let theme = v.theme;
         let ink = v.ink;
-        let pinging = self.pinging;
+        // With no servers there is nothing to check: the button fetches the subscription
+        // again instead, for a provider that answers once a device is freed.
+        let no_servers = self.servers.as_ref().map_or(true, Vec::is_empty);
+        let busy = if no_servers { self.refreshing } else { self.pinging };
+        let label = match (no_servers, busy) {
+            (true, true) => "ОБНОВЛЕНИЕ…",
+            (true, false) => "ОБНОВИТЬ",
+            (false, true) => "ПРОВЕРКА…",
+            (false, false) => "ПРОВЕРИТЬ ВСЕ",
+        };
         let head = row().w_full().px(4.0).pt(2.0).pb(6.0).mb(4.0).items_center().justify_between()
             .border_sides([0.0, 0.0, 1.0, 0.0], theme.bg_elevated.alpha(0.07))
             .child(text("СЕРВЕРЫ").font(accent(theme, 9.6).tracking(1.34)).color(ink.alpha(0.5)))
             .child({
-                let mut ping = el().key("hit:vpn-ping").px(9.0).py(3.0).radius(999.0)
-                    .fill(theme.bg_elevated.alpha(0.06)).border(1.0, theme.bg_elevated.alpha(if pinging { 0.12 } else { 0.18 })).border_layout()
+                let mut button = el().key(if no_servers { "hit:vpn-refetch" } else { "hit:vpn-ping" }).px(9.0).py(3.0).radius(999.0)
+                    .fill(theme.bg_elevated.alpha(0.06)).border(1.0, theme.bg_elevated.alpha(if busy { 0.12 } else { 0.18 })).border_layout()
                     .hover(theme.bg_elevated.alpha(0.14))
-                    .child(text(if pinging { "ПРОВЕРКА…" } else { "ПРОВЕРИТЬ ВСЕ" }).font(accent(theme, 9.6).tracking(0.96)).color(if pinging { ink.alpha(0.6) } else { ink }));
-                if !pinging {
-                    ping = ping.on_press_tx(v.on(move |vpn: &mut Vpn, act| vpn.ping_all(revision, act)));
+                    .child(text(label).font(accent(theme, 9.6).tracking(0.96)).color(if busy { ink.alpha(0.6) } else { ink }));
+                if !busy {
+                    button = button.on_press_tx(v.on(move |vpn: &mut Vpn, act| {
+                        if no_servers { vpn.refetch(revision, act) } else { vpn.ping_all(revision, act) }
+                    }));
                 }
-                ping
+                button
             });
         let servers = self.ordered();
-        let list_h = (servers.len() as f32 * 32.0 - 2.0).clamp(0.0, 200.0);
+        // The provider's words first: its refusal, then its announcement and placeholders,
+        // as comments nobody can pick. The page (frozen until G5) has no such rows.
+        let note_style = body(theme, 10.4);
+        let note_width = (width - 12.0 - 18.0).max(1.0);
+        let notes: Vec<(String, Color)> = self.notes.iter().flat_map(|notes| {
+            notes.refusal.iter().map(|r| (display_text(r), theme.status_error))
+                .chain(notes.comments.iter().map(|c| (display_text(c), ink.alpha(0.55))))
+                .collect::<Vec<_>>()
+        }).collect();
+        let note_heights: Vec<f32> = notes.iter().map(|(note, _)| {
+            let (_, measured) = rune::text::measure(note, &[], note_style, Some(note_width));
+            measured.min(4.0 * 12.6) + 8.0
+        }).collect();
+        let notes_h: f32 = note_heights.iter().map(|h| h + 2.0).sum();
+        let list_h = (notes_h + servers.len() as f32 * 32.0 - 2.0).clamp(0.0, 200.0);
         let mut list = col().w_full().gap(2.0);
+        for (index, (note, colour)) in notes.into_iter().enumerate() {
+            list = list.child(
+                el().key(format!("vpn-note:{index}")).w_full().px(9.0).py(4.0)
+                    .child(text(note).font(note_style).color(colour).max_lines(4).wrap_anywhere()),
+            );
+        }
         for (index, tag) in servers.into_iter().enumerate() {
             let selected = self.selected.as_deref() == Some(tag.as_str());
             let badge = match self.pings.as_ref().and_then(|p| p.get(&tag)) {
@@ -649,6 +755,27 @@ mod tests {
         assert_eq!(vpn.wake(&LocalTime::default()), Some(0.0), "never read: now");
         vpn.polled = Some(Instant::now());
         assert!(vpn.wake(&LocalTime::default()).unwrap() > 2.9);
+    }
+
+    // Live, 2026-11-26: the provider sent placeholders only ("Лимит устройств достигнут"),
+    // and the picker would have said "Выберите сервер" over an empty list.
+    #[test]
+    fn with_no_servers_the_picker_says_what_the_provider_said() {
+        let mut vpn = Vpn { visible: true, ..Vpn::default() };
+        assert!(vpn.receive_status(Ok(json!({ "subscription_revision": 4 }))));
+        vpn.receive_servers(4, Ok(json!([])));
+        assert_eq!(vpn.picker_label(), ("Выберите сервер".to_string(), true));
+        vpn.notes = Some(Notes::read(&json!({
+            "comments": ["📱 Лимит устройств достигнут", " ", "🤖 Telegram: @bot"],
+            "refusal": "Лимит устройств подписки исчерпан: удалите старое устройство у провайдера",
+        })));
+        assert_eq!(vpn.notes.as_ref().unwrap().comments.len(), 2, "a blank comment is dropped");
+        assert_eq!(vpn.picker_label().0, "Лимит устройств подписки исчерпан: удалите старое устройство у провайдера");
+        vpn.notes = Some(Notes::read(&json!({ "comments": ["❌ Ваше приложение не поддерживается"], "refusal": null })));
+        assert_eq!(vpn.picker_label(), ("❌ Ваше приложение не поддерживается".to_string(), true));
+        // A new subscription forgets the old provider's words.
+        assert!(vpn.receive_status(Ok(json!({ "subscription_revision": 5 }))));
+        assert!(vpn.notes.is_none());
     }
 
     #[test]

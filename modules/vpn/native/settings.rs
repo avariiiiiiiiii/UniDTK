@@ -42,6 +42,9 @@ struct VpnPane {
     /// The settings last acknowledged by the kernel. The switch only changes `enabled`.
     saved_home: Value,
     home: [TextEdit; HOME_FIELDS.len()],
+    /// The provider's host and the device id this machine sends it, so the person can find
+    /// this device in the provider's list of devices.
+    device: Option<(String, String)>,
 }
 
 enum Change {
@@ -124,6 +127,15 @@ impl VpnPane {
         Change::Home { config, message }
     }
 
+    fn load_device(&mut self, act: &mut Act) {
+        act.call("vpn_subscription_notes", json!({}), |pane: &mut Self, result, _| {
+            pane.device = result.ok().and_then(|notes| {
+                let device = &notes["device"];
+                Some((device["host"].as_str()?.to_string(), device["id"].as_str()?.to_string()))
+            });
+        });
+    }
+
     fn save_subscription(&mut self, act: &mut Act) {
         self.save(
             Change::Subscription(self.subscription.text.trim().to_string()),
@@ -167,13 +179,24 @@ impl VpnPane {
 
     fn finish_save(&mut self, change: Change, result: Result<Value, String>, act: &mut Act) {
         self.saving = false;
-        if let Err(error) = result {
-            act.error(format!("Не удалось подтвердить сохранение: {error}"));
+        if let Err(error) = &result {
+            // A link the module cannot fetch is refused with its reason, which is the message.
+            match change {
+                Change::Subscription(_) => act.error(format!("Подписка не сохранена: {error}")),
+                _ => act.error(format!("Не удалось подтвердить сохранение: {error}")),
+            }
             return;
         }
         match change {
             // The backend invalidates its cache here. A later list request fetches the servers.
-            Change::Subscription(_) => act.toast("Подписка сохранена"),
+            // The field shows what was stored: an app's link comes back as its address.
+            Change::Subscription(_) => {
+                if let Some(stored) = result.as_ref().ok().and_then(|settings| settings["subscription_url"].as_str()) {
+                    self.subscription = TextEdit::new(stored);
+                }
+                self.load_device(act);
+                act.toast("Подписка сохранена");
+            }
             Change::AutoConnect(enabled) => self.auto_connect = enabled,
             Change::Home { config, message } => {
                 self.saved_home = config;
@@ -199,6 +222,7 @@ impl Settings for VpnPane {
                 _ => Load::Failed,
             };
         });
+        self.load_device(act);
     }
 
     fn pane(&self, view: &View<'_>) -> El {
@@ -273,6 +297,7 @@ impl Settings for VpnPane {
             "Ссылка на подписку",
             &self.subscription,
             "https://…",
+            true,
             |pane| &mut pane.subscription,
             Self::save_subscription,
         );
@@ -310,6 +335,13 @@ impl Settings for VpnPane {
                     .py(10.0)
                     .child(controls::field_label(look, "Ссылка на подписку", ""))
                     .child(subscription)
+                    .children(self.device.as_ref().map(|(host, id)| {
+                        text(format!("Идентификатор устройства для {host}: {id}"))
+                            .key("vpn-device-id")
+                            .font(look.font(11.0, 400.0))
+                            .color(look.fg.alpha(0.6))
+                            .wrap_anywhere()
+                    }))
                     .child(row().child(controls::button(
                         look,
                         "hit:vpn-sub-save".into(),
@@ -345,6 +377,7 @@ impl Settings for VpnPane {
                             label,
                             &self.home[index],
                             placeholder,
+                            matches!(*id, "uuid" | "public_key" | "short_id"),
                             move |pane| &mut pane.home[index],
                             Self::save_home,
                         )),
@@ -363,17 +396,31 @@ impl Settings for VpnPane {
     }
 }
 
-/// Enter submits the form, as on the page.
+/// Enter submits the form, as on the page. A `secret` field (the subscription link, the
+/// home server's id and keys) shows its text but keeps it out of the element tree, which
+/// `udtk host tree` reads on the socket; such a field does not copy or undo.
+#[allow(clippy::too_many_arguments)]
 fn input(
     view: &View<'_>,
     key: String,
     label: &str,
     edit: &TextEdit,
     placeholder: &str,
+    secret: bool,
     field: impl Fn(&mut VpnPane) -> &mut TextEdit + 'static,
     submit: fn(&mut VpnPane, &mut Act),
 ) -> El {
     let look = view.look;
+    let mut text_field = controls::text_field(edit, look.font(13.0, 400.0), look.fg)
+        .single_line()
+        .key(key)
+        .label(label.to_string())
+        .placeholder(placeholder.to_string(), look.fg.alpha(0.55))
+        .on_edit(view.edit(field))
+        .on_submit(view.on(submit));
+    if secret {
+        text_field = text_field.secure().revealed(true);
+    }
     el().w_full()
         .min_h(32.0)
         .px(10.0)
@@ -382,15 +429,7 @@ fn input(
         .border(1.0, look.elev.alpha(0.16))
         .border_layout()
         .fill(look.well.alpha(0.25))
-        .child(
-            controls::text_field(edit, look.font(13.0, 400.0), look.fg)
-                .single_line()
-                .key(key)
-                .label(label.to_string())
-                .placeholder(placeholder.to_string(), look.fg.alpha(0.55))
-                .on_edit(view.edit(field))
-                .on_submit(view.on(submit)),
-        )
+        .child(text_field)
 }
 
 fn switch_row(look: &Look, name: &str, sub: &str, switch: El) -> El {

@@ -12,6 +12,7 @@ use super::{HomeServerConfig, VpnServer};
 
 const SETTINGS: &str = "settings";
 const CACHE: &str = "servers_cache";
+const DEVICE_SECRET: &str = "device_secret";
 const SUBSCRIPTION_CHANGED: &str = "VPN subscription changed during the request";
 
 static STORE: OnceLock<SettingsStore> = OnceLock::new();
@@ -166,6 +167,22 @@ impl SettingsStore {
             return Err(SUBSCRIPTION_CHANGED.into());
         }
         finish()
+    }
+
+    /// A random id made once and kept, for a machine whose own id cannot be read
+    /// (`hwid.rs`): the device headers then stay the same from one start to the next.
+    pub(super) fn device_secret(&self) -> Result<String, String> {
+        let _guard = self.lock()?;
+        if let Some(bytes) = self.db.kv_get(DEVICE_SECRET)? {
+            if let Ok(secret) = String::from_utf8(bytes) {
+                if !secret.is_empty() {
+                    return Ok(secret);
+                }
+            }
+        }
+        let secret = super::hwid::random_secret();
+        self.db.kv_set(DEVICE_SECRET, secret.as_bytes())?;
+        Ok(secret)
     }
 
     /// Used inside `with_current_subscription` to keep the disk cache and revision together.

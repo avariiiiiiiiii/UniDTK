@@ -19,6 +19,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ureq = { version = "2", features = ["socks-proxy"] }
 base64 = "0.22"
 tauri = { version = "2" }
+# The device id a provider's device limit counts (`hwid.rs`); the workspace already
+# builds sha2 0.10, so this adds no crate.
+sha2 = "0.10"
 
 # `GetAdaptersAddresses`: which IPv4 ranges an adapter already holds, so the TUN
 # never asks for an address another client (Happ, Tailscale, ZeroTier) owns.
@@ -34,5 +37,7 @@ features = [
   # The server check's sing-box closes with the kernel (`dies_with_kernel`).
   "Win32_Security",
   "Win32_System_JobObjects",
-  "Win32_System_Threading"
+  "Win32_System_Threading",
+  # The machine's id, the Windows version and the model for the device headers.
+  "Win32_System_Registry"
 ]

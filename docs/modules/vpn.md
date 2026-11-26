@@ -82,9 +82,17 @@ The helper has two modes. `start` launches sing-box. `stop` kills it. Everything
 
 ## Step 2: From subscription text to server list
 
+### 2.0 The link a person pastes
+
+`vpn_set_subscription_url` stores the address, not whatever was pasted. `subscription::normalize_link` takes an `http(s)` address as it is and unwraps an app's own link to the address it carries: the value of `url=` (percent-encoded, as Clash and sing-box write it; a `+` stays a plus, because tokens carry it) or a path that continues with the address (`happ://add/<url>`, `incy://add/<url>`, `v2raytun://import/<url>`, `hiddify://import/<url>`). The fragment (`#name`) is the app's label and is dropped. It refuses, with a Russian reason that never repeats the link (the link is a credential): an encrypted link (`happ://crypt…`, `incy://crypt…`, opened only by its own app), a link wrapped twice, a user and password in the address, and an address on this computer (loopback, unspecified, link-local). A home server on the local network stays allowed. The settings field then shows what was stored.
+
 ### 2.1 Fetching
 
-`fetch_servers` downloads the subscription with `ureq`, using the User-Agent `v2box/1.0` and a 15-second timeout. It then decodes the body and keeps only lines that start with `vless://` or `trojan://`. If nothing usable remains, it fails with `no usable VLESS/Trojan servers found in subscription`.
+`subscription::fetch` downloads the subscription with `ureq`, using the User-Agent `v2box/1.0` (it selects the base64 list; a Clash User-Agent gets YAML), a 15-second timeout and a 4 MiB cap on the body. It sends the device headers a provider's device limit counts (Remnawave, [docs.rw, HWID device limit](https://docs.rw/docs/features/hwid-device-limit/)): `x-hwid`, `x-device-os: Windows`, `x-ver-os` (from the registry's `CurrentVersion`), `x-device-model` (the BIOS product name, printable ASCII, "PC" for a firmware placeholder). `x-hwid` (`hwid.rs`) is the first 32 hex characters of SHA-256 over the machine's `MachineGuid` (read from the 64-bit registry view), a fixed salt and the provider's host, so two providers cannot tell they serve one machine and the id survives a reinstall. When the machine's id cannot be read, a random id made once and kept in the module's store (`device_secret`) takes its place, never a hash of nothing. The settings pane shows the id under the link, so the person can find this device in the provider's list. Without the headers, the user's provider answered with three placeholders and `X-Hwid-Not-Supported: true`; with them, with `X-Hwid-Max-Devices-Reached: true` (session 152).
+
+The answer is split into servers and the provider's notes (`subscription::Notes`): its `profile-title` and `announce` headers (plain or `base64:` UTF-8), and its placeholders, entries that cannot be dialled (`0.0.0.0`, `::`, port 0 or 1) or carry an all-zero id, whose names are the provider's message ("❌ Ваше приложение не поддерживается", "📱 Лимит устройств достигнут"). `x-hwid-max-devices-reached` or `x-hwid-not-supported` becomes the notes' refusal. Placeholders never enter the server list, so a connect, the check and the fallback to the first server never pick one. A provider's answer is accepted even with no servers: only a transport failure is an error, and only a transport failure falls back to the cached list (a provider that now refuses this device would otherwise be hidden behind servers that no longer let it in). An answer marks the revision as fetched, so a list of placeholders is not fetched again on every call; the panel's "ОБНОВИТЬ" (`vpn_refresh_servers`) asks again. A connect or a check with no servers answers with the refusal or the first note. Every URL in a fetch error is cut back to its scheme and host, a `user:password@` included (`subscription::redact_urls`), before it is logged or returned.
+
+`vpn_subscription_notes` (read_ui) answers the notes for the current revision and the device id for its provider, without the address. `vpn_list_servers` is served on the socket and answers `ServerView` records: tag, protocol, host, port, transport and security, never the id, password or keys, which stay in the module and its cache. The panel draws the refusal and the notes as rows nobody can pick, above the servers; with no servers, its button reads "ОБНОВИТЬ" instead of "ПРОВЕРИТЬ ВСЕ", and its picker shows the provider's words instead of "Выберите сервер". The subscription field and the home server's id and keys are secure fields shown in plain text (`.secure().revealed(true)`): `udtk host tree` cannot read them, and they do not copy or undo. The page (WebView2) is frozen until G5 and shows none of this.
 
 ### 2.2 Decoding: plain text or base64
 
@@ -124,7 +132,7 @@ A VLESS link has the form `vless://<uuid>@<host>:<port>?<query>#<name>`. `parse_
 
 A Trojan link is parsed the same way, except that the password takes the place of the UUID. Its default security is `tls`, and its SNI defaults to the host name.
 
-The parsed list is kept in `vpn_servers.json`, so a restart does not need the network to show servers.
+The parsed list is kept in the module's store (`servers_cache`), so a restart does not need the network to show servers.
 
 ---
 
