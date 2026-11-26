@@ -1868,7 +1868,6 @@ fn endpoint_timeout(deadline: Instant, now: Instant) -> Option<Duration> {
 fn probe_proxy_get(port: u16, budget: Duration) -> Result<u32, String> {
     let proxy = ureq::Proxy::new(format!("socks5://127.0.0.1:{port}"))
         .map_err(|e| format!("proxy config error: {e}"))?;
-    let agent = ureq::AgentBuilder::new().proxy(proxy).build();
 
     // Multiple endpoints to maximize success rate across different server configs.
     // Some servers block certain endpoints, so we try several in sequence, within one
@@ -1890,6 +1889,10 @@ fn probe_proxy_get(port: u16, budget: Duration) -> Result<u32, String> {
             last_error = format!("no answer within {} s ({last_error})", budget.as_secs());
             break;
         };
+        // ureq bounds the SOCKS handshake by the agent's `timeout_connect` (30 s unless
+        // set), not by the request's `.timeout()`: an agent per endpoint carries what is
+        // left of the budget into the handshake, where a dead server's probe waits.
+        let agent = ureq::AgentBuilder::new().proxy(proxy.clone()).timeout_connect(timeout).build();
         match agent
             .get(url)
             .timeout(timeout)
@@ -2788,8 +2791,8 @@ impl unidtk_api::Module for VpnModule {
 mod subscription_tests {
     use super::{
         build_singbox_config, build_singbox_outbound, decode_subscription, endpoint_timeout,
-        parse_subscription, parse_vless_line, pick_server, pick_tun_address, read_tail,
-        resolve_ipv4, subscription_host, VpnServer, VpnSettings,
+        parse_subscription, parse_vless_line, pick_server, pick_tun_address, probe_proxy_get,
+        read_tail, resolve_ipv4, subscription_host, VpnServer, VpnSettings,
     };
     use base64::Engine;
     use std::time::{Duration, Instant};
@@ -2944,6 +2947,26 @@ mod subscription_tests {
         assert_eq!(endpoint_timeout(deadline, now), Some(Duration::from_secs(5)));
         assert_eq!(endpoint_timeout(deadline, now + Duration::from_millis(4900)), None);
         assert_eq!(endpoint_timeout(deadline, now + Duration::from_secs(6)), None);
+    }
+
+    // Live, 2026-11-26: France answered the check after 15.0 s with a 5 s budget. The
+    // budget was the request's `.timeout()`, which ureq applies after the connection; the
+    // SOCKS handshake through sing-box waits on the agent's `timeout_connect` (30 s by
+    // default), so a dead server held its probe until sing-box gave up dialling it.
+    #[test]
+    fn a_proxy_that_never_answers_costs_only_the_budget() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // Accept and hold every connection without a byte of the SOCKS greeting.
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let start = Instant::now();
+        assert!(probe_proxy_get(port, Duration::from_millis(800)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(3), "the probe took {:?}", start.elapsed());
     }
 
     #[test]
