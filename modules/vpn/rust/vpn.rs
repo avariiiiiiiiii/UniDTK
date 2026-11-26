@@ -13,42 +13,87 @@ mod subscription;
 use settings::{store, SettingsStore, Snapshot, VpnSettings};
 use unidtk_api::settings::{ModuleSettings, SettingKind, SettingSpec};
 
-/// What the VPN shows in the menu's declared fields (`r[modules.settings-contract]`); the
-/// subscription and the home server are still its own pane's.
-const DECLARED_SETTINGS: &[SettingSpec] = &[SettingSpec {
-    key: "auto_connect",
-    label: "Подключаться при запуске",
-    summary: "VPN включится сам, когда запустится UniDTK",
-    kind: SettingKind::Switch { default: false },
-    secret: false,
-}];
+/// What the VPN shows in the menu's declared fields (`r[modules.settings-contract]`). The
+/// home server is a record its own pane section draws.
+const DECLARED_SETTINGS: &[SettingSpec] = &[
+    SettingSpec {
+        key: "subscriptions",
+        label: "Подписки",
+        summary: "Ссылки на подписки; серверы всех подписок в одном списке",
+        kind: SettingKind::TextList { placeholder: "https://…", max_items: 8, max_chars: 4096 },
+        secret: true,
+    },
+    SettingSpec {
+        key: "auto_connect",
+        label: "Подключаться при запуске",
+        summary: "VPN включится сам, когда запустится UniDTK",
+        kind: SettingKind::Switch { default: false },
+        secret: false,
+    },
+    SettingSpec { key: "home_server", label: "Домашний сервер", summary: "", kind: SettingKind::Record, secret: true },
+];
 
 /// The kernel's keeper of [`DECLARED_SETTINGS`], from the module's context.
 static DECLARED: std::sync::OnceLock<Arc<dyn ModuleSettings>> = std::sync::OnceLock::new();
+
+/// Moves what the old record held for the menu into the settings contract, once each (a
+/// stored version means it moved, or the person has set it since): the subscription
+/// address, auto-connect and the home server; then the remembered server becomes a key of
+/// the first subscription. Never stops start-up: an error is logged and start-up goes on.
+fn migrate_settings(store: &SettingsStore, declared: &dyn ModuleSettings) {
+    let record = store.raw_record().unwrap_or(serde_json::Value::Null);
+    let mut moved = Vec::new();
+    let mut move_value = |key: &str, value: serde_json::Value| match declared.get(key) {
+        Ok(current) if current.version == 0 => match declared.set(key, value, Some(0)) {
+            Ok(_) => moved.push(key.to_string()),
+            Err(error) => unidtk_api::log(format!("vpn: {key} not moved into the settings contract: {error}")),
+        },
+        Ok(_) => {}
+        Err(error) => unidtk_api::log(format!("vpn: {key} not moved into the settings contract: {error}")),
+    };
+    if let Some(url) = record["subscription_url"].as_str().map(str::trim).filter(|url| !url.is_empty()) {
+        match subscription::normalize_link(url) {
+            Ok(url) if !url.is_empty() => move_value("subscriptions", json!([url])),
+            Ok(_) => {}
+            Err(error) => unidtk_api::log(format!("vpn: the stored subscription was not moved: {error}")),
+        }
+    }
+    if record["auto_connect"] == true {
+        move_value("auto_connect", json!(true));
+    }
+    if record["home_server"].is_object() {
+        move_value("home_server", record["home_server"].clone());
+    }
+    if !moved.is_empty() {
+        unidtk_api::log(format!("vpn: moved into the settings contract: {}", moved.join(", ")));
+    }
+    // A remembered server from the one-subscription days is a plain tag; it becomes the
+    // key of the first subscription's server of that name.
+    if let Ok((_, subscriptions)) = store.subscriptions() {
+        if let Some(first) = subscriptions.first() {
+            let plain = |tag: &str| !subscriptions.iter().any(|sub| tag.starts_with(&format!("{}/", sub.id)));
+            let _ = store.update(|settings| {
+                if let Some(tag) = settings.last_tag.take() {
+                    settings.last_tag = Some(if plain(&tag) { format!("{}/{tag}", first.id) } else { tag });
+                }
+                if !settings.default_tag.is_empty() && plain(&settings.default_tag) {
+                    settings.default_tag = format!("{}/{}", first.id, settings.default_tag);
+                }
+            });
+        }
+    }
+}
+
+/// The remembered server's subscription, when it is one of the current ones.
+fn subscription_of<'a>(key: &str, subscriptions: &'a [settings::Subscription]) -> Option<&'a settings::Subscription> {
+    subscriptions.iter().find(|sub| key.starts_with(&format!("{}/", sub.id)))
+}
 
 /// Connect at start-up; off when the contract cannot be read.
 fn auto_connect_on() -> bool {
     DECLARED.get().and_then(|declared| declared.get("auto_connect").ok()).is_some_and(|stored| stored.value == true)
 }
 
-/// Moves `auto_connect` from the old record into the settings contract, once (a stored
-/// version means it moved, or the person has set it since). Never stops start-up: an
-/// error is logged and the switch reads as off.
-fn migrate_auto_connect(db: &dyn unidtk_api::ModuleDb, declared: &dyn ModuleSettings) {
-    let Ok(Some(bytes)) = db.kv_get("settings") else { return };
-    let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return };
-    if record["auto_connect"] != true {
-        return;
-    }
-    match declared.get("auto_connect") {
-        Ok(current) if current.version == 0 => match declared.set("auto_connect", json!(true), Some(0)) {
-            Ok(_) => unidtk_api::log("vpn: auto_connect moved into the settings contract"),
-            Err(error) => unidtk_api::log(format!("vpn: auto_connect not moved: {error}")),
-        },
-        Ok(_) => {}
-        Err(error) => unidtk_api::log(format!("vpn: auto_connect not moved: {error}")),
-    }
-}
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -136,15 +181,6 @@ fn stop_done_path() -> std::path::PathBuf {
     data_dir().join("vpn_stop.done")
 }
 
-fn settings_status(settings: VpnSettings) -> VpnSettingsStatus {
-    VpnSettingsStatus {
-        default_tag: settings.default_tag,
-        last_tag: settings.last_tag,
-        subscription_url: settings.subscription_url,
-        home_server: settings.home_server,
-    }
-}
-
 // ── Commands ────────────────────────────────────────────────────────────────
 // The writes answer `null` or the settings, exactly as the Tauri commands of the
 // same names did, so the interface sees the same shapes.
@@ -153,21 +189,18 @@ fn settings_status(settings: VpnSettings) -> VpnSettingsStatus {
 unidtk_api::module_commands! {
     impl VpnModule {
         read_only "vpn_status" "VPN runtime status" |this| Ok(status(&this.runtime));
-        read_only "vpn_settings" "VPN settings" |this| settings();
         read_only(long) "vpn_list_servers" "VPN servers" |this, subscription_revision: Option<u64>| list_servers(&this.runtime, subscription_revision);
-        read_ui "vpn_subscription_notes" "The provider's notes beside its servers, and this machine's device id for it" |this| Ok(subscription_notes(&this.runtime));
+        read_ui "vpn_groups" "Each subscription: its provider's words, its server count and this machine's device id for it" |this| Ok(groups_status(&this.runtime));
         write(long) "vpn_refresh_servers" "Fetch the subscription again" |this| refresh_servers(&this.runtime);
-        write "vpn_set_subscription_url" "Set the subscription URL" |this, url: String| set_subscription_url(url);
-        write "vpn_set_home_server_config" "Set the home server" |this, config: HomeServerConfig| set_home_server_config(config);
-        write(long) "vpn_connect" "Connect to a server (or the selected one)" |this, tag: Option<String>, subscription_revision: Option<u64>| {
-            unidtk_api::log(format!("vpn: command connect tag={tag:?}"));
-            connect(&this.runtime, tag, subscription_revision)
+        write(long) "vpn_connect" "Connect to a server (or the selected one)" |this, key: Option<String>, subscription_revision: Option<u64>| {
+            unidtk_api::log(format!("vpn: command connect key={key:?}"));
+            connect(&this.runtime, key, subscription_revision)
         };
         write(long) "vpn_disconnect" "Drop the current connection" |this| {
             disconnect(&this.runtime);
             Ok(())
         };
-        write "vpn_select_server" "Select the server to connect to" |this, tag: String| select_server(&this.runtime, tag);
+        write "vpn_select_server" "Select the server to connect to" |this, key: String| select_server(&this.runtime, key);
         // Not a read, though it answers with measurements: it takes a global
         // in-progress guard and stores the results.
         write(long) "vpn_ping_all" "Measure latency of every server" |this, subscription_revision: Option<u64>| ping_all(&this.runtime, subscription_revision);
@@ -176,28 +209,6 @@ unidtk_api::module_commands! {
 
 fn load_settings() -> Result<VpnSettings, String> {
     store()?.read()
-}
-
-pub fn settings() -> Result<VpnSettingsStatus, String> {
-    Ok(settings_status(load_settings()?))
-}
-
-pub fn set_subscription_url(url: String) -> Result<VpnSettingsStatus, String> {
-    // An app's own link (`happ://add/<url>`) is stored as the address it carries; one
-    // this module cannot fetch is refused here, not at the next fetch.
-    let url = subscription::normalize_link(&url)?;
-    let settings = store()?.update(|settings| settings.subscription_url = url)?;
-    unidtk_api::log("vpn: subscription_url updated in redb");
-    Ok(settings_status(settings))
-}
-
-pub fn set_home_server_config(config: HomeServerConfig) -> Result<VpnSettingsStatus, String> {
-    let settings = store()?.update(|settings| settings.home_server = config)?;
-    unidtk_api::log(format!(
-        "vpn: home_server config updated in redb (enabled={})",
-        settings.home_server.enabled
-    ));
-    Ok(settings_status(settings))
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -219,6 +230,12 @@ pub struct VpnServer {
     pub path: String,
     #[serde(rename = "serviceName")]
     pub service_name: String,
+    /// `<subscription id>/<tag>`: what connect, the check and the panel name it by.
+    #[serde(default)]
+    pub key: String,
+    /// Its subscription's id.
+    #[serde(default)]
+    pub group: String,
 }
 
 /// A server as the list commands show it: no id, password or key. `vpn_list_servers` is
@@ -226,6 +243,7 @@ pub struct VpnServer {
 /// the module and its cache.
 #[derive(Clone, Serialize)]
 pub struct ServerView {
+    pub key: String,
     pub tag: String,
     pub protocol: String,
     pub host: String,
@@ -237,6 +255,7 @@ pub struct ServerView {
 impl From<&VpnServer> for ServerView {
     fn from(server: &VpnServer) -> Self {
         Self {
+            key: server.key.clone(),
             tag: server.tag.clone(),
             protocol: server.protocol.clone(),
             host: server.host.clone(),
@@ -259,7 +278,10 @@ fn default_security() -> String {
 pub struct VpnStatus {
     pub connected: bool,
     pub connecting: bool,
+    /// The selected server's key (`<subscription id>/<tag>`).
     pub selected_tag: Option<String>,
+    /// Its name, for the panel to show.
+    pub selected_name: Option<String>,
     #[serde(rename = "proxyLatencyMs")]
     pub proxy_latency_ms: Option<u32>,
     #[serde(rename = "proxyError")]
@@ -277,14 +299,6 @@ pub struct VpnStatus {
     /// Subscription entries that are not VLESS or Trojan, or do not parse.
     #[serde(rename = "skippedServers")]
     pub skipped_servers: usize,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct VpnSettingsStatus {
-    pub default_tag: String,
-    pub last_tag: Option<String>,
-    pub subscription_url: String,
-    pub home_server: HomeServerConfig,
 }
 
 #[derive(Default, Clone)]
@@ -311,8 +325,8 @@ struct RuntimeInner {
     last_error: Option<String>,
     /// Entries of the last subscription this module could not use.
     skipped_servers: usize,
-    /// The provider's notes from the last answer for this revision.
-    notes: subscription::Notes,
+    /// Each subscription's notes and failure from the last fetch for this revision.
+    groups: Vec<Group>,
     /// The provider answered for this revision, servers or not: a list of placeholders
     /// only is an answer, and fetching it again on every call would only repeat it.
     fetched: bool,
@@ -324,17 +338,19 @@ impl RuntimeInner {
             self.servers_revision = revision;
             self.servers.clear();
             self.skipped_servers = 0;
-            self.notes = subscription::Notes::default();
+            self.groups.clear();
             self.fetched = false;
         }
     }
 
-    /// Why there is no server to use: the provider's refusal, else its first note.
+    /// Why there is no server to use: a provider's refusal, else a note, else a failure.
     fn no_servers(&self) -> String {
-        self.notes
-            .refusal
-            .clone()
-            .or_else(|| self.notes.comments.first().map(|note| format!("В подписке нет серверов: {note}")))
+        let groups = &self.groups;
+        groups
+            .iter()
+            .find_map(|g| g.refusal.clone())
+            .or_else(|| groups.iter().find_map(|g| g.comments.first().map(|note| format!("В подписке нет серверов: {note}"))))
+            .or_else(|| groups.iter().find_map(|g| g.error.clone()))
             .unwrap_or_else(|| "no servers available".to_string())
     }
 
@@ -367,7 +383,7 @@ impl RuntimeInner {
             // Two subscriptions can use the same tag for different servers.
             if self.connected
                 && self.connected_revision == snapshot.revision
-                && self.selected_tag.as_deref() == Some(server.tag.as_str())
+                && self.selected_tag.as_deref() == Some(server.key.as_str())
             {
                 unidtk_api::log(format!("vpn: connect to '{}' ignored: already connected to it", server.tag));
                 return Ok(None);
@@ -471,6 +487,8 @@ fn parse_vless_line(line: &str) -> Option<VpnServer> {
         flow: params.get("flow").cloned().unwrap_or_default(),
         path: params.get("path").cloned().unwrap_or_else(|| "/".into()),
         service_name: params.get("serviceName").cloned().unwrap_or_default(),
+        key: String::new(),
+        group: String::new(),
     })
 }
 
@@ -510,6 +528,8 @@ fn parse_trojan_line(line: &str) -> Option<VpnServer> {
         flow: String::new(),
         path: params.get("path").cloned().unwrap_or_else(|| "/".into()),
         service_name: params.get("serviceName").cloned().unwrap_or_default(),
+        key: String::new(),
+        group: String::new(),
     })
 }
 
@@ -565,13 +585,13 @@ fn pick_server(
     if let Some(tag) = requested.filter(|t| !t.is_empty()) {
         return servers
             .iter()
-            .find(|s| s.tag == tag)
+            .find(|s| s.key == tag)
             .cloned()
             .map(|s| (s, false))
             .ok_or_else(|| format!("server '{tag}' is not in the subscription"));
     }
     if let Some(tag) = remembered.filter(|t| !t.is_empty()) {
-        if let Some(server) = servers.iter().find(|s| s.tag == tag) {
+        if let Some(server) = servers.iter().find(|s| s.key == tag) {
             return Ok((server.clone(), false));
         }
     }
@@ -952,7 +972,7 @@ fn build_singbox_outbound(server: &VpnServer, tag: &str, dial: &str) -> serde_js
 /// `tun` the TUN address chosen for this connect ([`pick_tun_address`]).
 fn build_singbox_config(
     server: &VpnServer,
-    settings: &VpnSettings,
+    home: &HomeServerConfig,
     dial: &str,
     tun: &str,
 ) -> serde_json::Value {
@@ -973,8 +993,8 @@ fn build_singbox_config(
         json!({ "outbound": "direct", "domain_suffix": [".ru"] }),
     ];
 
-    if settings.home_server.enabled && !settings.home_server.host.trim().is_empty() {
-        let hs = &settings.home_server;
+    if home.enabled && !home.host.trim().is_empty() {
+        let hs = home;
         outbounds.push(json!({
             "type": "vless",
             "tag": "lan-home",
@@ -1596,7 +1616,7 @@ fn wait_until_stopped(timeout: Duration, stop_nonce: Option<&str>) -> bool {
 /// must not block `status()`/`select_server()` polling on the same lock.
 fn bring_up(
     server: &VpnServer,
-    settings: &VpnSettings,
+    home: &HomeServerConfig,
     epoch: u64,
     dial: Result<String, String>,
     deadline: Instant,
@@ -1666,8 +1686,8 @@ fn bring_up(
     // subnet is excluded too: `strict_route` would take it away from its own
     // split-tunnel outbound.
     let mut occupied = occupied_v4_ranges();
-    if settings.home_server.enabled {
-        let subnet = settings.home_server.subnet.trim();
+    if home.enabled {
+        let subnet = home.subnet.trim();
         if let Some((network, prefix)) = subnet.split_once('/') {
             if let (Some(network), Ok(prefix)) = (parse_v4(network), prefix.parse::<u8>()) {
                 occupied.push((network, prefix.min(32)));
@@ -1677,7 +1697,7 @@ fn bring_up(
     let (tun, tun_literal) = pick_tun_address(&occupied);
     unidtk_api::log(format!("vpn: tun address {tun} ({} held ranges)", occupied.len()));
 
-    let singbox_cfg = build_singbox_config(server, settings, &dial, &tun);
+    let singbox_cfg = build_singbox_config(server, home, &dial, &tun);
     std::fs::write(
         singbox_config_path(),
         serde_json::to_string_pretty(&singbox_cfg).unwrap_or_default(),
@@ -1826,6 +1846,7 @@ fn bring_up(
 
 #[derive(Clone, Serialize)]
 pub struct VpnPingResult {
+    pub key: String,
     pub tag: String,
     #[serde(rename = "latencyMs")]
     pub latency_ms: Option<u32>,
@@ -2154,7 +2175,7 @@ pub fn ping_all(
                     if unreachable.is_none() && port_is_open(port) {
                         if let Ok(latency_ms) = probe_proxy_get(port, SERVER_CHECK_BUDGET) {
                             r = Some(VpnPingResult {
-                                tag: servers[i].tag.clone(),
+                                key: servers[i].key.clone(), tag: servers[i].tag.clone(),
                                 latency_ms: Some(latency_ms),
                                 ok: true,
                                 error: None,
@@ -2164,7 +2185,7 @@ pub fn ping_all(
                     // If proxy probe failed or port was not open, report real failure (no fake TCP ping)
                     if r.is_none() {
                         r = Some(VpnPingResult {
-                            tag: servers[i].tag.clone(),
+                            key: servers[i].key.clone(), tag: servers[i].tag.clone(),
                             latency_ms: None,
                             ok: false,
                             error: Some(unreachable.unwrap_or_else(|| "Proxy probe failed".to_string())),
@@ -2191,7 +2212,7 @@ pub fn ping_all(
         .enumerate()
         .map(|(i, r)| {
             r.unwrap_or_else(|| VpnPingResult {
-                tag: servers[i].tag.clone(),
+                key: servers[i].key.clone(), tag: servers[i].tag.clone(),
                 latency_ms: None,
                 ok: false,
                 error: Some("probe aborted".into()),
@@ -2219,44 +2240,78 @@ pub fn ping_all(
 
 // ─── Public API used by Tauri commands ───
 
-pub fn list_servers(
-    runtime: &VpnRuntime,
-    subscription_revision: Option<u64>,
-) -> Result<Vec<ServerView>, String> {
+/// One subscription in the lists: its provider's words, and a transport failure if it
+/// had one. Its servers carry its id in `group`.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Group {
+    pub id: String,
+    pub host: String,
+    pub title: Option<String>,
+    pub refusal: Option<String>,
+    pub comments: Vec<String>,
+    /// A transport failure, cut back to the host; the subscription's cached servers, if
+    /// any, stay listed.
+    pub error: Option<String>,
+}
+
+/// The lists as the panel draws them: each subscription with its notes and its servers.
+fn groups_view(inner: &RuntimeInner) -> serde_json::Value {
+    let groups: Vec<serde_json::Value> = inner
+        .groups
+        .iter()
+        .map(|group| {
+            let servers: Vec<ServerView> = inner.servers.iter().filter(|s| s.group == group.id).map(ServerView::from).collect();
+            json!({
+                "id": group.id, "host": group.host, "title": group.title, "refusal": group.refusal,
+                "comments": group.comments, "error": group.error, "servers": servers,
+            })
+        })
+        .collect();
+    json!({ "groups": groups })
+}
+
+pub fn list_servers(runtime: &VpnRuntime, subscription_revision: Option<u64>) -> Result<serde_json::Value, String> {
     let settings_store = store()?;
     let snapshot = settings_store.snapshot(subscription_revision)?;
     ensure_servers(runtime, settings_store, &snapshot)?;
     let inner = runtime.inner.lock().unwrap();
-    settings_store.with_current_subscription(snapshot.revision, || Ok(inner.servers.iter().map(ServerView::from).collect()))
+    settings_store.with_current_subscription(snapshot.revision, || Ok(groups_view(&inner)))
 }
 
-pub fn refresh_servers(runtime: &VpnRuntime) -> Result<Vec<ServerView>, String> {
+pub fn refresh_servers(runtime: &VpnRuntime) -> Result<serde_json::Value, String> {
     let settings_store = store()?;
     let snapshot = settings_store.snapshot(None)?;
     runtime.inner.lock().unwrap().use_subscription(snapshot.revision);
     fetch_into(runtime, settings_store, &snapshot, true)?;
-    Ok(runtime.inner.lock().unwrap().servers.iter().map(ServerView::from).collect())
+    Ok(groups_view(&runtime.inner.lock().unwrap()))
 }
 
-/// What the provider said beside its servers, for the revision the list is for, and the
-/// device id this machine sends it (the settings pane shows it, so the person can find
-/// this device in the provider's list). No address: the notes are not a credential.
-fn subscription_notes(runtime: &VpnRuntime) -> serde_json::Value {
+/// The subscriptions as the settings pane shows them, without fetching: per provider its
+/// words, its server count, and the device id this machine sends it (so the person can find
+/// this device in the provider's list). No address.
+fn groups_status(runtime: &VpnRuntime) -> serde_json::Value {
     let snapshot = store().and_then(|store| store.snapshot(None)).ok();
     let inner = runtime.inner.lock().unwrap();
     let current = snapshot.as_ref().is_some_and(|snapshot| snapshot.revision == inner.servers_revision);
-    let notes = if current { inner.notes.clone() } else { subscription::Notes::default() };
-    let host = snapshot
-        .as_ref()
-        .map(|snapshot| subscription::provider_host(&snapshot.settings.subscription_url))
-        .filter(|host| !host.is_empty());
-    json!({
-        "subscription_revision": snapshot.as_ref().map(|snapshot| snapshot.revision),
-        "title": notes.title,
-        "comments": notes.comments,
-        "refusal": notes.refusal,
-        "device": host.map(|host| json!({ "host": host, "id": hwid::id_for(&host) })),
-    })
+    let groups: Vec<serde_json::Value> = snapshot
+        .iter()
+        .flat_map(|snapshot| snapshot.subscriptions.iter())
+        .map(|sub| {
+            let host = subscription::provider_host(&sub.url);
+            let group = inner.groups.iter().find(|g| current && g.id == sub.id);
+            json!({
+                "id": sub.id,
+                "host": host,
+                "title": group.and_then(|g| g.title.clone()),
+                "refusal": group.and_then(|g| g.refusal.clone()),
+                "error": group.and_then(|g| g.error.clone()),
+                "fetched": group.is_some(),
+                "servers": inner.servers.iter().filter(|s| current && s.group == sub.id).count(),
+                "device_id": hwid::id_for(&host),
+            })
+        })
+        .collect();
+    json!({ "subscription_revision": snapshot.as_ref().map(|s| s.revision), "groups": groups })
 }
 
 fn ensure_servers(runtime: &VpnRuntime, settings_store: &SettingsStore, snapshot: &Snapshot) -> Result<(), String> {
@@ -2269,14 +2324,28 @@ fn ensure_servers(runtime: &VpnRuntime, settings_store: &SettingsStore, snapshot
     fetch_into(runtime, settings_store, snapshot, false)
 }
 
-/// Fetches the subscription and publishes it for `snapshot`'s revision. The network
-/// part holds neither the runtime lock nor the settings lock: a status poll during a
-/// 15-second fetch answers at once. `force` fetches even when another caller filled
-/// the list while this one waited for [`FETCH`].
+/// A subscription's servers with their keys (`<subscription id>/<tag>`): two providers
+/// may name a server the same.
+fn keyed(servers: Vec<VpnServer>, id: &str) -> Vec<VpnServer> {
+    servers
+        .into_iter()
+        .map(|mut server| {
+            server.key = format!("{id}/{}", server.tag);
+            server.group = id.to_string();
+            server
+        })
+        .collect()
+}
+
+/// Fetches every subscription at once and publishes them for `snapshot`'s revision. The
+/// network part and the cache writes hold neither the runtime lock nor the settings lock:
+/// a status poll during a 15-second fetch answers at once. A subscription that failed on
+/// the way keeps its cached servers and says why; one that answered (servers or not)
+/// replaces its cache. `force` fetches even when another caller filled the lists while
+/// this one waited for [`FETCH`].
 fn fetch_into(runtime: &VpnRuntime, settings_store: &SettingsStore, snapshot: &Snapshot, force: bool) -> Result<(), String> {
-    let url = &snapshot.settings.subscription_url;
-    if url.is_empty() {
-        return Err("VPN subscription URL is not configured".into());
+    if snapshot.subscriptions.is_empty() {
+        return Err("Нет подписок: добавьте ссылку в настройках VPN".into());
     }
     let _fetch = FETCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if !force {
@@ -2285,51 +2354,69 @@ fn fetch_into(runtime: &VpnRuntime, settings_store: &SettingsStore, snapshot: &S
             return Ok(());
         }
     }
-    let fetched = subscription::fetch(url);
-    let mut inner = runtime.inner.lock().unwrap();
-    // Publication and fallback use the revision the fetch was for, and only while it is
-    // still the current one (the guard refuses a fetch a newer subscription replaced).
-    settings_store.with_current_subscription(snapshot.revision, || {
-        inner.use_subscription(snapshot.revision);
-        match fetched {
-            // The provider's answer, servers or not: a device limit or a list of
-            // placeholders replaces what was cached, because the old servers no longer
-            // let this device in.
-            Ok(subscription::Fetched { servers, notes, skipped }) => {
+    let answers: Vec<(settings::Subscription, Result<subscription::Fetched, String>)> = std::thread::scope(|scope| {
+        let pending: Vec<_> = snapshot
+            .subscriptions
+            .iter()
+            .map(|sub| (sub.clone(), scope.spawn(move || subscription::fetch(&sub.url))))
+            .collect();
+        pending
+            .into_iter()
+            .map(|(sub, handle)| (sub, handle.join().unwrap_or_else(|_| Err("subscription fetch panicked".into()))))
+            .collect()
+    });
+    let (mut servers, mut groups, mut skipped, mut answered) = (Vec::new(), Vec::new(), 0, true);
+    for (sub, answer) in answers {
+        let mut group = Group { id: sub.id.clone(), host: subscription::provider_host(&sub.url), ..Group::default() };
+        match answer {
+            Ok(subscription::Fetched { servers: fetched, notes, skipped: left_out }) => {
+                let fetched = keyed(fetched, &sub.id);
                 unidtk_api::log(format!(
-                    "vpn: fetched {} servers, {} notes, {skipped} entries skipped{}",
-                    servers.len(),
+                    "vpn: {} fetched {} servers, {} notes, {left_out} entries skipped{}",
+                    group.host,
+                    fetched.len(),
                     notes.comments.len(),
                     notes.refusal.as_deref().map(|refusal| format!("; provider: {refusal}")).unwrap_or_default()
                 ));
-                if let Err(error) = settings_store.save_servers_cache(&servers) {
-                    unidtk_api::log(format!("vpn: could not cache refreshed servers: {error}"));
+                if let Err(error) = settings_store.save_servers_cache(&sub.id, &fetched) {
+                    unidtk_api::log(format!("vpn: could not cache the servers of {}: {error}", group.host));
                 }
-                inner.servers = servers;
-                inner.skipped_servers = skipped;
-                inner.notes = notes;
-                inner.fetched = true;
-                Ok(())
+                group.title = notes.title;
+                group.refusal = notes.refusal;
+                group.comments = notes.comments;
+                skipped += left_out;
+                servers.extend(fetched);
             }
             // The error is already cut back to the host (`subscription::redact_urls`).
-            Err(e) => {
-                unidtk_api::log(format!("vpn: fetch_servers failed: {e}"));
-                // A transport failure can use the server list saved for this subscription.
-                if !inner.servers.is_empty() {
-                    unidtk_api::log("vpn: keeping in-memory servers after failed refresh");
-                    return Ok(());
-                }
-                let cached = settings_store.load_servers_cache();
+            Err(error) => {
+                answered = false;
+                unidtk_api::log(format!("vpn: fetch_servers failed: {error}"));
+                let cached = settings_store.load_servers_cache(&sub.id);
                 if !cached.is_empty() {
-                    unidtk_api::log(format!(
-                        "vpn: using {} cached servers after failed refresh",
-                        cached.len()
-                    ));
-                    inner.servers = cached;
-                    return Ok(());
+                    unidtk_api::log(format!("vpn: using {} cached servers of {}", cached.len(), group.host));
                 }
-                Err(e)
+                group.error = Some(error);
+                servers.extend(cached);
             }
+        }
+        groups.push(group);
+    }
+    settings_store.prune_caches(&snapshot.subscriptions.iter().map(|sub| sub.id.clone()).collect::<Vec<_>>());
+    let mut inner = runtime.inner.lock().unwrap();
+    // Publication uses the revision the fetch was for, and only while it is still the
+    // current one (the guard refuses a fetch a newer list of subscriptions replaced).
+    settings_store.with_current_subscription(snapshot.revision, || {
+        inner.use_subscription(snapshot.revision);
+        let failed = (servers.is_empty() && groups.iter().all(|g| g.error.is_some()))
+            .then(|| groups.iter().find_map(|g| g.error.clone()))
+            .flatten();
+        inner.servers = servers;
+        inner.groups = groups;
+        inner.skipped_servers = skipped;
+        inner.fetched = answered;
+        match failed {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     })
 }
@@ -2394,6 +2481,11 @@ pub fn status(runtime: &VpnRuntime) -> VpnStatus {
         connected: inner.connected,
         connecting: inner.connecting,
         selected_tag: inner.selected_tag.clone(),
+        selected_name: inner
+            .selected_tag
+            .as_deref()
+            .and_then(|key| inner.servers.iter().find(|s| s.key == key))
+            .map(|s| s.tag.clone()),
         proxy_latency_ms: inner.proxy_latency_ms,
         proxy_error: inner.proxy_error.clone(),
         ip_unverified: inner.ip_unverified,
@@ -2453,7 +2545,7 @@ pub fn connect(
     // Held to the end: a disconnect or a server check waits for this bring-up (and its
     // cleanup below) instead of running its stop in the middle of it.
     let _lifecycle = lifecycle();
-    let result = bring_up(&server, &snapshot.settings, epoch, dial, Instant::now() + CONNECT_BUDGET);
+    let result = bring_up(&server, &settings_store.home_server(), epoch, dial, Instant::now() + CONNECT_BUDGET);
 
     let mut inner = runtime.inner.lock().unwrap();
     if CONNECT_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch {
@@ -2486,7 +2578,7 @@ pub fn connect(
             inner.connected = true;
             inner.connected_revision = snapshot.revision;
             CONNECTED.store(true, std::sync::atomic::Ordering::SeqCst);
-            inner.selected_tag = Some(server.tag.clone());
+            inner.selected_tag = Some(server.key.clone());
             inner.proxy_latency_ms = outcome.latency_ms;
             inner.proxy_error = None;
             // ip_unverified stays false (set when connecting was reserved,
@@ -2495,7 +2587,7 @@ pub fn connect(
             inner.last_error = None;
             // Keep the remembered tag ordered with the live selection. A later
             // subscription change can supersede this preference during bring-up.
-            let remember = settings_store.remember_connected(snapshot.revision, server.tag.clone());
+            let remember = settings_store.remember_connected(snapshot.revision, server.key.clone());
             MANUAL_DISCONNECT.store(false, std::sync::atomic::Ordering::SeqCst);
             drop(inner);
             publish_vpn_state();
@@ -2685,10 +2777,11 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
                 return;
             }
         };
+        let subscriptions = store().and_then(|store| store.subscriptions()).map(|(_, list)| list).unwrap_or_default();
         unidtk_api::log(format!(
-            "vpn: auto-connect settings enabled={} sub_url_empty={} default_tag={:?} last_tag={:?}",
+            "vpn: auto-connect settings enabled={} subscriptions={} default={:?} last={:?}",
             auto_connect_on(),
-            settings.subscription_url.is_empty(),
+            subscriptions.len(),
             settings.default_tag,
             settings.last_tag
         ));
@@ -2696,18 +2789,14 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
             unidtk_api::log("vpn: auto-connect skipped, disabled by last manual disconnect");
             return;
         }
-        if settings.subscription_url.is_empty() {
-            unidtk_api::log("vpn: auto-connect aborted, no subscription_url");
+        let Some(first) = subscriptions.first() else {
+            unidtk_api::log("vpn: auto-connect aborted, no subscription");
             return;
-        }
-        let target = settings
-            .last_tag
-            .filter(|t| !t.is_empty())
-            .unwrap_or(settings.default_tag);
-        if target.is_empty() {
-            unidtk_api::log("vpn: auto-connect aborted, empty target tag");
-            return;
-        }
+        };
+        // The remembered server is passed as remembered, not requested: when its
+        // subscription is gone, the connect falls back to the first server.
+        let remembered = settings.last_tag.clone().filter(|t| !t.is_empty()).unwrap_or(settings.default_tag.clone());
+        let waited_for = remembered.is_empty().then_some(first).or_else(|| subscription_of(&remembered, &subscriptions)).unwrap_or(first);
         MANUAL_DISCONNECT.store(false, std::sync::atomic::Ordering::SeqCst);
         // Re-checked before each step: the AUTO toggle being switched off
         // (the `auto_connect` setting) or a manual disconnect during an in-flight try must
@@ -2725,7 +2814,7 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
         };
         // At logon the network often comes up after the app: a connect then is refused
         // for carrying no traffic, so wait until the subscription's host resolves.
-        let host = subscription_host(&settings.subscription_url);
+        let host = subscription_host(&waited_for.url);
         let waited = Instant::now();
         while let Err(error) = resolve_ipv4(&host) {
             if waited.elapsed() >= AUTO_CONNECT_NETWORK_WAIT {
@@ -2742,8 +2831,8 @@ pub fn auto_connect_on_startup(runtime: VpnRuntime) {
             if cancelled("during attempts") {
                 return;
             }
-            unidtk_api::log(format!("vpn: auto-connect attempt {attempt} -> {target}"));
-            match connect(&runtime, Some(target.clone()), None) {
+            unidtk_api::log(format!("vpn: auto-connect attempt {attempt} -> {remembered:?}"));
+            match connect(&runtime, None, None) {
                 Ok(()) => {
                     unidtk_api::log("vpn: auto-connect succeeded");
                     return;
@@ -2848,7 +2937,10 @@ impl unidtk_api::Module for VpnModule {
         // Before the switched-off gate, so a disabled module's setting moves too.
         match ctx.settings() {
             Ok(declared) => {
-                migrate_auto_connect(ctx.db().as_ref(), declared.as_ref());
+                if let Ok(store) = store() {
+                    store.declare(declared.clone());
+                    migrate_settings(store, declared.as_ref());
+                }
                 let _ = DECLARED.set(declared);
             }
             Err(error) => unidtk_api::log(format!("vpn: {error}")),
@@ -2878,6 +2970,53 @@ impl unidtk_api::Module for VpnModule {
         DECLARED_SETTINGS
     }
 
+    /// Every subscription row is a link this module can fetch (an app's link is stored as
+    /// the address it carries), and none twice; the home server is a whole record.
+    fn check_setting(&self, key: &str, _old: &serde_json::Value, new: serde_json::Value) -> Result<serde_json::Value, String> {
+        match key {
+            "subscriptions" => {
+                let mut kept: Vec<String> = Vec::new();
+                for (index, row) in new.as_array().into_iter().flatten().enumerate() {
+                    let url = subscription::normalize_link(row.as_str().unwrap_or_default())
+                        .map_err(|reason| format!("Подписка {}: {reason}", index + 1))?;
+                    if url.is_empty() {
+                        continue;
+                    }
+                    if kept.contains(&url) {
+                        return Err(format!("Подписка {}: такая уже есть", index + 1));
+                    }
+                    kept.push(url);
+                }
+                Ok(json!(kept))
+            }
+            "home_server" => {
+                let config: HomeServerConfig = serde_json::from_value(new).map_err(|_| "Домашний сервер: запись не читается".to_string())?;
+                if config.port == 0 {
+                    return Err("Порт должен быть числом от 1 до 65535".into());
+                }
+                serde_json::to_value(config).map_err(|error| error.to_string())
+            }
+            _ => Ok(new),
+        }
+    }
+
+    /// A subscription removed under a live or starting tunnel takes the tunnel with it.
+    fn setting_changed(&self, key: &str, _version: u64) {
+        if key != "subscriptions" {
+            return;
+        }
+        let ids: Vec<String> = store().and_then(|store| store.subscriptions()).map(|(_, list)| list.into_iter().map(|s| s.id).collect()).unwrap_or_default();
+        let orphaned = {
+            let inner = self.runtime.inner.lock().unwrap();
+            (inner.connected || inner.connecting)
+                && inner.selected_tag.as_deref().is_some_and(|key| !ids.iter().any(|id| key.starts_with(&format!("{id}/"))))
+        };
+        if orphaned {
+            unidtk_api::log("vpn: the live server's subscription was removed; disconnecting");
+            disconnect(&self.runtime);
+        }
+    }
+
     /// A non-zero budget waits for the elevated helper to confirm that sing-box
     /// is gone: the exit paths off the main thread (`quit_app`, session end) pass
     /// one, because a surviving TUN black-holes the network after the next boot.
@@ -2898,7 +3037,7 @@ mod subscription_tests {
     use super::{
         build_singbox_config, build_singbox_outbound, decode_subscription, endpoint_timeout,
         parse_subscription, parse_vless_line, pick_server, pick_tun_address, probe_proxy_get,
-        read_tail, resolve_ipv4, subscription_host, VpnServer, VpnSettings,
+        read_tail, resolve_ipv4, subscription_host, VpnServer,
     };
     use base64::Engine;
     use std::time::{Duration, Instant};
@@ -2977,8 +3116,7 @@ mod subscription_tests {
             "vless://id@ess.example:443?security=reality&sni=ess.example&pbk=k&sid=s#ess",
         )
         .unwrap();
-        let settings = VpnSettings::default();
-        let config = build_singbox_config(&server, &settings, "64.188.82.140", "172.31.0.1/30");
+        let config = build_singbox_config(&server, &super::HomeServerConfig::default(), "64.188.82.140", "172.31.0.1/30");
         let outbounds = config["outbounds"].as_array().unwrap();
         assert_eq!(outbounds[0]["server"], "64.188.82.140");
         assert_eq!(outbounds[0]["tls"]["server_name"], "ess.example");
@@ -3002,7 +3140,9 @@ mod subscription_tests {
     }
 
     fn server(tag: &str) -> VpnServer {
-        parse_vless_line(&format!("vless://id@{tag}.example:443?security=tls&sni={tag}.example#{tag}")).unwrap()
+        let mut server = parse_vless_line(&format!("vless://id@{tag}.example:443?security=tls&sni={tag}.example#{tag}")).unwrap();
+        server.key = tag.to_string();
+        server
     }
 
     #[test]
@@ -3091,5 +3231,59 @@ mod subscription_tests {
         assert!(tail.len() <= 100, "{}", tail.len());
         assert!(tail.starts_with("line "), "{tail:?}");
         assert!(tail.ends_with("line 1999\n"), "{tail:?}");
+    }
+}
+
+#[cfg(test)]
+mod settings_contract_tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use unidtk_api::settings::{InMemorySettings, ModuleSettings};
+    use unidtk_api::{InMemoryModuleDb, ModuleDb};
+
+    use super::settings::SettingsStore;
+    use super::{migrate_settings, DECLARED_SETTINGS};
+
+    // The one-subscription record moves into the contract once, its app link unwrapped,
+    // and the remembered server becomes a key of that subscription.
+    #[test]
+    fn the_old_record_moves_into_the_contract_once() {
+        let db = Arc::new(InMemoryModuleDb::new());
+        db.kv_set(
+            "settings",
+            br#"{"subscription_url":"happ://add/https://x.example/T+k","auto_connect":true,"home_server":{"enabled":true,"host":"h.example","port":443},"last_tag":"Estonia"}"#,
+        )
+        .unwrap();
+        let store = SettingsStore::new(db.clone(), std::env::temp_dir().join("unidtk-vpn-migrate-none"));
+        let declared = Arc::new(InMemorySettings::new(DECLARED_SETTINGS));
+        store.declare(declared.clone());
+        migrate_settings(&store, declared.as_ref());
+        assert_eq!(declared.get("subscriptions").unwrap().value, json!(["https://x.example/T+k"]));
+        assert_eq!(declared.get("auto_connect").unwrap().value, json!(true));
+        assert_eq!(declared.get("home_server").unwrap().value["host"], "h.example");
+        let (_, subscriptions) = store.subscriptions().unwrap();
+        let key = store.read().unwrap().last_tag.unwrap();
+        assert_eq!(key, format!("{}/Estonia", subscriptions[0].id));
+
+        // Again: nothing moves twice, the key stays a key.
+        declared.set("auto_connect", json!(false), None).unwrap();
+        migrate_settings(&store, declared.as_ref());
+        assert_eq!(declared.get("auto_connect").unwrap().value, json!(false));
+        assert_eq!(declared.get("subscriptions").unwrap().version, 1);
+        assert_eq!(store.read().unwrap().last_tag.unwrap(), key);
+    }
+
+    #[test]
+    fn the_module_checks_its_subscriptions_and_its_home_server() {
+        let module = super::create_module();
+        let checked = module
+            .check_setting("subscriptions", &json!([]), json!(["happ://add/https://a.example/s", "https://b.example/s"]))
+            .unwrap();
+        assert_eq!(checked, json!(["https://a.example/s", "https://b.example/s"]));
+        assert!(module.check_setting("subscriptions", &json!([]), json!(["https://a.example/s", "https://a.example/s"])).unwrap_err().contains("уже есть"));
+        assert!(module.check_setting("subscriptions", &json!([]), json!(["happ://crypt4/x"])).unwrap_err().starts_with("Подписка 1:"));
+        assert!(module.check_setting("home_server", &json!({}), json!({ "host": "h", "port": 0 })).is_err());
+        assert_eq!(module.check_setting("home_server", &json!({}), json!({ "host": "h", "port": 8443 })).unwrap()["port"], 8443);
     }
 }

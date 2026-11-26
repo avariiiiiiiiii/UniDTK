@@ -65,7 +65,7 @@ fn concurrent_writes_merge_on_the_latest_settings() {
             })
         });
         entered.wait();
-        let lock_is_held = matches!(store.revision.try_lock(), Err(TryLockError::WouldBlock));
+        let lock_is_held = matches!(store.lock.try_lock(), Err(TryLockError::WouldBlock));
         let second =
             scope.spawn(|| store.update(|settings| settings.last_tag = Some("chosen".into())));
         release.wait();
@@ -78,93 +78,92 @@ fn concurrent_writes_merge_on_the_latest_settings() {
     assert_eq!(saved.last_tag.as_deref(), Some("chosen"));
 }
 
-#[test]
-fn failed_writes_preserve_settings_and_the_subscription_revision() {
-    let dir = LegacyDir::new();
-    let db = Arc::new(InMemoryModuleDb::new());
-    let original = br#"{"subscription_url":"https://old.example/","default_tag":"kept"}"#;
-    db.kv_set(SETTINGS, original).unwrap();
-    db.kv_set(CACHE, b"previous cache").unwrap();
-    let store = SettingsStore::new(Arc::new(RejectWrites(db.clone())), dir.0.clone());
-
-    assert!(store
-        .update(|settings| settings.default_tag = "changed".into())
-        .is_err());
-    assert!(store
-        .update(|settings| settings.subscription_url = "https://new.example/".into())
-        .is_err());
-    assert_eq!(db.kv_get(SETTINGS).unwrap().as_deref(), Some(&original[..]));
-    assert_eq!(
-        db.kv_get(CACHE).unwrap().as_deref(),
-        Some(&b"previous cache"[..])
-    );
-    assert_eq!(store.snapshot(None).unwrap().revision, 0);
+fn declared() -> Arc<unidtk_api::settings::InMemorySettings> {
+    Arc::new(unidtk_api::settings::InMemorySettings::new(crate::DECLARED_SETTINGS))
 }
 
 #[test]
-fn changing_the_subscription_invalidates_even_an_earlier_fetch_of_the_same_url() {
+fn failed_writes_preserve_settings() {
     let dir = LegacyDir::new();
     let db = Arc::new(InMemoryModuleDb::new());
-    let store = SettingsStore::new(db.clone(), dir.0.clone());
-    let first_url = "https://first.example/";
-    store
-        .update(|settings| settings.subscription_url = first_url.into())
-        .unwrap();
-    let first = store.snapshot(None).unwrap();
-    db.kv_set(CACHE, b"existing cache").unwrap();
-    store
-        .update(|settings| settings.subscription_url = first_url.into())
-        .unwrap();
-    assert_eq!(store.snapshot(Some(first.revision)).unwrap().revision, first.revision);
-    assert_eq!(
-        db.kv_get(CACHE).unwrap().as_deref(),
-        Some(&b"existing cache"[..])
-    );
+    let original = br#"{"default_tag":"kept"}"#;
+    db.kv_set(SETTINGS, original).unwrap();
+    let store = SettingsStore::new(Arc::new(RejectWrites(db.clone())), dir.0.clone());
+    assert!(store.update(|settings| settings.default_tag = "changed".into()).is_err());
+    assert_eq!(db.kv_get(SETTINGS).unwrap().as_deref(), Some(&original[..]));
+    assert_eq!(store.snapshot(None).unwrap().revision, 0);
+}
 
-    store
-        .update(|settings| settings.subscription_url = "https://second.example/".into())
-        .unwrap();
-    store
-        .update(|settings| settings.subscription_url = first_url.into())
-        .unwrap();
-    store
-        .remember_connected(first.revision, "stale tag".into())
-        .unwrap();
-    let last = store.snapshot(None).unwrap();
-    assert_eq!(last.settings.subscription_url, first_url);
-    assert!(last.settings.last_tag.is_none());
-    assert_ne!(last.revision, first.revision);
-    assert_eq!(
-        store.snapshot(Some(first.revision)).err().as_deref(),
-        Some(SUBSCRIPTION_CHANGED)
-    );
-    assert_eq!(db.kv_get(CACHE).unwrap().as_deref(), Some(&b"[]"[..]));
+// The revision is the stored version of the subscriptions (r[modules.settings-contract]):
+// it survives a kernel restart, so the panel never sees it go back.
+#[test]
+fn the_revision_is_the_stored_version_of_the_subscriptions() {
+    let dir = LegacyDir::new();
+    let store = SettingsStore::new(Arc::new(InMemoryModuleDb::new()), dir.0.clone());
+    let declared = declared();
+    store.declare(declared.clone());
+    declared.set("subscriptions", serde_json::json!(["https://first.example/"]), None).unwrap();
+    let first = store.snapshot(None).unwrap();
+    assert_eq!(first.revision, 1);
+    assert_eq!(first.subscriptions.len(), 1);
+    assert_eq!(first.subscriptions[0].url, "https://first.example/");
+    assert_eq!(first.subscriptions[0].id.len(), 8);
+
+    declared.set("subscriptions", serde_json::json!(["https://first.example/"]), None).unwrap();
+    assert_eq!(store.snapshot(Some(first.revision)).unwrap().revision, 1, "an unchanged list keeps its revision");
+
+    declared.set("subscriptions", serde_json::json!(["https://first.example/", "https://second.example/"]), None).unwrap();
+    store.remember_connected(first.revision, "stale/key".into()).unwrap();
+    assert!(store.read().unwrap().last_tag.is_none(), "a connect from the old list is not remembered");
+    assert_eq!(store.snapshot(Some(first.revision)).err().as_deref(), Some(SUBSCRIPTION_CHANGED));
     let result: Result<(), String> = store.with_current_subscription(first.revision, || {
         panic!("a stale fetch must never publish");
     });
     assert!(result.is_err());
+    let second = store.snapshot(None).unwrap();
+    assert_eq!(second.subscriptions[0].id, first.subscriptions[0].id, "an address keeps its id");
+}
+
+#[test]
+fn every_subscription_keeps_its_own_cache_and_a_removed_one_loses_it() {
+    let dir = LegacyDir::new();
+    let db = Arc::new(InMemoryModuleDb::new());
+    let store = SettingsStore::new(db.clone(), dir.0.clone());
+    let server = parse_vless_line("vless://id@a.example:443#a").unwrap();
+    store.save_servers_cache("aaaa1111", std::slice::from_ref(&server)).unwrap();
+    store.save_servers_cache("bbbb2222", std::slice::from_ref(&server)).unwrap();
+    db.kv_set("servers_cache", b"[]").unwrap();
+    assert_eq!(store.load_servers_cache("aaaa1111").len(), 1);
+    store.prune_caches(&["aaaa1111".to_string()]);
+    assert_eq!(store.load_servers_cache("aaaa1111").len(), 1);
+    assert!(store.load_servers_cache("bbbb2222").is_empty());
+    assert!(db.kv_get("servers_cache").unwrap().is_none(), "the single cache of old is gone");
 }
 
 #[test]
 fn connection_reservation_checks_the_subscription_even_for_a_warm_list() {
     let dir = LegacyDir::new();
     let store = SettingsStore::new(Arc::new(InMemoryModuleDb::new()), dir.0.clone());
-    store.update(|settings| settings.subscription_url = "https://old.example/".into()).unwrap();
+    let declared = declared();
+    store.declare(declared.clone());
+    declared.set("subscriptions", serde_json::json!(["https://old.example/"]), None).unwrap();
     let old = store.snapshot(None).unwrap();
+    let mut server = parse_vless_line("vless://test@old.example:443#same").unwrap();
+    server.key = "old0id00/same".into();
     let mut inner = RuntimeInner {
-        servers: vec![parse_vless_line("vless://test@old.example:443#same").unwrap()],
+        servers: vec![server],
         servers_revision: old.revision,
         connected_revision: old.revision,
         connected: true,
-        selected_tag: Some("same".into()),
+        selected_tag: Some("old0id00/same".into()),
         ..RuntimeInner::default()
     };
-    assert!(inner.reserve_connect(&store, &old, Some("same")).unwrap().is_none());
+    assert!(inner.reserve_connect(&store, &old, Some("old0id00/same")).unwrap().is_none());
     assert!(!inner.connecting);
 
-    store.update(|settings| settings.subscription_url = "https://new.example/".into()).unwrap();
+    declared.set("subscriptions", serde_json::json!(["https://new.example/"]), None).unwrap();
     assert_eq!(
-        inner.reserve_connect(&store, &old, Some("same")).err().as_deref(),
+        inner.reserve_connect(&store, &old, Some("old0id00/same")).err().as_deref(),
         Some(SUBSCRIPTION_CHANGED)
     );
     assert!(!inner.connecting);
@@ -172,8 +171,10 @@ fn connection_reservation_checks_the_subscription_even_for_a_warm_list() {
 
     let current = store.snapshot(None).unwrap();
     inner.use_subscription(current.revision);
-    inner.servers.push(parse_vless_line("vless://test@new.example:443#same").unwrap());
-    let (server, _) = inner.reserve_connect(&store, &current, Some("same")).unwrap().unwrap();
+    let mut fresh = parse_vless_line("vless://test@new.example:443#same").unwrap();
+    fresh.key = "new0id00/same".into();
+    inner.servers.push(fresh);
+    let (server, _) = inner.reserve_connect(&store, &current, Some("new0id00/same")).unwrap().unwrap();
     assert!(inner.connecting);
     assert_eq!(server.host, "new.example");
 }
@@ -194,7 +195,6 @@ fn legacy_settings_are_removed_only_after_a_successful_import() {
 
     let imported = store.read().unwrap();
     assert_eq!(imported.default_tag, "legacy");
-    assert_eq!(imported.home_server.port, 443);
     assert!(db.kv_get(SETTINGS).unwrap().is_some());
     assert!(!dir.settings_path().exists());
 }

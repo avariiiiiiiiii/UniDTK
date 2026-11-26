@@ -71,6 +71,18 @@ pub fn random_secret() -> String {
     format!("{:016x}{:016x}", half(), half())
 }
 
+/// A subscription's id: 8 hex characters of SHA-256 over this machine's secret and the
+/// address. It keys the subscription's cache and its servers (`<id>/<tag>`), and does not
+/// give the address away: the server list that carries it is served on the socket.
+pub fn subscription_id(url: &str) -> String {
+    subscription_id_with(&device().secret, url)
+}
+
+pub fn subscription_id_with(secret: &str, url: &str) -> String {
+    let digest = Sha256::digest(format!("{secret}|unidtk-vpn-subscription|{url}"));
+    digest.iter().take(4).map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The id this machine sends to `host`, for the settings pane to show.
 pub fn id_for(host: &str) -> String {
     hwid(&device().secret, host)

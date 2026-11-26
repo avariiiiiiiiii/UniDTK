@@ -1,4 +1,7 @@
-//! VPN's pane in the native settings menu (r[shell.widget-contract]).
+//! VPN's live section in the native settings menu (r[shell.widget-contract]): below the
+//! declared fields the menu draws itself (the subscriptions, auto-connect;
+//! r[modules.settings-contract]), the state of each subscription with the device id this
+//! machine sends its provider, and the home server, a record stored through the contract.
 
 use std::rc::Rc;
 
@@ -32,22 +35,26 @@ enum Load {
     Ready,
 }
 
+/// How long "Обновить" waits: every subscription is fetched again (15 s each, at once).
+const REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
+
 #[derive(Default)]
 struct VpnPane {
     load: Load,
     connected: Option<bool>,
     saving: bool,
-    subscription: TextEdit,
-    /// The settings last acknowledged by the kernel. The switch only changes `enabled`.
+    /// The home server last acknowledged by the kernel, and its version. The switch only
+    /// changes `enabled`.
     saved_home: Value,
+    home_version: u64,
     home: [TextEdit; HOME_FIELDS.len()],
-    /// The provider's host and the device id this machine sends it, so the person can find
-    /// this device in the provider's list of devices.
-    device: Option<(String, String)>,
+    /// `vpn_groups`: per subscription its host, its provider's words, its server count and
+    /// the device id this machine sends it, so the person can find this device there.
+    groups: Vec<Value>,
+    refreshing: bool,
 }
 
 enum Change {
-    Subscription(String),
     Home {
         config: Value,
         message: &'static str,
@@ -55,10 +62,7 @@ enum Change {
 }
 
 impl VpnPane {
-    fn fill(&mut self, settings: &Value) {
-        self.subscription =
-            TextEdit::new(settings["subscription_url"].as_str().unwrap_or_default());
-        let home = &settings["home_server"];
+    fn fill(&mut self, home: &Value) {
         let port = home["port"]
             .as_u64()
             .and_then(|n| u16::try_from(n).ok())
@@ -124,20 +128,27 @@ impl VpnPane {
         Change::Home { config, message }
     }
 
-    fn load_device(&mut self, act: &mut Act) {
-        act.call("vpn_subscription_notes", json!({}), |pane: &mut Self, result, _| {
-            pane.device = result.ok().and_then(|notes| {
-                let device = &notes["device"];
-                Some((device["host"].as_str()?.to_string(), device["id"].as_str()?.to_string()))
-            });
+    fn load_groups(&mut self, act: &mut Act) {
+        act.call("vpn_groups", json!({}), |pane: &mut Self, result, _| {
+            if let Ok(status) = result {
+                pane.groups = status["groups"].as_array().cloned().unwrap_or_default();
+            }
         });
     }
 
-    fn save_subscription(&mut self, act: &mut Act) {
-        self.save(
-            Change::Subscription(self.subscription.text.trim().to_string()),
-            act,
-        );
+    /// "Обновить": every subscription fetched again, then its state read.
+    fn refresh(&mut self, act: &mut Act) {
+        if self.refreshing {
+            return;
+        }
+        self.refreshing = true;
+        act.call_within("vpn_refresh_servers", json!({}), REFRESH_WAIT, |pane: &mut Self, result, act| {
+            pane.refreshing = false;
+            if let Err(error) = result {
+                act.error(format!("Подписки не обновились: {error}"));
+            }
+            pane.load_groups(act);
+        });
     }
 
     fn save_home(&mut self, act: &mut Act) {
@@ -162,42 +173,27 @@ impl VpnPane {
             return;
         }
         self.saving = true;
-        let (cmd, args) = match &change {
-            Change::Subscription(url) => ("vpn_set_subscription_url", json!({ "url": url })),
-            Change::Home { config, .. } => {
-                ("vpn_set_home_server_config", json!({ "config": config }))
-            }
-        };
-        act.call(cmd, args, move |pane: &mut Self, result, act| {
+        let Change::Home { config, .. } = &change;
+        let args = json!({ "module": "vpn", "key": "home_server", "value": config, "expectedVersion": self.home_version });
+        act.call("settings_set", args, move |pane: &mut Self, result, act| {
             pane.finish_save(change, result, act)
         });
     }
 
     fn finish_save(&mut self, change: Change, result: Result<Value, String>, act: &mut Act) {
         self.saving = false;
-        if let Err(error) = &result {
-            // A link the module cannot fetch is refused with its reason, which is the message.
-            match change {
-                Change::Subscription(_) => act.error(format!("Подписка не сохранена: {error}")),
-                _ => act.error(format!("Не удалось подтвердить сохранение: {error}")),
+        let stored = match result {
+            Ok(stored) => stored,
+            Err(error) => {
+                act.error(format!("Не удалось подтвердить сохранение: {error}"));
+                return;
             }
-            return;
-        }
-        match change {
-            // The backend invalidates its cache here. A later list request fetches the servers.
-            // The field shows what was stored: an app's link comes back as its address.
-            Change::Subscription(_) => {
-                if let Some(stored) = result.as_ref().ok().and_then(|settings| settings["subscription_url"].as_str()) {
-                    self.subscription = TextEdit::new(stored);
-                }
-                self.load_device(act);
-                act.toast("Подписка сохранена");
-            }
-            Change::Home { config, message } => {
-                self.saved_home = config;
-                act.toast(message);
-            }
-        }
+        };
+        let Change::Home { message, .. } = change;
+        // The stored record, normalised by the module; the fields keep what is being typed.
+        self.home_version = stored["version"].as_u64().unwrap_or(self.home_version);
+        self.saved_home = stored["value"].clone();
+        act.toast(message);
     }
 }
 
@@ -208,16 +204,24 @@ impl Settings for VpnPane {
         act.call("vpn_status", json!({}), |pane: &mut Self, result, _| {
             pane.connected = result.ok().and_then(|status| status["connected"].as_bool());
         });
-        act.call("vpn_settings", json!({}), |pane: &mut Self, result, _| {
+        act.call("settings_get", json!({ "module": "vpn" }), |pane: &mut Self, result, _| {
             pane.load = match result {
-                Ok(settings) if settings.is_object() => {
-                    pane.fill(&settings);
+                Ok(settings) if settings["values"].is_object() => {
+                    let home = &settings["values"]["home_server"];
+                    pane.home_version = home["version"].as_u64().unwrap_or(0);
+                    pane.fill(&home["value"]);
                     Load::Ready
                 }
                 _ => Load::Failed,
             };
         });
-        self.load_device(act);
+        self.load_groups(act);
+    }
+
+    fn sibling_changed(&mut self, key: &str, act: &mut Act) {
+        if key == "subscriptions" {
+            self.load_groups(act);
+        }
     }
 
     fn pane(&self, view: &View<'_>) -> El {
@@ -255,7 +259,7 @@ impl Settings for VpnPane {
         let look = if self.saving {
             pending_look = Look {
                 busy: Rc::new(
-                    ["vpn-sub-save", "vpn-home", "vpn-home-save"]
+                    ["vpn-home", "vpn-home-save"]
                         .map(str::to_owned)
                         .into(),
                 ),
@@ -286,16 +290,32 @@ impl Settings for VpnPane {
                     .color(status_colour)
                     .single_line(),
             );
-        let subscription = input(
-            view,
-            "hit:vpn-sub".into(),
-            "Ссылка на подписку",
-            &self.subscription,
-            "https://…",
-            true,
-            |pane| &mut pane.subscription,
-            Self::save_subscription,
-        );
+        // Each subscription's state: what its provider said, how many servers it gave, and
+        // the device id this machine sends it.
+        let mut states = col().gap(6.0).py(10.0)
+            .child(row().w_full().items_center().justify_between()
+                .child(controls::field_label(look, "Состояние подписок", ""))
+                .child(controls::small_button(look, "hit:vpn-refresh".into(), if self.refreshing { "…" } else { "Обновить" }, ButtonKind::Normal, view.on(Self::refresh))));
+        if self.groups.is_empty() {
+            states = states.child(text("Подписок нет: добавьте ссылку выше.").font(look.font(12.0, 400.0)).color(look.fg.alpha(0.6)).wrap());
+        }
+        for (index, group) in self.groups.iter().enumerate() {
+            let host = group["host"].as_str().unwrap_or_default();
+            let title = group["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(host);
+            let (state, alarm) = match (group["refusal"].as_str(), group["error"].as_str(), group["fetched"] == true) {
+                (Some(refusal), _, _) => (refusal.to_string(), true),
+                (None, Some(error), _) => (error.to_string(), true),
+                (None, None, true) => (format!("серверов: {}", group["servers"].as_u64().unwrap_or(0)), false),
+                (None, None, false) => ("ещё не загружена".to_string(), false),
+            };
+            states = states.child(
+                col().key(format!("vpn-group-state:{index}")).w_full().gap(2.0).px(10.0).py(8.0).radius(9.0).fill(look.well.alpha(0.18))
+                    .child(text(title.to_string()).font(look.font(13.0, 500.0)).color(look.fg).single_line().truncate())
+                    .child(text(state).font(look.font(12.0, 400.0)).color(if alarm { look.status_error } else { look.fg.alpha(0.72) }).wrap())
+                    .child(text(format!("Идентификатор устройства: {}", group["device_id"].as_str().unwrap_or_default()))
+                        .font(look.font(11.0, 400.0)).color(look.fg.alpha(0.6)).wrap_anywhere()),
+            );
+        }
         let home_on = self.home_enabled();
         let home = controls::switch(
             look,
@@ -315,27 +335,7 @@ impl Settings for VpnPane {
                     .child(controls::heading(look, "VPN"))
                     .child(status_pill),
             )
-            .child(
-                col()
-                    .gap(6.0)
-                    .py(10.0)
-                    .child(controls::field_label(look, "Ссылка на подписку", ""))
-                    .child(subscription)
-                    .children(self.device.as_ref().map(|(host, id)| {
-                        text(format!("Идентификатор устройства для {host}: {id}"))
-                            .key("vpn-device-id")
-                            .font(look.font(11.0, 400.0))
-                            .color(look.fg.alpha(0.6))
-                            .wrap_anywhere()
-                    }))
-                    .child(row().child(controls::button(
-                        look,
-                        "hit:vpn-sub-save".into(),
-                        "Сохранить подписку",
-                        ButtonKind::Primary,
-                        view.on(Self::save_subscription),
-                    ))),
-            )
+            .child(states)
             .child(controls::heading(look, "Домашний сервер"))
             .child(switch_row(
                 look,
@@ -450,8 +450,7 @@ mod tests {
     #[test]
     fn a_missing_home_server_gets_the_pages_defaults() {
         let mut pane = VpnPane::default();
-        pane.fill(&json!({ "subscription_url": "https://x" }));
-        assert_eq!(pane.subscription.text, "https://x");
+        pane.fill(&json!({}));
         assert!(!pane.home_enabled());
         let config = pane.home_config().unwrap();
         assert_eq!(config["port"], 443);
@@ -477,13 +476,9 @@ mod tests {
             load: Load::Ready,
             ..VpnPane::default()
         };
-        pane.fill(
-            &json!({ "home_server": { "enabled": true, "port": 8443, "host": "example.test" } }),
-        );
+        pane.fill(&json!({ "enabled": true, "port": 8443, "host": "example.test" }));
         pane.home[1] = TextEdit::new("65536");
-        let Change::Home { config, .. } = pane.home_toggle() else {
-            panic!("expected home switch")
-        };
+        let Change::Home { config, .. } = pane.home_toggle();
         assert_eq!(config["enabled"], false);
         assert_eq!(config["port"], 8443);
         assert_eq!(config["host"], "example.test");
@@ -495,7 +490,12 @@ mod tests {
         pane.finish_save(pane.home_toggle(), Err("rejected".into()), &mut act);
         assert!(!pane.saving);
         assert!(pane.home_enabled());
-        pane.finish_save(pane.home_toggle(), Ok(Value::Null), &mut act);
+        pane.finish_save(
+            pane.home_toggle(),
+            Ok(json!({ "version": 2, "value": { "enabled": false, "port": 8443, "host": "example.test" } })),
+            &mut act,
+        );
+        assert_eq!(pane.home_version, 2);
         assert!(!pane.home_enabled());
         assert_eq!(pane.home[1].text, "65536");
     }

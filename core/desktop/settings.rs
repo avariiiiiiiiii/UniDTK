@@ -15,6 +15,9 @@ pub type Factory = fn() -> Box<dyn Settings>;
 pub trait Settings: Any {
     fn load(&mut self, act: &mut Act);
     fn pane(&self, view: &View<'_>) -> El;
+    /// A declared setting of the same module was stored from the fields beside this pane
+    /// (`settings_pane::Composite`): a live section reads again what depends on it.
+    fn sibling_changed(&mut self, _key: &str, _act: &mut Act) {}
 }
 
 pub(crate) struct Session {
@@ -100,7 +103,10 @@ enum Op {
         cmd: &'static str,
         args: Value,
         reply: Reply,
+        /// `None`: the usual wait; a long command (`r[ipc.long-commands-off-thread]`) its own.
+        timeout: Option<std::time::Duration>,
     },
+    Changed(String),
     Toast {
         text: String,
         error: bool,
@@ -126,7 +132,28 @@ impl Act {
                 then(pane, result, act);
             }
         });
-        self.ops.push(Op::Call { cmd, args, reply });
+        self.ops.push(Op::Call { cmd, args, reply, timeout: None });
+    }
+
+    /// [`Act::call`] for a command that runs for seconds, with its own wait.
+    pub fn call_within<P: Settings>(
+        &mut self,
+        cmd: &'static str,
+        args: Value,
+        timeout: std::time::Duration,
+        then: impl FnOnce(&mut P, Result<Value, String>, &mut Act) + Send + 'static,
+    ) {
+        let reply = Box::new(move |pane: &mut dyn Settings, result, act: &mut Act| {
+            if let Some(pane) = downcast::<P>(pane) {
+                then(pane, result, act);
+            }
+        });
+        self.ops.push(Op::Call { cmd, args, reply, timeout: Some(timeout) });
+    }
+
+    /// Tells the panes of this opening that `key` was stored.
+    pub(crate) fn changed(&mut self, key: &str) {
+        self.ops.push(Op::Changed(key.to_string()));
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
@@ -161,15 +188,16 @@ pub(crate) fn run<S: MenuHost>(
 fn run_ops<S: MenuHost>(host: &mut S, generation: u64, tx: &mut Tx, ops: Vec<Op>) {
     for op in ops {
         match op {
-            Op::Call { cmd, args, reply } => {
-                host.call(
-                    cmd,
-                    args,
-                    Box::new(move |host, result, tx| {
-                        run(host, generation, tx, |pane, act| reply(pane, result, act));
-                    }),
-                );
+            Op::Call { cmd, args, reply, timeout } => {
+                let then: Box<dyn FnOnce(&mut S, Result<Value, String>, &mut Tx) + Send> = Box::new(move |host, result, tx| {
+                    run(host, generation, tx, |pane, act| reply(pane, result, act));
+                });
+                match timeout {
+                    Some(timeout) => host.call_long(cmd, args, timeout, then),
+                    None => host.call(cmd, args, then),
+                }
             }
+            Op::Changed(key) => run(host, generation, tx, |pane, act| pane.sibling_changed(&key, act)),
             Op::Toast { text, error } => {
                 host.toasts().show(text, error, None);
                 crate::surface::keep_frames(tx);

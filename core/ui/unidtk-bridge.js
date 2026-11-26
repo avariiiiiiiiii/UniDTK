@@ -65,7 +65,7 @@ export const WS_COMMANDS = [
   "player_status",
   "vpn_status",
   "vpn_list_servers",
-  "vpn_settings",
+  "settings_get",
   "telegram_status",
   "telegram_chats",
   "ai_dj_status",

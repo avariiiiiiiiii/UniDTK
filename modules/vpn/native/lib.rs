@@ -41,8 +41,12 @@ struct Ping {
 #[derive(Default)]
 struct Vpn {
     subscription_revision: Option<u64>,
-    /// The server tags for that revision.
+    /// The server keys (`<subscription id>/<tag>`) for that revision, every subscription's.
     servers: Option<Vec<String>>,
+    /// Each subscription's words and servers, in the order of the settings.
+    groups: Vec<Group>,
+    /// A server's name by its key, for showing.
+    names: HashMap<String, String>,
     loading: bool,
     /// The last read failed: the picker offers "Ошибка подписки · повторить".
     failed: bool,
@@ -62,32 +66,42 @@ struct Vpn {
     menu: bool,
     visible: bool,
     polled: Option<Instant>,
-    /// What the provider said beside its servers (`vpn_subscription_notes`).
-    notes: Option<Notes>,
     /// "ОБНОВИТЬ" runs: the subscription is fetched again.
     refreshing: bool,
 }
 
-/// The provider's notes: its announcement and the placeholder entries it sends in place of
-/// servers, drawn as comments above the servers, and its refusal when it gave none.
+/// One subscription in the list: its header, the provider's words (its refusal, its
+/// announcement and the placeholder entries it sends in place of servers), a transport
+/// failure, and its servers' keys.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct Notes {
-    comments: Vec<String>,
+struct Group {
+    title: String,
     refusal: Option<String>,
+    error: Option<String>,
+    comments: Vec<String>,
+    keys: Vec<String>,
 }
 
-impl Notes {
+impl Group {
     fn read(value: &Value) -> Self {
-        Notes {
+        let text = |field: &str| value[field].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+        Group {
+            title: text("title").or_else(|| text("host")).unwrap_or_default(),
+            refusal: text("refusal"),
+            error: text("error"),
             comments: value["comments"].as_array().into_iter().flatten()
                 .filter_map(|c| c.as_str().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string))
                 .collect(),
-            refusal: value["refusal"].as_str().map(str::trim).filter(|r| !r.is_empty()).map(str::to_string),
+            keys: value["servers"].as_array().into_iter().flatten()
+                .filter_map(|server| server["key"].as_str().map(str::to_string))
+                .collect(),
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.comments.is_empty() && self.refusal.is_none()
+    /// Its words, first the reason it gave no servers.
+    fn notes(&self) -> impl Iterator<Item = (&str, bool)> {
+        self.refusal.iter().chain(self.error.iter()).map(|t| (t.as_str(), true))
+            .chain(self.comments.iter().map(|t| (t.as_str(), false)))
     }
 }
 
@@ -120,12 +134,12 @@ fn server_line(status: &Value) -> String {
     // panel gives no reason (`#538`). A connect that failed has no selected tag
     // to name, so the bare reason is the whole line.
     if let Some(error) = status_error(status) {
-        return match status["selected_tag"].as_str().filter(|t| !t.is_empty()) {
+        return match selected_name(status) {
             Some(tag) => format!("{} · {error}", display_text(tag)),
             None => error,
         };
     }
-    let Some(tag) = status["selected_tag"].as_str().filter(|t| !t.is_empty()) else { return "—".into() };
+    let Some(tag) = selected_name(status) else { return "—".into() };
     let name = display_text(tag);
     let mut line = if let Some(ms) = status["proxyLatencyMs"].as_f64() {
         format!("{name} · прокси: {ms} мс")
@@ -159,6 +173,11 @@ fn status_error(status: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The selected server's name: `selected_name`, else its key.
+fn selected_name(status: &Value) -> Option<&str> {
+    ["selected_name", "selected_tag"].into_iter().find_map(|field| status[field].as_str().filter(|t| !t.is_empty()))
+}
+
 fn listed_tag<'a>(status: &'a Value, servers: &[String]) -> Option<&'a str> {
     status["selected_tag"].as_str()
         .filter(|tag| servers.iter().any(|server| server.as_str() == *tag))
@@ -181,23 +200,8 @@ impl Vpn {
         self.loading = true;
         self.failed = false;
         act.call_within("vpn_list_servers", json!({ "subscriptionRevision": revision }), LIST_WAIT, move |vpn: &mut Vpn, result, act| {
-            match vpn.receive_servers(revision, result) {
-                Some(error) => act.log(format!("vpn_list_servers error={error}")),
-                None => vpn.load_notes(revision, act),
-            }
-        });
-    }
-
-    /// The provider's notes for the list just read: a list of placeholders only is the
-    /// provider talking, and its words are what the picker shows.
-    fn load_notes(&mut self, revision: u64, act: &mut Act<'_>) {
-        act.call("vpn_subscription_notes", json!({}), move |vpn: &mut Vpn, result, act| {
-            match result {
-                Ok(value) if value["subscription_revision"].as_u64() == Some(revision) && vpn.subscription_revision == Some(revision) => {
-                    vpn.notes = Some(Notes::read(&value));
-                }
-                Ok(_) => {}
-                Err(error) => act.log(format!("vpn_subscription_notes error={error}")),
+            if let Some(error) = vpn.receive_servers(revision, result) {
+                act.log(format!("vpn_list_servers error={error}"));
             }
         });
     }
@@ -228,9 +232,13 @@ impl Vpn {
         self.loading = false;
         match result {
             Ok(list) => {
-                let tags: Vec<String> = list.as_array().into_iter().flatten()
-                    .filter_map(|server| server["tag"].as_str().map(str::to_string))
+                let groups: Vec<Value> = list["groups"].as_array().cloned().unwrap_or_default();
+                self.names = groups.iter()
+                    .flat_map(|group| group["servers"].as_array().cloned().unwrap_or_default())
+                    .filter_map(|server| Some((server["key"].as_str()?.to_string(), server["tag"].as_str()?.to_string())))
                     .collect();
+                self.groups = groups.iter().map(Group::read).collect();
+                let tags: Vec<String> = self.groups.iter().flat_map(|group| group.keys.clone()).collect();
                 if self.selected.as_ref().map_or(true, |tag| !tags.contains(tag)) {
                     self.selected = self.status.as_ref().and_then(|status| listed_tag(status, &tags))
                         .map(str::to_string).or_else(|| tags.first().cloned());
@@ -268,7 +276,8 @@ impl Vpn {
                 _ => {
                     self.subscription_revision = Some(revision);
                     self.servers = None;
-                    self.notes = None;
+                    self.groups.clear();
+                    self.names.clear();
                     self.selected = None;
                     self.pings = None;
                     self.loading = false;
@@ -303,7 +312,7 @@ impl Vpn {
         self.pending = Some(next);
         let (cmd, args) = if next {
             let tag = self.servers.as_ref().and_then(|_| self.selected.clone());
-            ("vpn_connect", json!({ "tag": tag, "subscriptionRevision": self.subscription_revision }))
+            ("vpn_connect", json!({ "key": tag, "subscriptionRevision": self.subscription_revision }))
         } else {
             ("vpn_disconnect", json!({}))
         };
@@ -330,7 +339,7 @@ impl Vpn {
         self.choice += 1;
         self.busy = true;
         self.selected = Some(tag.clone());
-        act.call_within("vpn_connect", json!({ "tag": tag, "subscriptionRevision": revision }), CONNECT_WAIT, |vpn: &mut Vpn, result, act| {
+        act.call_within("vpn_connect", json!({ "key": tag, "subscriptionRevision": revision }), CONNECT_WAIT, |vpn: &mut Vpn, result, act| {
             if let Err(error) = result {
                 act.debug(format!("VPN: {error}"));
             }
@@ -353,7 +362,7 @@ impl Vpn {
             match result {
                 Ok(list) => {
                     let rows: Vec<(String, Ping)> = list.as_array().into_iter().flatten().filter_map(|r| {
-                        let tag = r["tag"].as_str()?.to_string();
+                        let tag = r["key"].as_str()?.to_string();
                         Some((tag, Ping { ok: r["ok"] == true, ms: r["latencyMs"].as_f64().filter(|m| m.is_finite()).map(|m| m.round() as u64) }))
                     }).collect();
                     let best = rows.iter().filter(|(_, p)| p.ok && p.ms.is_some()).min_by_key(|(_, p)| p.ms).map(|(tag, p)| (tag.clone(), p.ms.unwrap_or(0)));
@@ -362,10 +371,10 @@ impl Vpn {
                         // The page's `pingAllServers` takes the fastest, unless the person
                         // switched or picked a server while the check ran.
                         Some((tag, ms)) if vpn.choice == choice => {
-                            act.debug(format!("⚡ {} · {ms} мс", display_text(&tag)));
+                            act.debug(format!("⚡ {} · {ms} мс", vpn.name(&tag)));
                             vpn.connect_to(tag, revision, act);
                         }
-                        Some((tag, ms)) => act.debug(format!("⚡ {} · {ms} мс", display_text(&tag))),
+                        Some((tag, ms)) => act.debug(format!("⚡ {} · {ms} мс", vpn.name(&tag))),
                         None => act.debug("Рабочих серверов не найдено"),
                     }
                 }
@@ -411,19 +420,23 @@ impl Vpn {
         }
         let Some(servers) = &self.servers else { return ("Загрузка…".to_string(), false) };
         if servers.is_empty() {
-            if let Some(notes) = self.notes.as_ref().filter(|n| !n.is_empty()) {
-                let said = notes.refusal.clone().or_else(|| notes.comments.first().cloned()).unwrap_or_default();
-                return (display_text(&said), !self.busy);
+            if let Some((said, _)) = self.groups.iter().flat_map(Group::notes).next() {
+                return (display_text(said), !self.busy);
             }
         }
         let shown = self.selected.as_ref().filter(|s| servers.contains(s)).or(servers.first());
-        (shown.map_or_else(|| "Выберите сервер".to_string(), |s| display_text(s)), !self.busy)
+        (shown.map_or_else(|| "Выберите сервер".to_string(), |key| self.name(key)), !self.busy)
+    }
+
+    /// A server's name by its key, as the panel shows it.
+    fn name(&self, key: &str) -> String {
+        display_text(self.names.get(key).map_or(key, String::as_str))
     }
 
     /// The servers in the list's order: by the last check (answered fastest first, then
     /// failed, then unchecked), else as the subscription lists them.
-    fn ordered(&self) -> Vec<String> {
-        let mut servers = self.servers.clone().unwrap_or_default();
+    fn ordered(&self, keys: &[String]) -> Vec<String> {
+        let mut servers = keys.to_vec();
         if let Some(pings) = &self.pings {
             let rank = |tag: &String| match pings.get(tag) {
                 Some(Ping { ok: true, ms: Some(ms) }) => (0, *ms),
@@ -479,7 +492,7 @@ impl Vpn {
                     return;
                 }
                 // No servers but the provider's words: the list opens on them.
-                let only_notes = vpn.servers.as_ref().is_some_and(Vec::is_empty) && vpn.notes.as_ref().is_some_and(|n| !n.is_empty());
+                let only_notes = vpn.servers.as_ref().is_some_and(Vec::is_empty) && vpn.groups.iter().any(|g| g.notes().next().is_some());
                 if !only_notes && (vpn.failed || vpn.servers.as_ref().map_or(true, Vec::is_empty)) {
                     if revision.is_some() {
                         vpn.load_servers(act);
@@ -575,60 +588,69 @@ impl Vpn {
                 }
                 button
             });
-        let servers = self.ordered();
-        // The provider's words first: its refusal, then its announcement and placeholders,
-        // as comments nobody can pick. The page (frozen until G5) has no such rows.
+        // Each subscription in turn: a header when there are several, the provider's words
+        // (its refusal or a transport failure, its announcement and placeholders) as rows
+        // nobody can pick, then its servers by the last check. The page (frozen until G5) has
+        // no such rows.
         let note_style = body(theme, 10.4);
         let note_width = (width - 12.0 - 18.0).max(1.0);
-        let notes: Vec<(String, Color)> = self.notes.iter().flat_map(|notes| {
-            notes.refusal.iter().map(|r| (display_text(r), theme.status_error))
-                .chain(notes.comments.iter().map(|c| (display_text(c), ink.alpha(0.55))))
-                .collect::<Vec<_>>()
-        }).collect();
-        let note_heights: Vec<f32> = notes.iter().map(|(note, _)| {
-            let (_, measured) = rune::text::measure(note, &[], note_style, Some(note_width));
-            measured.min(4.0 * 12.6) + 8.0
-        }).collect();
-        let notes_h: f32 = note_heights.iter().map(|h| h + 2.0).sum();
-        let list_h = (notes_h + servers.len() as f32 * 32.0 - 2.0).clamp(0.0, 200.0);
+        let headers = self.groups.len() > 1;
         let mut list = col().w_full().gap(2.0);
-        for (index, (note, colour)) in notes.into_iter().enumerate() {
-            list = list.child(
-                // The width the text breaks at: inside the scroll it would otherwise lay out on
-                // one line and be cut at the menu's edge (seen live, session 152).
-                el().key(format!("vpn-note:{index}")).w_full().px(9.0).py(4.0)
-                    .child(text(note).font(note_style).color(colour).max_lines(4).wrap_anywhere().w(note_width)),
-            );
+        let mut list_h: f32 = -2.0;
+        let mut row_index = 0usize;
+        for (group_index, group) in self.groups.iter().enumerate() {
+            if headers {
+                list = list.child(
+                    el().key(format!("vpn-group:{group_index}")).w_full().px(9.0).pt(6.0).pb(2.0)
+                        .child(text(display_text(&group.title).to_uppercase()).font(accent(theme, 9.6).tracking(0.96)).color(ink.alpha(0.5)).single_line().truncate()),
+                );
+                list_h += 24.0 + 2.0;
+            }
+            for (note_index, (note, alarm)) in group.notes().enumerate() {
+                let note = display_text(note);
+                let (_, measured) = rune::text::measure(&note, &[], note_style, Some(note_width));
+                list_h += measured.min(4.0 * 12.6) + 8.0 + 2.0;
+                // The width the text breaks at: inside the scroll it would otherwise lay out
+                // on one line and be cut at the menu's edge (seen live, session 152).
+                list = list.child(
+                    el().key(format!("vpn-note:{group_index}:{note_index}")).w_full().px(9.0).py(4.0)
+                        .child(text(note).font(note_style).color(if alarm { theme.status_error } else { ink.alpha(0.55) }).max_lines(4).wrap_anywhere().w(note_width)),
+                );
+            }
+            for key in self.ordered(&group.keys) {
+                let selected = self.selected.as_deref() == Some(key.as_str());
+                // The page's tiers: answered under 300 ms, under 700, slower.
+                let badge = match self.pings.as_ref().and_then(|p| p.get(&key)) {
+                    Some(Ping { ok: true, ms: Some(ms) }) => {
+                        let colour = if *ms < 300 { theme.status_ok } else if *ms < 700 { theme.status_warn } else { theme.status_error };
+                        row().items_end()
+                            .child(text(ms.to_string()).font(accent(theme, 9.6)).color(colour))
+                            .child(text("мс").font(accent(theme, 8.0)).color(colour.alpha(0.55)).ml(1.0))
+                    }
+                    Some(_) => row().child(text("ошибка").font(accent(theme, 9.6)).color(theme.status_error)),
+                    None => row().w(14.0).justify_end().child(el().size(4.0, 4.0).radius(2.0).fill(theme.bg_elevated.alpha(0.2))),
+                };
+                let choose = key.clone();
+                list = list.child(
+                    row().key(format!("hit:vpn-option:{key}")).w_full().min_h(30.0).px(9.0).py(6.0).gap(8.0).radius(8.0).items_center().justify_between()
+                        .fill(if selected { theme.status_ok.alpha(0.14) } else { Color::TRANSPARENT })
+                        .hover(theme.bg_elevated.alpha(0.08))
+                        .child(text(self.name(&key)).font(body(theme, 10.4)).color(ink).single_line().truncate().grow(1.0).min_w(0.0))
+                        .child(badge)
+                        .transition(rune::Transition::offset(0.0, 6.0).combined(rune::Transition::opacity()))
+                        .enter_delay(if v.motion.reduced { 0.0 } else { row_index as f32 * 0.022 })
+                        .on_press_tx(v.on(move |vpn: &mut Vpn, act| {
+                            if vpn.menu_is_current(revision) {
+                                vpn.menu = false;
+                                vpn.connect_to(choose.clone(), revision, act);
+                            }
+                        })),
+                );
+                list_h += 30.0 + 2.0;
+                row_index += 1;
+            }
         }
-        for (index, tag) in servers.into_iter().enumerate() {
-            let selected = self.selected.as_deref() == Some(tag.as_str());
-            let badge = match self.pings.as_ref().and_then(|p| p.get(&tag)) {
-                Some(Ping { ok: true, ms: Some(ms) }) => {
-                    let colour = if *ms < 300 { theme.status_ok } else { theme.status_warn };
-                    row().items_end()
-                        .child(text(ms.to_string()).font(accent(theme, 9.6)).color(colour))
-                        .child(text("мс").font(accent(theme, 8.0)).color(colour.alpha(0.55)).ml(1.0))
-                }
-                Some(_) => row().child(text("ошибка").font(accent(theme, 9.6)).color(theme.status_error)),
-                None => row().w(14.0).justify_end().child(el().size(4.0, 4.0).radius(2.0).fill(theme.bg_elevated.alpha(0.2))),
-            };
-            let choose = tag.clone();
-            list = list.child(
-                row().key(format!("hit:vpn-option:{index}")).w_full().min_h(30.0).px(9.0).py(6.0).gap(8.0).radius(8.0).items_center().justify_between()
-                    .fill(if selected { theme.status_ok.alpha(0.14) } else { Color::TRANSPARENT })
-                    .hover(theme.bg_elevated.alpha(0.08))
-                    .child(text(display_text(&tag)).font(body(theme, 10.4)).color(ink).single_line().truncate().grow(1.0).min_w(0.0))
-                    .child(badge)
-                    .transition(rune::Transition::offset(0.0, 6.0).combined(rune::Transition::opacity()))
-                    .enter_delay(if v.motion.reduced { 0.0 } else { index as f32 * 0.022 })
-                    .on_press_tx(v.on(move |vpn: &mut Vpn, act| {
-                        if vpn.menu_is_current(revision) {
-                            vpn.menu = false;
-                            vpn.connect_to(choose.clone(), revision, act);
-                        }
-                    })),
-            );
-        }
+        let list_h = list_h.clamp(0.0, 200.0);
         // `bottom: calc(100% + 6px)`: its height is the head's 32.5, the list's and 14 of
         // padding and border.
         let height = 6.0 + 32.5 + list_h + 6.0 + 2.0;
@@ -763,30 +785,43 @@ mod tests {
 
     // Live, 2026-11-26: the provider sent placeholders only ("Лимит устройств достигнут"),
     // and the picker would have said "Выберите сервер" over an empty list.
+    /// One subscription holding servers of these keys (the name is the key).
+    fn list(keys: &[&str]) -> Value {
+        let servers: Vec<Value> = keys.iter().map(|key| json!({ "key": key, "tag": key })).collect();
+        json!({ "groups": [{ "id": "a", "host": "a.example", "title": null, "refusal": null, "comments": [], "error": null, "servers": servers }] })
+    }
+
     #[test]
     fn with_no_servers_the_picker_says_what_the_provider_said() {
         let mut vpn = Vpn { visible: true, ..Vpn::default() };
         assert!(vpn.receive_status(Ok(json!({ "subscription_revision": 4 }))));
-        vpn.receive_servers(4, Ok(json!([])));
+        vpn.receive_servers(4, Ok(list(&[])));
         assert_eq!(vpn.picker_label(), ("Выберите сервер".to_string(), true));
-        vpn.notes = Some(Notes::read(&json!({
+        vpn.receive_servers(4, Ok(json!({ "groups": [{
+            "id": "a", "host": "zestful.example", "title": null, "error": null, "servers": [],
             "comments": ["📱 Лимит устройств достигнут", " ", "🤖 Telegram: @bot"],
             "refusal": "Лимит устройств подписки исчерпан: удалите старое устройство у провайдера",
-        })));
-        assert_eq!(vpn.notes.as_ref().unwrap().comments.len(), 2, "a blank comment is dropped");
+        }] })));
+        assert_eq!(vpn.groups[0].comments.len(), 2, "a blank comment is dropped");
+        assert_eq!(vpn.groups[0].title, "zestful.example", "no title: the host heads the group");
         assert_eq!(vpn.picker_label().0, "Лимит устройств подписки исчерпан: удалите старое устройство у провайдера");
-        vpn.notes = Some(Notes::read(&json!({ "comments": ["❌ Ваше приложение не поддерживается"], "refusal": null })));
-        assert_eq!(vpn.picker_label(), ("❌ Ваше приложение не поддерживается".to_string(), true));
+        // Two subscriptions: one refuses, the other's servers are listed by name.
+        vpn.receive_servers(4, Ok(json!({ "groups": [
+            { "id": "a", "host": "a.example", "title": "A", "refusal": "нет", "comments": [], "error": null, "servers": [] },
+            { "id": "b", "host": "b.example", "title": "B", "refusal": null, "comments": [], "error": null,
+              "servers": [{ "key": "b/🇪🇪 Estonia", "tag": "🇪🇪 Estonia" }] },
+        ] })));
+        assert_eq!(vpn.picker_label(), ("🇪🇪 Estonia".to_string(), true));
         // A new subscription forgets the old provider's words.
         assert!(vpn.receive_status(Ok(json!({ "subscription_revision": 5 }))));
-        assert!(vpn.notes.is_none());
+        assert!(vpn.groups.is_empty());
     }
 
     #[test]
     fn a_changed_subscription_reloads_the_visible_picker_and_discards_old_replies() {
         let mut vpn = Vpn { visible: true, ..Vpn::default() };
         assert!(vpn.receive_status(Ok(json!({ "subscription_revision": 1 }))));
-        vpn.receive_servers(1, Ok(json!([{ "tag": "old" }])));
+        vpn.receive_servers(1, Ok(list(&["old"])));
         vpn.menu = true;
         vpn.pinging = true;
         vpn.pings = Some(HashMap::from([("old".into(), Ping { ok: true, ms: Some(20) })]));
@@ -805,7 +840,7 @@ mod tests {
         vpn.pinging = true;
         assert!(!vpn.receive_status(Ok(json!({ "subscription_revision": 1, "connected": false }))));
         assert!(vpn.connected());
-        vpn.receive_servers(1, Ok(json!([{ "tag": "old" }])));
+        vpn.receive_servers(1, Ok(list(&["old"])));
         vpn.receive_servers(1, Err("old request failed".into()));
         assert!(vpn.loading);
         assert!(vpn.servers.is_none());
@@ -813,7 +848,7 @@ mod tests {
         assert!(!vpn.finish_ping(1));
         assert!(vpn.pinging);
 
-        vpn.receive_servers(2, Ok(json!([{ "tag": "new" }])));
+        vpn.receive_servers(2, Ok(list(&["new"])));
         assert!(!vpn.loading);
         assert_eq!(vpn.selected.as_deref(), Some("new"));
         vpn.menu = true;

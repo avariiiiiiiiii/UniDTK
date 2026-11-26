@@ -1008,7 +1008,11 @@ async function renderVpn() {
   let status = null;
   try {
     [settings, status] = await Promise.all([
-      invoke("vpn_settings"),
+      // The settings contract (frozen page: the first subscription only).
+      invoke("settings_get", { module: "vpn" }).then((s) => ({
+        subscription_url: s.values.subscriptions?.value?.[0] ?? "",
+        home_server: s.values.home_server?.value ?? {},
+      })),
       invoke("vpn_status").catch(() => null),
     ]);
   } catch (err) {
@@ -1098,7 +1102,8 @@ async function renderVpn() {
   subForm.addEventListener("submit", (e) => {
     e.preventDefault();
     runOnce(subForm.querySelector('[type="submit"]'), async () => {
-      await invoke("vpn_set_subscription_url", { url: pane.querySelector("#vpnSubUrl").value.trim() });
+      const url = pane.querySelector("#vpnSubUrl").value.trim();
+      await invoke("settings_set", { module: "vpn", key: "subscriptions", value: url ? [url] : [] });
       showToast("Подписка сохранена, список серверов обновлён");
     });
   });
@@ -1116,8 +1121,10 @@ async function renderVpn() {
   const homeForm = pane.querySelector("#homeServerForm");
   const homeToggle = pane.querySelector("#homeServerToggle");
   const saveHome = async () => {
-    await invoke("vpn_set_home_server_config", {
-      config: {
+    await invoke("settings_set", {
+      module: "vpn",
+      key: "home_server",
+      value: {
         enabled: homeToggle.checked,
         host: pane.querySelector("#hsHost").value.trim(),
         port: parseInt(pane.querySelector("#hsPort").value, 10) || 443,

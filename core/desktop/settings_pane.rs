@@ -114,6 +114,7 @@ impl GenericPane {
                 pane.saving = None;
                 match result {
                     Ok(stored) => {
+                        act.changed(&key);
                         let value = stored["value"].clone();
                         pane.values.insert(key.clone(), (stored["version"].as_u64().unwrap_or(0), value.clone()));
                         match value {
@@ -276,6 +277,12 @@ pub struct Composite {
 }
 
 impl Settings for Composite {
+    fn sibling_changed(&mut self, key: &str, act: &mut Act) {
+        if let Some(live) = self.live.as_mut() {
+            live.sibling_changed(key, act);
+        }
+    }
+
     fn load(&mut self, act: &mut Act) {
         self.generic.load(act);
         if let Some(live) = self.live.as_mut() {

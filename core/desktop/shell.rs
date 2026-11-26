@@ -884,6 +884,10 @@ impl MenuHost for Host {
         self.call_within(cmd, args, crate::ws_client::REPLY_TIMEOUT, then);
     }
 
+    fn call_long(&mut self, cmd: &str, args: Value, timeout: std::time::Duration, then: Box<dyn FnOnce(&mut Self, Result<Value, String>, &mut Tx) + Send>) {
+        self.call_within(cmd, args, timeout, then);
+    }
+
     fn enter_arrange(&mut self, tx: &mut Tx) {
         self.start_arrange(tx);
     }

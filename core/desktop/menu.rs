@@ -34,6 +34,11 @@ pub trait MenuHost: Sized + 'static {
     fn apply(&mut self, ops: Vec<Value>, tx: &mut Tx);
     /// Any kernel command; `then` runs on the UI thread with the answer.
     fn call(&mut self, cmd: &str, args: Value, then: Box<dyn FnOnce(&mut Self, Result<Value, String>, &mut Tx) + Send>);
+    /// [`MenuHost::call`] for a command that runs for seconds, with its own wait.
+    fn call_long(&mut self, cmd: &str, args: Value, timeout: std::time::Duration, then: Box<dyn FnOnce(&mut Self, Result<Value, String>, &mut Tx) + Send>) {
+        let _ = timeout;
+        self.call(cmd, args, then);
+    }
     /// Enters arrange mode; the menu reopens when it ends.
     fn enter_arrange(&mut self, tx: &mut Tx);
     /// SVG markup as an image `size` points square, tinted where it says `currentColor`.
